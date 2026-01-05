@@ -312,7 +312,7 @@ def eval_ds(args):
     print_csv(df)
 
 
-def print_csv(df: Union[pd.DataFrame, List[str]]):
+def print_csv(df: Union[pd.DataFrame, List[str], List[pd.DataFrame]]):
     if isinstance(df, list):
         df = [pd.read_csv(f) for f in df]
         df = pd.concat(df)

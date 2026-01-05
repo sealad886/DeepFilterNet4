@@ -73,6 +73,78 @@ def any_device():
     return torch.device("cpu")
 
 
+@pytest.fixture(scope="session", autouse=False)
+def df_config():
+    """Initialize df.config with minimal settings for testing.
+    
+    Use this fixture for tests that need Loss class or other config-dependent code.
+    """
+    import tempfile
+    import os
+    from df.config import config
+    
+    # Create a minimal config file
+    config_content = """
+[train]
+MODEL = deepfilternet3
+BATCH_SIZE = 2
+MAX_EPOCHS = 1
+GAN_ENABLED = false
+
+[df]
+sr = 48000
+fft_size = 960
+hop_size = 480
+nb_erb = 32
+nb_df = 96
+lsnr_max = 35
+lsnr_min = -15
+min_nb_freqs = 2
+
+[MaskLoss]
+factor = 1
+
+[SpectralLoss]
+factor_magnitude = 0
+factor_complex = 0
+
+[MultiResSpecLoss]
+factor = 0
+
+[SdrLoss]
+factor = 0
+
+[LocalSnrLoss]
+factor = 0
+
+[ASRLoss]
+factor = 0
+factor_lm = 0
+
+[GANLoss]
+factor = 0
+
+[FeatureMatchingLoss]
+factor = 0
+
+[SpeakerLoss]
+factor = 0
+
+[optim]
+LR = 1e-4
+"""
+    
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.ini', delete=False) as f:
+        f.write(config_content)
+        config_path = f.name
+    
+    try:
+        config.load(config_path)
+        yield config
+    finally:
+        os.unlink(config_path)
+
+
 # Auto-skip MPS tests on non-macOS platforms
 def pytest_collection_modifyitems(config, items):
     """Automatically skip MPS-marked tests on non-MPS platforms."""

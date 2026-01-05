@@ -1,4 +1,4 @@
-from typing import Final, List
+from typing import Final, List, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -205,6 +205,219 @@ class DFreal(MultiFrameModule):
         spec_f = df_real(spec_f, coefs)
         spec[..., : self.num_freqs, :] = spec_f
         return spec
+
+
+class MultiResolutionDF(nn.Module):
+    """Apply deep filtering at multiple frequency resolutions.
+    
+    Combines deep filtering at different frequency resolutions with learnable
+    weighting to balance fine-grained high-frequency detail with robust
+    low-frequency enhancement.
+    
+    Args:
+        resolutions: List of (num_freqs, frame_size) tuples defining each resolution.
+            Each tuple specifies the number of frequency bins and the temporal
+            frame size for that resolution's DF operation.
+        lookahead: Lookahead frames for DF (typically 0 for causal processing).
+        learnable_weights: If True, resolution weights are learnable parameters.
+            If False, equal weights are used as a fixed buffer.
+        use_real: If True, use DFreal for real-valued processing. Otherwise use DF.
+    
+    Example:
+        >>> mr_df = MultiResolutionDF(
+        ...     resolutions=[(96, 5), (48, 3), (24, 2)],
+        ...     lookahead=0,
+        ... )
+        >>> spec = torch.randn(2, 1, 100, 96, 2)  # [B, C, T, F, 2]
+        >>> coefs_list = [
+        ...     torch.randn(2, 1, 100, 96, 5*2),  # For resolution (96, 5)
+        ...     torch.randn(2, 1, 100, 48, 3*2),  # For resolution (48, 3)
+        ...     torch.randn(2, 1, 100, 24, 2*2),  # For resolution (24, 2)
+        ... ]
+        >>> enhanced = mr_df(spec, coefs_list)
+    """
+    
+    def __init__(
+        self,
+        resolutions: List[Tuple[int, int]] = [(96, 5), (48, 3), (24, 2)],
+        lookahead: int = 0,
+        learnable_weights: bool = True,
+        use_real: bool = False,
+    ):
+        super().__init__()
+        
+        self.resolutions = resolutions
+        self.use_real = use_real
+        
+        # Create DF operations for each resolution
+        df_class = DFreal if use_real else DF
+        self.df_ops = nn.ModuleList([
+            df_class(num_freqs=nf, frame_size=fs, lookahead=lookahead)
+            for nf, fs in resolutions
+        ])
+        
+        # Resolution weighting
+        if learnable_weights:
+            self.resolution_weights = nn.Parameter(
+                torch.ones(len(resolutions)) / len(resolutions)
+            )
+        else:
+            self.register_buffer(
+                "resolution_weights",
+                torch.ones(len(resolutions)) / len(resolutions)
+            )
+            
+    def forward(
+        self,
+        spec: Tensor,
+        coefs_list: List[Tensor],
+    ) -> Tensor:
+        """Apply multi-resolution deep filtering.
+        
+        Args:
+            spec: Input spectrum [B, C, T, F, 2] where F is the maximum
+                frequency bin count across all resolutions.
+            coefs_list: List of coefficient tensors, one per resolution.
+                Each tensor has shape [B, O, T, F_res, 2] where O is the
+                frame_size for that resolution and F_res is num_freqs.
+                This is the format output by DfOutputReshape.
+                
+        Returns:
+            Enhanced spectrum [B, C, T, F, 2] with the same shape as input.
+        """
+        if len(coefs_list) != len(self.resolutions):
+            raise ValueError(
+                f"Expected {len(self.resolutions)} coefficient tensors, "
+                f"got {len(coefs_list)}"
+            )
+        
+        # Softmax over resolution weights for proper weighting
+        weights = F.softmax(self.resolution_weights, dim=0)
+        
+        # Store full frequency dimension
+        full_freqs = spec.shape[-2]
+        
+        outputs = []
+        for df_op, coefs, (nf, _) in zip(self.df_ops, coefs_list, self.resolutions):
+            # Extract the frequency range for this resolution
+            spec_res = spec[..., :nf, :].clone()
+            
+            # Apply DF at this resolution
+            out_res = df_op(spec_res, coefs)
+            
+            # Pad back to full frequency range if needed
+            if nf < full_freqs:
+                # For frequencies beyond this resolution, use original spec
+                padded = spec.clone()
+                padded[..., :nf, :] = out_res[..., :nf, :]
+                outputs.append(padded)
+            else:
+                outputs.append(out_res)
+                
+        # Weighted combination of all resolutions
+        result = torch.zeros_like(spec)
+        for w, out in zip(weights, outputs):
+            result = result + w * out
+            
+        return result
+    
+    def get_resolution_weights(self) -> Tensor:
+        """Return the current softmax-normalized resolution weights."""
+        return F.softmax(self.resolution_weights, dim=0)
+
+
+class AdaptiveOrderPredictor(nn.Module):
+    """Predict optimal filter order based on input characteristics.
+    
+    Uses learned embeddings to predict the optimal deep filter order for
+    each time-frequency region. During training, uses Gumbel-Softmax for
+    differentiable soft selection. During inference, uses hard selection.
+    
+    Args:
+        emb_dim: Input embedding dimension.
+        max_order: Maximum filter order (inclusive).
+        min_order: Minimum filter order (inclusive).
+        hidden_dim: Hidden layer dimension in the predictor network.
+        dropout: Dropout probability in the predictor.
+        
+    Example:
+        >>> predictor = AdaptiveOrderPredictor(emb_dim=256, max_order=7, min_order=2)
+        >>> emb = torch.randn(2, 100, 256)  # [B, T, emb_dim]
+        >>> order_weights, predicted_order = predictor(emb, temperature=1.0)
+        >>> print(order_weights.shape)  # [2, 100, 6] for orders 2-7
+        >>> print(predicted_order.shape)  # [2, 100]
+    """
+    
+    def __init__(
+        self,
+        emb_dim: int,
+        max_order: int = 7,
+        min_order: int = 2,
+        hidden_dim: int = 64,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.max_order = max_order
+        self.min_order = min_order
+        self.num_orders = max_order - min_order + 1
+        
+        if self.num_orders <= 0:
+            raise ValueError(
+                f"max_order ({max_order}) must be >= min_order ({min_order})"
+            )
+        
+        self.predictor = nn.Sequential(
+            nn.Linear(emb_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, self.num_orders),
+        )
+        
+    def forward(
+        self,
+        emb: Tensor,
+        temperature: float = 1.0,
+    ) -> Tuple[Tensor, Tensor]:
+        """Predict filter order from embeddings.
+        
+        Args:
+            emb: Input embedding [B, T, emb_dim] or [B, T, F, emb_dim].
+            temperature: Gumbel-Softmax temperature. Lower values produce
+                sharper (more one-hot-like) distributions. Only used during training.
+                
+        Returns:
+            order_weights: Soft weights over orders [B, T, num_orders] or 
+                [B, T, F, num_orders]. During training, these are Gumbel-Softmax
+                samples. During inference, these are one-hot.
+            predicted_order: The selected order as integers [B, T] or [B, T, F],
+                ranging from min_order to max_order.
+        """
+        logits = self.predictor(emb)  # [..., num_orders]
+        
+        if self.training:
+            # Gumbel-Softmax for differentiable sampling
+            order_weights = F.gumbel_softmax(logits, tau=temperature, hard=False)
+        else:
+            # Hard selection via argmax + one_hot
+            order_idx = logits.argmax(dim=-1)
+            order_weights = F.one_hot(order_idx, self.num_orders).float()
+            
+        # Convert logits argmax to actual order value
+        predicted_order = logits.argmax(dim=-1) + self.min_order
+        
+        return order_weights, predicted_order
+    
+    def get_order_distribution(self, emb: Tensor) -> Tensor:
+        """Get the probability distribution over orders (without sampling).
+        
+        Args:
+            emb: Input embedding [B, T, emb_dim].
+            
+        Returns:
+            order_probs: Probability distribution over orders [B, T, num_orders].
+        """
+        logits = self.predictor(emb)
+        return F.softmax(logits, dim=-1)
 
 
 class CRM(MultiFrameModule):
