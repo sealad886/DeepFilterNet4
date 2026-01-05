@@ -72,10 +72,10 @@ deep-filter-py = "df.enhance:run"
 poethepoet = "^0.26"
 
 [tool.poe.tasks]
-install-torch-cuda121 = "pip install torch==2.5.1+cu121 torchaudio==2.5.1+cu121 --extra-index-url https://download.pytorch.org/whl/cu121"
-install-torch-cuda124 = "pip install torch==2.5.1+cu124 torchaudio==2.5.1+cu124 --extra-index-url https://download.pytorch.org/whl/cu124"
-install-torch-cpu = "pip install torch==2.5.1+cpu torchaudio==2.5.1+cpu --extra-index-url https://download.pytorch.org/whl/cpu"
-install-torch-mps = "pip install torch==2.5.1 torchaudio==2.5.1"
+install-torch-cuda121 = "pip install torch==2.9.1+cu121 torchaudio==2.9.1+cu121 --extra-index-url https://download.pytorch.org/whl/cu121"
+install-torch-cuda124 = "pip install torch==2.9.1+cu124 torchaudio==2.9.1+cu124 --extra-index-url https://download.pytorch.org/whl/cu124"
+install-torch-cpu = "pip install torch==2.9.1+cpu torchaudio==2.9.1+cpu --extra-index-url https://download.pytorch.org/whl/cpu"
+install-torch-mps = "pip install torch==2.9.1 torchaudio==2.9.1"
 install-eval-utils = "python -m pip install -r requirements_eval.txt"
 install-dnsmos-utils = "python -m pip install -r requirements_dnsmos.txt"
 
