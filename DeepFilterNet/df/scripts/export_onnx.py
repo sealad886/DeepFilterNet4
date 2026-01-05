@@ -23,10 +23,10 @@ import torch
 from torch import Tensor, nn
 
 try:
-    import onnx
-    import onnx.checker
-    import onnx.helper
-    import onnxruntime as ort
+    import onnx     # type: ignore[import]
+    import onnx.checker # type: ignore[import]
+    import onnx.helper  # type: ignore[import]
+    import onnxruntime as ort   # type: ignore[import]
     ONNX_AVAILABLE = True
 except ImportError:
     ONNX_AVAILABLE = False
