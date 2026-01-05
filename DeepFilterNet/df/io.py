@@ -28,7 +28,7 @@ try:
     TA_RESAMPLE_KAISER = "sinc_interp_kaiser"
 except ImportError:
     try:
-        from torchaudio.backend.common import AudioMetaData
+        from torchaudio.backend.common import AudioMetaData  # type: ignore[import-unresolved]  # noqa: F401
         TA_RESAMPLE_SINC = "sinc_interpolation"
         TA_RESAMPLE_KAISER = "kaiser_window"
     except ImportError:
@@ -61,7 +61,7 @@ def get_audio_metadata(file: str) -> AudioMetaData:
         AudioMetaData with sample_rate, num_frames, num_channels, etc.
     """
     if USE_TORCHCODEC and HAS_TORCHCODEC:
-        decoder = AudioDecoder(file)
+        decoder = AudioDecoder(file)  # type: ignore[possibly-undefined]
         metadata = decoder.metadata
         return AudioMetaData(
             sample_rate=metadata.sample_rate,

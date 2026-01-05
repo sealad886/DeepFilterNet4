@@ -19,6 +19,7 @@ from tqdm import tqdm
 from df.io import load_audio, resample, save_audio
 from df.logger import init_logger, log_metrics
 from df.scripts.dnsmos import get_ort_session
+from df.scripts.hdf5_utils import load_encoded
 from df.utils import download_file, get_cache_dir
 
 SAMPLING_RATE = 16000
@@ -248,16 +249,6 @@ def eval_dir_dnsmos(args):
         csv_file = args.csv_file
         df.to_csv(csv_file)
     print_csv(df)
-
-
-def load_encoded(buffer: np.ndarray, codec: str):
-    import io
-
-    import torchaudio as ta
-
-    # In some rare cases, torch audio failes to fully decode vorbis resulting in a way shorter signal
-    wav, _ = ta.load(io.BytesIO(buffer[...].tobytes()), format=codec.lower())
-    return wav
 
 
 def eval_ds(args):

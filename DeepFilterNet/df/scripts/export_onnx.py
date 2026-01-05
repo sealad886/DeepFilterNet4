@@ -64,13 +64,13 @@ def onnx_simplify(
 ) -> str:
     """Simplify ONNX model using onnxsim."""
     try:
-        import onnxsim
+        import onnxsim  # type: ignore[possibly-undefined]
     except ImportError:
         logger.warning("onnxsim not available, skipping simplification")
         return path
     
-    model = onnx.load(path)
-    model_simp, check = onnxsim.simplify(
+    model = onnx.load(path)  # type: ignore[possibly-undefined]
+    model_simp, check = onnxsim.simplify(  # type: ignore[possibly-undefined]
         model,
         input_data=input_data,
         test_input_shapes=input_shapes,
@@ -82,12 +82,12 @@ def onnx_simplify(
         return path
     
     try:
-        onnx.checker.check_model(model_simp, full_check=True)
+        onnx.checker.check_model(model_simp, full_check=True)  # type: ignore[possibly-undefined]
     except Exception as e:
         logger.error(f"Failed to simplify model {model_n}: {e}")
         return path
     
-    onnx.save_model(model_simp, path)
+    onnx.save_model(model_simp, path)  # type: ignore[possibly-undefined]
     logger.info(f"Saved simplified model: {path}")
     return path
 
@@ -102,11 +102,11 @@ def onnx_check(
     if providers is None:
         providers = ["CPUExecutionProvider"]
     
-    model = onnx.load(path)
-    logger.debug(f"{os.path.basename(path)}: {onnx.helper.printable_graph(model.graph)}")
-    onnx.checker.check_model(model, full_check=True)
+    model = onnx.load(path)  # type: ignore[possibly-undefined]
+    logger.debug(f"{os.path.basename(path)}: {onnx.helper.printable_graph(model.graph)}")  # type: ignore[possibly-undefined]
+    onnx.checker.check_model(model, full_check=True)  # type: ignore[possibly-undefined]
     
-    sess = ort.InferenceSession(path, providers=providers)
+    sess = ort.InferenceSession(path, providers=providers)  # type: ignore[possibly-undefined]
     return sess.run(
         list(output_names),
         {k: v.numpy() for (k, v) in input_dict.items()}
@@ -221,8 +221,8 @@ def export_impl(
     
     # Print graph
     if print_graph:
-        model_onnx = onnx.load(path)
-        print(onnx.helper.printable_graph(model_onnx.graph))
+        model_onnx = onnx.load(path)  # type: ignore[possibly-undefined]
+        print(onnx.helper.printable_graph(model_onnx.graph))  # type: ignore[possibly-undefined]
     
     return outputs
 
@@ -308,6 +308,7 @@ def export_dfnet4(
             logger.error(f"Failed to export full model: {e}")
     
     # Export components
+    enc_outputs: Optional[Tuple[Tensor, ...]] = None
     if export_components:
         # Prepare encoder input (transpose feat_spec for channel-first)
         feat_spec_enc = feat_spec.transpose(1, 4).squeeze(4)  # [B, 2, T, F]
@@ -577,7 +578,7 @@ def main():
         return 1
     
     # Initialize logging
-    init_logger(log_level="DEBUG" if args.debug else "INFO", file=None)
+    init_logger(level="DEBUG" if args.debug else "INFO", file=None)
     
     # Load config
     if args.config:

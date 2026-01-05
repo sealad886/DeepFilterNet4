@@ -427,6 +427,7 @@ class BidirectionalMamba(nn.Module):
         elif self.merge == "add":
             return y_fwd + y_bwd
         elif self.merge == "proj":
+            assert self.out_proj is not None
             return self.out_proj(torch.cat([y_fwd, y_bwd], dim=-1))
         else:
             raise ValueError(f"Unknown merge mode: {self.merge}")

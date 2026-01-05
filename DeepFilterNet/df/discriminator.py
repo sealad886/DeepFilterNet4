@@ -333,7 +333,7 @@ def discriminator_loss(
         d_loss = d_loss + r_loss + f_loss
         d_real_loss = d_real_loss + r_loss
         
-    return d_loss, d_real_loss
+    return d_loss, d_real_loss  # type: ignore[return-value]
 
 
 def generator_loss(
@@ -355,7 +355,7 @@ def generator_loss(
         # LS-GAN: G wants fake->1
         g_loss = g_loss + torch.mean((1 - fake_score) ** 2)
         
-    return g_loss
+    return g_loss  # type: ignore[return-value]
 
 
 def feature_matching_loss(
@@ -379,4 +379,4 @@ def feature_matching_loss(
         for real_fmap, fake_fmap in zip(real_fmap_list, fake_fmap_list):
             fm_loss = fm_loss + torch.mean(torch.abs(real_fmap.detach() - fake_fmap))
             
-    return fm_loss
+    return fm_loss  # type: ignore[return-value]

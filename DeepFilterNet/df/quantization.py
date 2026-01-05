@@ -119,9 +119,9 @@ def get_qconfig(
     torch.backends.quantized.engine = backend
     
     if qat:
-        qconfig = get_default_qat_qconfig(backend)
+        qconfig = get_default_qat_qconfig(backend)  # type: ignore[possibly-undefined]
     else:
-        qconfig = get_default_qconfig(backend)
+        qconfig = get_default_qconfig(backend)  # type: ignore[possibly-undefined]
         
     return qconfig
 
@@ -134,9 +134,9 @@ class QuantizedModelWrapper(nn.Module):
     
     def __init__(self, model: nn.Module):
         super().__init__()
-        self.quant = QuantStub() if QUANTIZATION_AVAILABLE else nn.Identity()
+        self.quant = QuantStub() if QUANTIZATION_AVAILABLE else nn.Identity()  # type: ignore[possibly-undefined]
         self.model = model
-        self.dequant = DeQuantStub() if QUANTIZATION_AVAILABLE else nn.Identity()
+        self.dequant = DeQuantStub() if QUANTIZATION_AVAILABLE else nn.Identity()  # type: ignore[possibly-undefined]
         
     def forward(
         self,
@@ -187,7 +187,7 @@ def prepare_model_for_qat(
     
     # Use default QAT config if not specified
     if qconfig is None:
-        qconfig = get_default_qat_qconfig(backend)
+        qconfig = get_default_qat_qconfig(backend)  # type: ignore[possibly-undefined]
         
     # Set qconfig for the model
     model.qconfig = qconfig
@@ -197,7 +197,7 @@ def prepare_model_for_qat(
     
     # Prepare for QAT
     model.train()
-    prepare_qat(model, inplace=True)
+    prepare_qat(model, inplace=True)  # type: ignore[possibly-undefined]
     
     logger.info(f"Model prepared for QAT with backend={backend}")
     return model
@@ -224,7 +224,7 @@ def convert_qat_model(
         model = copy.deepcopy(model)
         
     model.eval()
-    quantized_model = convert(model, inplace=True)
+    quantized_model = convert(model, inplace=True)  # type: ignore[possibly-undefined]
     
     logger.info("Converted QAT model to quantized model")
     return quantized_model
@@ -382,7 +382,7 @@ def quantize_static(
     
     # Set backend and qconfig
     torch.backends.quantized.engine = backend
-    model.qconfig = get_default_qconfig(backend)
+    model.qconfig = get_default_qconfig(backend)  # type: ignore[possibly-undefined]
     
     # Fuse modules
     model.model = fuse_modules(model.model)

@@ -230,7 +230,7 @@ def enhance(
     model.eval()
     bs = audio.shape[0]
     if hasattr(model, "reset_h0"):
-        model.reset_h0(batch_size=bs, device=get_device(device))
+        model.reset_h0(batch_size=bs, device=get_device(device))  # type: ignore[operator]
     orig_len = audio.shape[-1]
     n_fft, hop = 0, 0
     if pad:

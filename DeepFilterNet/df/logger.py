@@ -208,7 +208,7 @@ def log_model_summary(model: torch.nn.Module, verbose=False, force=False):
             GroupedLinearEinsum: grouped_linear_flops_counter_hook,
         },
     )
-    logger.info(f"Model complexity: {params/1e6:.3f}M #Params, {macs/1e6:.1f}M MACS")
+    logger.info(f"Model complexity: {float(params)/1e6:.3f}M #Params, {float(macs)/1e6:.1f}M MACS")
 
 
 def grouped_linear_flops_counter_hook(module: GroupedLinearEinsum, input, output):

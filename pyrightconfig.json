@@ -1,0 +1,20 @@
+[tool.pyright]
+# Ignore optional dependencies that may not be installed
+reportMissingImports = "warning"
+reportOptionalMemberAccess = "warning"
+reportPossiblyUnbound = "warning"
+reportGeneralTypeIssues = "warning"
+
+# Exclude test files and generated code from strict checking
+exclude = [
+    "**/tests/**",
+    "**/__pycache__/**",
+    "**/build/**",
+    "**/dist/**",
+]
+
+# Python version
+pythonVersion = "3.11"
+
+# Type checking mode
+typeCheckingMode = "basic"

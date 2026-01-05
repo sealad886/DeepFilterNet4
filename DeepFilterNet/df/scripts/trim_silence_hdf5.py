@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
-import io
 import os
 import sys
 
 import h5py
-import numpy as np
 import torch
 import torch.nn.functional as F
-import torchaudio as ta
 from torch import Tensor
 
 from df.scripts.prepare_data import encode
+from df.scripts.hdf5_utils import load_encoded
 
 
 def windowed_energy(x: Tensor, ws: int, hop) -> Tensor:
@@ -22,12 +20,6 @@ def windowed_energy(x: Tensor, ws: int, hop) -> Tensor:
     if x.dim() > 1:
         x = x.mean(0)
     return x
-
-
-def load_encoded(buffer: np.ndarray, codec: str):
-    # In some rare cases, torch audio failes to fully decode vorbis resulting in a way shorter signal
-    wav, _ = ta.load(io.BytesIO(buffer[...].tobytes()), format=codec.lower())
-    return wav
 
 
 def trim(audio: Tensor, sr: int) -> (Tensor, bool):
