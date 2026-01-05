@@ -4,3 +4,33 @@ from .version import version
 
 __all__ = ["config", "version", "enhance", "init_df"]
 __version__ = version
+
+# Whisper adapter (optional, for ASR-based loss and evaluation)
+# Auto-selects MLX backend on Apple Silicon for 5-10x speedup
+try:
+    from df.whisper_adapter import (
+        get_whisper_backend,
+        load_whisper_model,
+        is_apple_silicon,
+        WhisperDecodingResult,
+        PyTorchWhisperBackend,
+    )
+
+    __all__.extend([
+        "get_whisper_backend",
+        "load_whisper_model",
+        "is_apple_silicon",
+        "WhisperDecodingResult",
+        "PyTorchWhisperBackend",
+    ])
+
+    # Only export MLXWhisperBackend if available on Apple Silicon
+    if is_apple_silicon():
+        try:
+            from df.whisper_adapter import MLXWhisperBackend
+
+            __all__.append("MLXWhisperBackend")
+        except ImportError:
+            pass
+except ImportError:
+    pass  # whisper not installed

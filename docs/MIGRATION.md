@@ -420,3 +420,87 @@ If you encounter issues not covered here:
    - Python/PyTorch versions
    - Error message and traceback
    - Minimal reproduction code
+
+---
+
+## Whisper Backend Abstraction
+
+### Overview
+
+The whisper integration for ASR-based loss has been refactored to support multiple backends:
+- **PyTorch backend** (openai-whisper): Works on all platforms (CUDA, CPU, MPS)
+- **MLX backend** (mlx-whisper): Optimized for Apple Silicon (M1/M2/M3/M4)
+
+This provides **5-10x speedup** on Apple Silicon for ASR-based loss computation.
+
+### Breaking Changes
+
+**None.** The `ASRLoss` class maintains full backward compatibility. Existing code will continue to work without modification.
+
+### New Features
+
+- `ASRLoss` now accepts a `backend` parameter: `"auto"`, `"pytorch"`, or `"mlx"`
+- New module `df.whisper_adapter` provides direct backend access
+- Automatic platform detection selects optimal backend
+- Performance improvement on Apple Silicon when using MLX backend
+
+### Migration Guide
+
+**No changes required** for existing code. The adapter automatically selects the best backend.
+
+To explicitly use a backend:
+
+```python
+# Before (still works)
+from df.loss import ASRLoss
+loss_fn = ASRLoss(model="base")
+
+# After (optional explicit backend)
+loss_fn = ASRLoss(model="base", backend="mlx")  # Apple Silicon
+loss_fn = ASRLoss(model="base", backend="pytorch")  # CUDA/CPU
+loss_fn = ASRLoss(model="base", backend="auto")  # Auto-detect (default)
+```
+
+### Direct Backend Access
+
+For advanced use cases, you can access the backend directly:
+
+```python
+from df.whisper_adapter import get_whisper_backend, is_apple_silicon
+
+# Check platform
+if is_apple_silicon():
+    print("Running on Apple Silicon")
+
+# Get backend with auto-detection
+backend = get_whisper_backend("base")
+print(f"Using {backend.backend_name} backend")
+
+# Extract embeddings
+mel = backend.log_mel_spectrogram(audio)
+features = backend.embed_audio(mel)
+
+# Transcribe
+result = backend.decode(mel)
+print(result.text)
+```
+
+### Dependencies
+
+| Backend | Package | Platform |
+|---------|---------|----------|
+| PyTorch | `openai-whisper>=20240930` | All |
+| MLX | `mlx>=0.0.6`, `mlx-whisper>=0.4.0` | Apple Silicon only |
+
+Install with:
+
+```bash
+# PyTorch only (all platforms)
+pip install deepfilternet[asr]
+
+# MLX support (Apple Silicon)
+pip install deepfilternet[asr-mlx]
+
+# Or install MLX manually
+pip install mlx mlx-whisper
+```

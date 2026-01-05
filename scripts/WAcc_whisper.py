@@ -2,31 +2,42 @@ import argparse
 import glob
 import os
 import string
+import sys
+from pathlib import Path
 from typing import List, Union
 
 import editdistance
 import numpy as np
 import pandas as pd
 import torch
-import whisper
 
-MODEL = None
+# Add DeepFilterNet to path for whisper_adapter import
+sys.path.insert(0, str(Path(__file__).parent.parent / "DeepFilterNet"))
+from df.whisper_adapter import get_whisper_backend
+
+BACKEND = None
 WHISPER_OPT = None
 DT = torch.float32
 
 
 def load_model():
-    global MODEL, WHISPER_OPT, DT
+    global BACKEND, WHISPER_OPT, DT
 
-    MODEL = whisper.load_model("small")
+    # Auto-selects MLX on Apple Silicon for 5-10x speedup
+    BACKEND = get_whisper_backend("small")
 
     has_cuda = torch.cuda.is_available()
-    DT = torch.float16 if has_cuda else torch.float32
-    if has_cuda:
+    # MLX uses unified memory, so fp16 is safe there too
+    use_fp16 = has_cuda or BACKEND.backend_name == "mlx"
+    DT = torch.float16 if use_fp16 else torch.float32
+
+    if has_cuda and BACKEND.backend_name == "pytorch":
         print("Running with cuda")
-        MODEL = MODEL.to("cuda")
-    WHISPER_OPT = whisper.DecodingOptions(
-        task="transcribe", language="en", beam_size=20, fp16=has_cuda
+    elif BACKEND.backend_name == "mlx":
+        print("Running with MLX (Apple Silicon optimized)")
+
+    WHISPER_OPT = BACKEND.create_decoding_options(
+        task="transcribe", language="en", beam_size=20, fp16=use_fp16
     )
 
 
@@ -52,11 +63,18 @@ def eval_wacc(args):
         if len(idx) == 0:
             print(f"WARN: file not found {fpath}")
             continue
-        audio = whisper.load_audio(fpath)
-        audio = whisper.pad_or_trim(audio)
-        mel = whisper.log_mel_spectrogram(audio).to(device=MODEL.device, dtype=DT)
+        # Use backend's load_audio and processing methods
+        audio = BACKEND.load_audio(fpath)
+        audio = BACKEND.pad_or_trim(audio)
+        mel = BACKEND.log_mel_spectrogram(audio)
+        # Convert to torch tensor with proper device/dtype for decoding
+        if BACKEND.backend_name == "pytorch":
+            mel = mel.to(device=BACKEND.device, dtype=DT)
+        else:
+            # MLX backend returns mx.array, convert to numpy for decode
+            mel = np.array(mel)
 
-        result: whisper.DecodingResult = whisper.decode(MODEL, mel, WHISPER_OPT)
+        result = BACKEND.decode(mel, WHISPER_OPT)
         target = transcriptions_df["transcription"][idx].to_list()[0]
         if "<UNKNOWN" in target or "unknown" in target:
             # target may contain <UNKNOWN\>, <UNKNOWN>, or unknown

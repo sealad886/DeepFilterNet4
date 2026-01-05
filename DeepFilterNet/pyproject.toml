@@ -45,12 +45,24 @@ librosa = { version = "^0.11.0" }
 pandas = { version = "*" }
 tqdm = { version = "*" }
 h5py = { version = "*" }
+ptflops = { version = "*" }
+# ASR dependencies (for ASRLoss and WAcc evaluation)
+openai-whisper = { version = ">=20240930", optional = true }
+# Apple Silicon MLX optimization (M1/M2/M3/M4 only)
+mlx = { version = ">=0.0.6", optional = true, markers = "sys_platform == 'darwin' and platform_machine == 'arm64'" }
+mlx-whisper = { version = ">=0.4.0", optional = true, markers = "sys_platform == 'darwin' and platform_machine == 'arm64'" }
 
 [tool.poetry.extras]
 train = ["deepfilterdataloader", "icecream"]
 eval = ["pystoi", "pesq", "scipy"]
 soundfile = ["soundfile"]
 dnsmos-local = ["onnxruntime"]
+# ASR-based loss and evaluation (requires openai-whisper)
+asr = ["openai-whisper"]
+# Apple Silicon MLX optimization for ASR
+mlx = ["mlx", "mlx-whisper"]
+# Combined ASR with MLX optimization
+asr-mlx = ["openai-whisper", "mlx", "mlx-whisper"]
 
 [tool.poetry.scripts]
 deepFilter = "df.enhance:run"
