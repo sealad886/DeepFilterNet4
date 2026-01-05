@@ -14,7 +14,7 @@ exclude = [
 ]
 
 # Python version
-pythonVersion = "3.11"
+pythonVersion = "3.12"
 
 # Type checking mode
 typeCheckingMode = "basic"
