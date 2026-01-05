@@ -126,7 +126,7 @@ class angle_re_im(Function):
         return torch.atan2(im, re)
 
     @staticmethod
-    def backward(ctx, grad: Tensor) -> Tuple[Tensor, Tensor]:
+    def backward(ctx, grad: Tensor) -> Tuple[Tensor, Tensor]:  # type: ignore[override]
         re, im = ctx.saved_tensors
         grad_inv = grad / (re.square() + im.square()).clamp_min_(1e-10)
         return -im * grad_inv, re * grad_inv
@@ -141,7 +141,7 @@ class angle(Function):
         return torch.atan2(x.imag, x.real)
 
     @staticmethod
-    def backward(ctx, grad: Tensor):
+    def backward(ctx, grad: Tensor):  # type: ignore[override]
         (x,) = ctx.saved_tensors
         grad_inv = grad / (x.real.square() + x.imag.square()).clamp_min_(1e-10)
         return torch.view_as_complex(torch.stack((-x.imag * grad_inv, x.real * grad_inv), dim=-1))

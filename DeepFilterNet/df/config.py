@@ -150,7 +150,7 @@ class Config:
             elif value in {"false", "no", "n", "off", "0"}:
                 return typing_cast(T, False)
             raise ValueError("Parse error")
-        return cast(value)
+        return cast(value)  # type: ignore[call-arg]
 
     def get(self, option: str, cast: Type[T] = str, section: Optional[str] = None) -> T:
         section = self.DEFAULT_SECTION if section is None else section
@@ -283,7 +283,7 @@ class Csv(object):
         strip -- string of non-relevant characters to be passed to str.strip after the split.
         post_process -- callable to post process all casted values. Default is `list`.
         """
-        self.cast: Type[T] = cast
+        self.cast: Type[T] = cast  # type: ignore[misc]
         self.delimiter = delimiter
         self.strip = strip
         self.post_process = post_process

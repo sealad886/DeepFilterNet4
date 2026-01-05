@@ -128,8 +128,8 @@ class MultiResSpecLoss(nn.Module):
             loss += F.mse_loss(Y_abs, S_abs) * self.f
             if self.f_complex is not None:
                 if self.gamma != 1:
-                    Y = Y_abs * torch.exp(1j * angle.apply(Y))
-                    S = S_abs * torch.exp(1j * angle.apply(S))
+                    Y = Y_abs * torch.exp(1j * angle.apply(Y))  # type: ignore[operator]
+                    S = S_abs * torch.exp(1j * angle.apply(S))  # type: ignore[operator]
                 loss += F.mse_loss(torch.view_as_real(Y), torch.view_as_real(S)) * self.f_complex[i]
         return loss
 
@@ -168,8 +168,8 @@ class SpectralLoss(nn.Module):
         loss = torch.mean(tmp) * self.f_m
         if self.f_c > 0:
             if self.gamma != 1:
-                input = input_abs * torch.exp(1j * angle.apply(input))
-                target = target_abs * torch.exp(1j * angle.apply(target))
+                input = input_abs * torch.exp(1j * angle.apply(input))  # type: ignore[operator]
+                target = target_abs * torch.exp(1j * angle.apply(target))  # type: ignore[operator]
             loss_c = (
                 F.mse_loss(torch.view_as_real(input), target=torch.view_as_real(target)) * self.f_c
             )
@@ -522,10 +522,10 @@ class ASRLoss(nn.Module):
                         tokens_t[:, : tokens_i.shape[1]].flatten(0, 1),
                     )
                     loss += ce_loss * self.factor_lm
-        return loss
+        return loss  # type: ignore[return-value]
 
     def decode_text(self, tokens: Tensor) -> List[str]:
-        tokens = [t[: torch.argwhere(t == self.eot)[0]] for t in tokens]
+        tokens = [t[: torch.argwhere(t == self.eot)[0]] for t in tokens]  # type: ignore[assignment]
         return [self.tokenizer.decode(t).strip() for t in tokens]
 
     def decode_tokens(
@@ -766,7 +766,7 @@ class SpeakerContrastiveLoss(nn.Module):
         
         # Negative: push away from noise characteristics (optional)
         if noisy is not None and self.negative_weight > 0:
-            neg_sim = F.cosine_similarity(enhanced_emb, noisy_emb, dim=-1)
+            neg_sim = F.cosine_similarity(enhanced_emb, noisy_emb, dim=-1)  # type: ignore[possibly-undefined]
             loss = loss + self.negative_weight * neg_sim.mean()
             
         return self.factor * loss
@@ -1067,11 +1067,11 @@ class Loss(nn.Module):
         if self.mrsl_f > 0 and self.mrsl is not None:
             mrsl = self.mrsl(enhanced_td, clean_td)
         if self.asrl_f > 0 or self.asrl_f_lm > 0:
-            asrl = self.asrl(enhanced_td, clean_td)
+            asrl = self.asrl(enhanced_td, clean_td)  # type: ignore[misc]
         if self.lsnr_f != 0:
-            lsnrl = self.lsnrl(input=lsnr, target_lsnr=lsnr_gt)
+            lsnrl = self.lsnrl(input=lsnr, target_lsnr=lsnr_gt)  # type: ignore[misc]
         if self.sdrl_f != 0:
-            sdrl = self.sdrl(enhanced_td, clean_td)
+            sdrl = self.sdrl(enhanced_td, clean_td)  # type: ignore[misc]
         if self.store_losses and enhanced_td is not None:
             assert clean_td is not None
             self.store_summaries(
@@ -1335,7 +1335,7 @@ def test_local_snr():
     lsnr, esp, ens = local_snr(
         torch.from_numpy(clean).unsqueeze(0), torch.from_numpy(noise).unsqueeze(0), 4, True, 8
     )
-    t = librosa.times_like(lsnr, sr, hop, fft)
+    t = librosa.times_like(lsnr, sr=sr, hop_length=hop, n_fft=fft)  # type: ignore[call-arg]
     ax[1].plot(t, lsnr.clamp_min(-20).squeeze().numpy(), label="lsnr")
     ax1_ = ax[1].twinx()
     ax1_.plot(t, esp.squeeze().numpy(), "g", label="speech")

@@ -4,6 +4,13 @@ This file tracks inline lint/type-check ignores added to the codebase and their 
 
 ## Python Type Ignores (pyright/mypy)
 
+### DeepFilterNet/df/config.py
+
+| Line | Ignore | Rationale |
+|------|--------|-----------|
+| 153 | `# type: ignore[call-arg]` | `cast` is a `Type[T]` callable - pyright can't track this dynamic type coercion pattern |
+| 286 | `# type: ignore[misc]` | Type variable in class attribute is intentional for generic `Csv` class |
+
 ### DeepFilterNet/df/discriminator.py
 
 | Line | Ignore | Rationale |
@@ -66,6 +73,58 @@ This file tracks inline lint/type-check ignores added to the codebase and their 
 | 109 | `# type: ignore[possibly-undefined]` | `ort.InferenceSession` - ort conditionally imported |
 | 224 | `# type: ignore[possibly-undefined]` | `onnx.load` in print_graph section |
 | 225 | `# type: ignore[possibly-undefined]` | `onnx.helper.printable_graph` |
+
+### DeepFilterNet/df/scripts/dnsmos.py
+
+| Line | Ignore | Rationale |
+|------|--------|-----------|
+| 156 | `# type: ignore[assignment]` | `np.pad` returns ndarray but audio was typed as Tensor - runtime coercion handles this |
+| 186 | `# type: ignore[return-value]` | Return type annotation says `List[float]` but actually returns `np.floating` scalars |
+
+### DeepFilterNet/df/evaluation_utils.py
+
+| Line | Ignore | Rationale |
+|------|--------|-----------|
+| 172 | `# type: ignore[assignment]` | Intentional `[None] * len(...)` for optional noisy files placeholder |
+| 478 | `# type: ignore[override]` | `NoisyMetric.add()` intentionally has different signature - doesn't need clean reference |
+| 498 | `# type: ignore[override]` | `NoisyMetric.compute_metric()` intentionally has different signature |
+
+### DeepFilterNet/df/loss.py
+
+| Line | Ignore | Rationale |
+|------|--------|-----------|
+| 131 | `# type: ignore[operator]` | `angle.apply()` returns Tensor at runtime - pyright can't track custom autograd Function |
+| 132 | `# type: ignore[operator]` | Same - `angle.apply()` custom autograd Function |
+| 171 | `# type: ignore[operator]` | Same - `angle.apply()` custom autograd Function |
+| 172 | `# type: ignore[operator]` | Same - `angle.apply()` custom autograd Function |
+| 525 | `# type: ignore[return-value]` | `loss` can be `0` literal initially but becomes `Tensor` at runtime |
+| 528 | `# type: ignore[assignment]` | `tokens` list comprehension changes type from `Tensor` to `List[Tensor]` |
+| 769 | `# type: ignore[possibly-undefined]` | `noisy_emb` is defined in earlier `if noisy is not None` block - control flow is correct |
+| 1070 | `# type: ignore[misc]` | `self.asrl` is `Optional` but guarded by `asrl_f > 0` check which sets it |
+| 1072 | `# type: ignore[misc]` | `self.lsnrl` is `Optional` but guarded by `lsnr_f != 0` check |
+| 1074 | `# type: ignore[misc]` | `self.sdrl` is `Optional` but guarded by `sdrl_f != 0` check |
+| 1338 | `# type: ignore[call-arg]` | librosa API changed - using keyword args for compatibility |
+
+### DeepFilterNet/df/utils.py
+
+| Line | Ignore | Rationale |
+|------|--------|-----------|
+| 129 | `# type: ignore[override]` | Custom autograd Function backward signature - pyright doesn't understand ctx pattern |
+| 144 | `# type: ignore[override]` | Same - custom autograd Function backward signature |
+
+### DeepFilterNet/df/stoi.py
+
+| Line | Ignore | Rationale |
+|------|--------|-----------|
+| 218 | `# type: ignore[operator]` | `EPS` is `np.finfo` float but torch handles addition at runtime |
+| 227 | `# type: ignore[operator]` | Same - `EPS` numpy float with torch division |
+| 228 | `# type: ignore[operator]` | Same - `EPS` numpy float with torch division |
+
+### DeepFilterNet/df/logger.py
+
+| Line | Ignore | Rationale |
+|------|--------|-----------|
+| 218 | `# type: ignore[union-attr]` | `module.weight` exists on `GroupedLinearEinsum` but pyright sees base `Module` type |
 
 ## Code Fixes (Not Ignores)
 

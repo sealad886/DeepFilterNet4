@@ -215,7 +215,7 @@ def grouped_linear_flops_counter_hook(module: GroupedLinearEinsum, input, output
     # input: ([B, T, I],)
     # output: [B, T, H]
     input = input[0]  # [B, T, I]
-    output_last_dim = module.weight.shape[-1]
+    output_last_dim = module.weight.shape[-1]  # type: ignore[union-attr]
     input = input.unflatten(-1, (module.groups, module.ws))  # [B, T, G, I/G]
     # GroupedLinear calculates "...gi,...gih->...gh"
     weight_flops = np.prod(input.shape) * output_last_dim

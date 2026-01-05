@@ -215,7 +215,7 @@ def stoi(x, y, fs_source):
             x = x.transpose(0, 1).unsqueeze(0)
             y = y.transpose(0, 1).unsqueeze(0)
         # Normalize per N-window
-        norm = torch.norm(x, dim=1, keepdim=True) / (torch.norm(y, dim=1, keepdim=True) + EPS)
+        norm = torch.norm(x, dim=1, keepdim=True) / (torch.norm(y, dim=1, keepdim=True) + EPS)  # type: ignore[operator]
         y = y * norm
         # Clip
         c = 10 ** (-Beta / 20)
@@ -224,8 +224,8 @@ def stoi(x, y, fs_source):
         y = y - y.mean(dim=1, keepdim=True)
         x = x - x.mean(dim=1, keepdim=True)
         # Divide by norm
-        x = x / (torch.norm(x, dim=1, keepdim=True) + EPS)
-        y = y / (torch.norm(y, dim=1, keepdim=True) + EPS)
+        x = x / (torch.norm(x, dim=1, keepdim=True) + EPS)  # type: ignore[operator]
+        y = y / (torch.norm(y, dim=1, keepdim=True) + EPS)  # type: ignore[operator]
         corr = x * y
         # J, M as in eq. [6]
         J = x.shape[0]

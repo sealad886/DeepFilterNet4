@@ -169,7 +169,7 @@ def evaluation_loop_dir_only(
     with pool_fn(processes=max(1, n_workers)) as pool:
         metrics: List[Metric] = [metrics_dict[m.lower()](pool=pool) for m in metrics]
         if noisy_files is None or len(noisy_files) == 0:
-            noisy_files = [None] * len(clean_files)
+            noisy_files = [None] * len(clean_files)  # type: ignore[assignment]
         assert len(enh_files) == len(clean_files)
         assert len(noisy_files) == len(clean_files)
         noisy = None
@@ -475,7 +475,7 @@ class CompositeMetric(MPMetric):
 
 
 class NoisyMetric(MPMetric):
-    def add(self, enhanced, noisy, fn: Optional[str] = None):
+    def add(self, enhanced, noisy, fn: Optional[str] = None):  # type: ignore[override]
         enhanced = self.maybe_resample(torch.as_tensor(enhanced)).squeeze(0)
         h = self.pool.apply_async(
             self.compute_metric,
@@ -495,7 +495,7 @@ class NoisyMetric(MPMetric):
             self.worker_results.append(h)
 
     @abstractmethod
-    def compute_metric(self, degraded) -> Union[float, np.ndarray]:
+    def compute_metric(self, degraded) -> Union[float, np.ndarray]:  # type: ignore[override]
         pass
 
 
