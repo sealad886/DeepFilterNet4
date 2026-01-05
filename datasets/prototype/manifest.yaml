@@ -1,0 +1,61 @@
+name: dfnet4-prototype
+purpose: quick-prototype
+license_policy:
+  allow_list: ["CC0", "CC-BY-4.0", "MIT", "BSD-3-Clause", "Apache-2.0"]
+  deny_list: ["CC-BY-NC", "CC-Sampling+", "unknown"]
+  notes: "Only include clips with permissive licenses; exclude CC-BY-NC and CC Sampling+."
+
+target:
+  sample_rate_hz: 48000
+  channels: [1]
+
+mix_strategy:
+  snr_db_range: [-5, 20]
+  music_probability: 0.25
+  far_field_probability: 0.35
+  speakerphone_sim_probability: 0.20
+  notes:
+    - "Use single-stream music (no layered music)."
+    - "Apply RIRs to both speech and noise for far-field simulation."
+
+sources:
+  speech_clean:
+    - name: VCTK 0.92
+      license: CC-BY-4.0
+      role: clean_speech
+      notes:
+        - "48 kHz downsampled release; good for quick prototyping."
+
+  noise_music:
+    - name: MUSAN
+      license: CC-BY-4.0
+      role: noise_and_music
+      notes:
+        - "Use noise + music subsets; resample to 48 kHz."
+
+    - name: FSD50K (filtered)
+      license: CC0/CC-BY only
+      role: outdoor_industrial_animals
+      notes:
+        - "Filter to CC0/CC-BY clips only."
+        - "Use for outdoor, animals, vehicles, industrial sounds."
+
+  rir:
+    - name: AIR (Aachen Impulse Response Database)
+      license: MIT
+      role: far_field_and_speakerphone
+      notes:
+        - "Includes mobile phone RIRs."
+
+    - name: OpenAIR
+      license: CC-BY-4.0
+      role: room_ir
+      notes:
+        - "Contains real room impulse responses."
+
+outputs:
+  hdf5:
+    - speech_clean.hdf5
+    - noise_music.hdf5
+    - rir.hdf5
+  dataset_cfg: dataset.cfg

@@ -1,0 +1,72 @@
+name: dfnet4-production
+purpose: scaled-training
+license_policy:
+  allow_list: ["CC0", "CC-BY-4.0", "MIT", "BSD-3-Clause", "Apache-2.0"]
+  deny_list: ["CC-BY-NC", "CC-Sampling+", "unknown"]
+  notes: "Only include clips with permissive licenses; exclude CC-BY-NC and CC Sampling+."
+
+target:
+  sample_rate_hz: 48000
+  channels: [1]
+
+mix_strategy:
+  snr_db_range: [-10, 25]
+  music_probability: 0.35
+  far_field_probability: 0.50
+  speakerphone_sim_probability: 0.30
+  notes:
+    - "Use single-stream music (no layered music)."
+    - "Apply RIRs to both speech and noise for far-field simulation."
+
+sources:
+  speech_clean:
+    - name: VCTK 0.92
+      license: CC-BY-4.0
+      role: clean_speech
+      notes:
+        - "48 kHz downsampled release."
+
+    - name: LibriSpeech
+      license: CC-BY-4.0
+      role: clean_speech
+      notes:
+        - "Resample from 16 kHz to 48 kHz."
+
+  noise_music:
+    - name: MUSAN
+      license: CC-BY-4.0
+      role: noise_and_music
+      notes:
+        - "Use noise + music subsets; resample to 48 kHz."
+
+    - name: FSD50K (filtered)
+      license: CC0/CC-BY only
+      role: outdoor_industrial_animals
+      notes:
+        - "Filter to CC0/CC-BY clips only."
+
+  rir:
+    - name: AIR (Aachen Impulse Response Database)
+      license: MIT
+      role: far_field_and_speakerphone
+      notes:
+        - "Includes mobile phone RIRs."
+
+    - name: OpenAIR
+      license: CC-BY-4.0
+      role: room_ir
+      notes:
+        - "Contains real room impulse responses."
+
+    - name: AcousticRooms (optional)
+      license: CC-BY-4.0
+      role: synthetic_rir_scale
+      notes:
+        - "Synthetic RIRs; resample to 48 kHz."
+
+outputs:
+  hdf5:
+    - speech_clean.hdf5
+    - noise_music.hdf5
+    - rir.hdf5
+  dataset_cfg: dataset.cfg
