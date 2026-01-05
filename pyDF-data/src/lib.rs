@@ -15,7 +15,7 @@ use pyo3::exceptions::{PyRuntimeError, PyStopIteration, PyValueError};
 use pyo3::prelude::*;
 
 #[pymodule]
-fn libdfdata(_py: Python, m: &PyModule) -> PyResult<()> {
+fn libdfdata(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<_FdDataLoader>()?;
     Ok(())
 }
@@ -57,16 +57,16 @@ struct _FdDataLoader {
 // }
 
 type FdBatch<'py> = (
-    &'py PyArray4<Complex32>, // speech
-    &'py PyArray4<Complex32>, // noisy
-    &'py PyArray4<f32>,       // feat_erb
-    &'py PyArray4<Complex32>, // feat_spec
-    &'py PyArray1<usize>,     // lengths
-    &'py PyArray1<usize>,     // max_freq
-    &'py PyArray1<i8>,        // snr
-    &'py PyArray1<i8>,        // gain
-    &'py PyArray1<f32>,       // Timings until each sample and the overall batch was ready
-    &'py PyArray1<usize>,     // clean ids
+    Bound<'py, PyArray4<Complex32>>, // speech
+    Bound<'py, PyArray4<Complex32>>, // noisy
+    Bound<'py, PyArray4<f32>>,       // feat_erb
+    Bound<'py, PyArray4<Complex32>>, // feat_spec
+    Bound<'py, PyArray1<usize>>,     // lengths
+    Bound<'py, PyArray1<usize>>,     // max_freq
+    Bound<'py, PyArray1<i8>>,        // snr
+    Bound<'py, PyArray1<i8>>,        // gain
+    Bound<'py, PyArray1<f32>>,       // Timings until each sample and the overall batch was ready
+    Bound<'py, PyArray1<usize>>,     // clean ids
 );
 
 #[pymethods]
@@ -233,16 +233,16 @@ impl _FdDataLoader {
                 let erb = batch.feat_erb.unwrap_or_else(|| ArrayD::zeros(vec![1, 1, 1, 1]));
                 let spec = batch.feat_spec.unwrap_or_else(|| ArrayD::zeros(vec![1, 1, 1, 1]));
                 Ok((
-                    batch.speech.into_dimensionality().to_py_err()?.into_pyarray(py),
-                    batch.noisy.into_dimensionality().to_py_err()?.into_pyarray(py),
-                    erb.into_dimensionality().to_py_err()?.into_pyarray(py),
-                    spec.into_dimensionality().to_py_err()?.into_pyarray(py),
-                    batch.lengths.into_pyarray(py),
-                    batch.max_freq.into_pyarray(py),
-                    batch.snr.into_pyarray(py),
-                    batch.gain.into_pyarray(py),
-                    push_ret(batch.timings, (Instant::now() - t0).as_secs_f32()).into_pyarray(py),
-                    batch.ids.into_pyarray(py),
+                    batch.speech.into_dimensionality().to_py_err()?.into_pyarray_bound(py),
+                    batch.noisy.into_dimensionality().to_py_err()?.into_pyarray_bound(py),
+                    erb.into_dimensionality().to_py_err()?.into_pyarray_bound(py),
+                    spec.into_dimensionality().to_py_err()?.into_pyarray_bound(py),
+                    batch.lengths.into_pyarray_bound(py),
+                    batch.max_freq.into_pyarray_bound(py),
+                    batch.snr.into_pyarray_bound(py),
+                    batch.gain.into_pyarray_bound(py),
+                    push_ret(batch.timings, (Instant::now() - t0).as_secs_f32()).into_pyarray_bound(py),
+                    batch.ids.into_pyarray_bound(py),
                 ))
             }
             None => {

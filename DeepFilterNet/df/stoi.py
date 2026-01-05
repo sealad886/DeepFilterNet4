@@ -8,6 +8,10 @@ from torch.nn import functional as F
 
 from df.io import resample
 
+# MPS Note: All torch.norm calls in this module operate on real tensors
+# (after power spectrum computation). For complex tensor norm on MPS,
+# use df.utils.mps_safe_norm which handles CPU fallback.
+
 EPS = np.finfo("float").eps
 
 

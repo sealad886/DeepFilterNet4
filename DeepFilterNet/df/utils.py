@@ -1,6 +1,7 @@
 import collections
 import math
 import os
+import platform
 import random
 import subprocess
 from socket import gethostname
@@ -17,16 +18,87 @@ from df.config import config
 from df.model import ModelParams
 
 
-def get_device():
-    s = config("DEVICE", default="", section="train")
-    if s == "":
-        if torch.cuda.is_available():
-            DEVICE = torch.device("cuda:0")
-        else:
-            DEVICE = torch.device("cpu")
+def get_macos_version() -> Optional[Tuple[int, int]]:
+    """Get macOS version as (major, minor) tuple, or None if not macOS."""
+    if platform.system() != "Darwin":
+        return None
+    try:
+        version = platform.mac_ver()[0]
+        parts = version.split(".")
+        return (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
+    except (ValueError, IndexError):
+        return None
+
+
+def mps_supports_complex() -> bool:
+    """Check if MPS backend supports complex tensor operations.
+    
+    Complex operations require macOS 14 (Sonoma) or later.
+    Returns True if on macOS 14+ or if not using MPS.
+    """
+    if not (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
+        return True  # Not using MPS, so no restriction
+    macos_version = get_macos_version()
+    if macos_version is None:
+        return True  # Not macOS, shouldn't happen if MPS available
+    return macos_version[0] >= 14
+
+
+def get_device(device: Optional[str] = None):
+    """Get the compute device for model inference.
+    
+    Args:
+        device: Optional device specification. Can be 'cpu', 'cuda', 'cuda:0', 'mps', 
+                or None/empty for auto-detection.
+    
+    Returns:
+        torch.device: The selected compute device.
+    
+    Note:
+        MPS backend requires macOS 14+ for complex tensor operations.
+        On older macOS, set PYTORCH_ENABLE_MPS_FALLBACK=1 to fall back
+        to CPU for unsupported operations (slower but compatible).
+    """
+    if device is not None and device != "" and device.lower() != "auto":
+        return torch.device(device)
+    
+    try:
+        s = config("DEVICE", default="", section="train")
+        if s != "":
+            return torch.device(s)
+    except ValueError:
+        pass
+    
+    if torch.cuda.is_available():
+        return torch.device("cuda:0")
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        if not mps_supports_complex():
+            logger.warning(
+                "MPS backend detected on macOS < 14. Complex tensor operations may fail. "
+                "Consider using --device cpu or set PYTORCH_ENABLE_MPS_FALLBACK=1"
+            )
+        return torch.device("mps")
     else:
-        DEVICE = torch.device(s)
-    return DEVICE
+        return torch.device("cpu")
+
+
+def mps_safe_norm(x: Tensor, dim: int = -1, keepdim: bool = False) -> Tensor:
+    """Compute tensor norm with MPS fallback for complex tensors.
+    
+    On MPS backend, torch.norm on complex tensors is not supported (issue #146691).
+    This function moves complex tensors to CPU for norm computation, then back to MPS.
+    
+    Args:
+        x: Input tensor (real or complex)
+        dim: Dimension along which to compute norm
+        keepdim: Whether to keep the reduced dimension
+    
+    Returns:
+        Tensor containing the norm values
+    """
+    if x.is_complex() and x.device.type == "mps":
+        return torch.norm(x.cpu(), dim=dim, keepdim=keepdim).to(x.device)
+    return torch.norm(x, dim=dim, keepdim=keepdim)
 
 
 def as_complex(x: Tensor):

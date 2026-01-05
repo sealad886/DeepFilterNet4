@@ -1,6 +1,107 @@
 # DeepFilterNet
 A Low Complexity Speech Enhancement Framework for Full-Band Audio (48kHz) using on Deep Filtering.
 
+## Fork Notice
+
+This is a modernized fork of [DeepFilterNet](https://github.com/Rikorose/DeepFilterNet) with the following improvements:
+
+- **Python 3.9–3.13 support** — Updated PyO3 bindings for latest Python versions
+- **TorchAudio 2.9 support** — TorchCodec integration for deprecated `torchaudio.info()` API
+- **PyTorch 2.5+ compatibility** — Fixed `weights_only` deprecation warnings
+- **Apple Silicon MPS support** — Automatic Metal Performance Shaders detection
+- **Device selection CLI** — New `--device` argument for explicit compute device control
+- **CUDA tensor handling fix** — Proper `.detach().cpu()` before `.numpy()` conversion
+
+### Version Compatibility
+
+| Component | Minimum | Recommended | Maximum |
+|-----------|---------|-------------|---------|
+| Python | 3.9 | 3.11+ | 3.13 |
+| PyTorch | 2.5 | 2.5+ | <3.0 |
+| TorchAudio | 2.5 | 2.5+ | <3.0 |
+| TorchCodec | 0.1 | Latest | (for TorchAudio 2.9+) |
+
+### TorchAudio 2.9+ Users
+
+TorchAudio 2.9 removed the `torchaudio.info()` API. This fork automatically uses TorchCodec as a fallback when available:
+
+```bash
+# Install TorchCodec for TorchAudio 2.9+
+pip install torchcodec
+```
+
+TorchCodec requires FFmpeg libraries:
+
+```bash
+# Ubuntu/Debian
+sudo apt install ffmpeg libavcodec-dev libavformat-dev
+
+# macOS (Homebrew)
+brew install ffmpeg
+```
+
+### Apple Silicon (MPS) Support
+
+DeepFilterNet supports Apple Silicon GPUs via PyTorch's MPS backend for accelerated inference.
+
+**Requirements:**
+- macOS 14 (Sonoma) or later for full support
+- PyTorch 2.5.1+ with MPS enabled
+- Apple Silicon Mac (M1/M2/M3/M4)
+
+**Usage:**
+```bash
+# Explicit MPS device
+deep-filter --device mps input.wav
+
+# Auto-detection (uses MPS if available)
+deep-filter input.wav
+
+# Python API
+from df import enhance, init_df
+model, df_state, _ = init_df(device="mps")
+enhanced = enhance(model, df_state, noisy_audio)
+```
+
+**Note:** Complex tensor operations require macOS 14+. On older versions, set:
+```bash
+export PYTORCH_ENABLE_MPS_FALLBACK=1
+```
+
+#### MPS Operation Compatibility
+
+| Operation | macOS 12-13 | macOS 14+ |
+|-----------|-------------|-----------|
+| Model inference | ✅ (real mode) | ✅ |
+| Complex filtering | ❌ | ✅ |
+| STOI evaluation | ✅ | ✅ |
+| Training | ⚠️ Limited | ✅ |
+
+#### Performance Expectations
+
+- **Batch processing:** Significant speedup over CPU (2-4x typical)
+- **Real-time streaming:** Marginal improvement due to CPU↔MPS transfer overhead
+
+The STFT/ISTFT operations run on CPU (libDF/Rust) for optimal real-time latency.
+GPU acceleration benefits the neural network inference portion.
+
+#### MPS Troubleshooting
+
+**"ComplexFloat not supported" error:**
+- Requires macOS 14+, or use `--device cpu`
+- Or set `PYTORCH_ENABLE_MPS_FALLBACK=1`
+
+**Slower than expected:**
+- Real-time streaming has CPU↔GPU overhead
+- Batch processing benefits most from MPS
+
+**"MPS backend not available":**
+- Ensure PyTorch installed with MPS support
+- Requires Apple Silicon Mac (M1/M2/M3/M4)
+- Check with: `python -c "import torch; print(torch.backends.mps.is_available())"`
+
+---
+
 ![deepfilternet3](https://user-images.githubusercontent.com/16517898/225623209-a54fea75-ca00-404c-a394-c91d2d1146d2.svg)
 
 For PipeWire integration as a virtual noise suppression microphone look [here](https://github.com/Rikorose/DeepFilterNet/blob/main/ladspa/README.md).

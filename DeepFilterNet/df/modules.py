@@ -10,9 +10,11 @@ from torch.nn import init
 from torch.nn.parameter import Parameter
 from typing_extensions import Final
 
+from df.config import config
 from df.model import ModelParams
-from df.utils import as_complex, as_real, get_device, get_norm_alpha
+from df.utils import as_complex, as_real, get_device, get_norm_alpha, mps_supports_complex
 from libdf import unit_norm_init
+from loguru import logger
 
 
 class Conv2dNormAct(nn.Sequential):
@@ -323,6 +325,26 @@ class DfOp(nn.Module):
         self.df_bins = df_bins
         self.df_lookahead = df_lookahead
         self.freq_bins = freq_bins
+        
+        # Check for config override (handle case when no config is loaded)
+        try:
+            use_complex_override = config(
+                "DF_USE_COMPLEX", cast=bool, section="df", default=None, save=False
+            )
+        except ValueError:
+            use_complex_override = None
+        
+        if use_complex_override is not None:
+            if use_complex_override:
+                method = "complex_strided"
+            else:
+                method = "real_unfold"
+            logger.info(f"Forward method overridden via config: use_complex={use_complex_override}")
+        elif method == "complex_strided" and not mps_supports_complex():
+            # Auto-select real-valued forward for MPS compatibility on macOS < 14
+            method = "real_unfold"
+            logger.info("Using real-valued forward method for MPS compatibility")
+        
         self.set_forward(method)
 
     def set_forward(self, method: str):

@@ -2,7 +2,7 @@ import os
 import string
 from configparser import ConfigParser
 from shlex import shlex
-from typing import Any, List, Optional, Tuple, Type, TypeVar, Union
+from typing import Any, List, Optional, Tuple, Type, TypeVar, Union, cast as typing_cast
 
 from loguru import logger
 
@@ -140,14 +140,14 @@ class Config:
                 self.set(option, value, cast, section)
         return self.cast(value, cast)
 
-    def cast(self, value, cast):
+    def cast(self, value: Any, cast: Type[T]) -> T:
         # Do the casting to get the correct type
         if cast is bool:
             value = str(value).lower()
             if value in {"true", "yes", "y", "on", "1"}:
-                return True  # type: ignore
+                return typing_cast(T, True)
             elif value in {"false", "no", "n", "off", "0"}:
-                return False  # type: ignore
+                return typing_cast(T, False)
             raise ValueError("Parse error")
         return cast(value)
 
