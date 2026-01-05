@@ -272,6 +272,58 @@ for a config file.
 python df/train.py path/to/dataset.cfg path/to/data_dir/ path/to/base_dir/
 ```
 
+## Contributing
+
+Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines on how to contribute to this project.
+
+### Code Quality and Security Checks
+
+This repository uses automated checks to maintain code quality and security:
+
+#### Required Checks (must pass for PRs)
+- **Python Linting**: Code must pass `black`, `isort`, and `flake8` checks
+- **Rust Linting**: Code must pass `rustfmt` and `clippy` checks  
+- **CodeQL Security Scan**: Automated security vulnerability detection for Python and Rust
+- **Dependency Review**: Checks for vulnerable or incompatible dependencies in PRs
+
+#### Automated Tools
+- **Dependabot**: Automatically creates PRs for dependency updates
+- **Stale Issue Management**: Helps keep issue tracker organized
+
+#### Running Checks Locally
+
+**Python:**
+```bash
+# Format code
+black .
+isort .
+
+# Check linting
+flake8
+```
+
+**Rust:**
+```bash
+# Format code
+cargo fmt
+
+# Check linting
+cargo clippy --all-features -- -D warnings
+
+# Run tests
+cargo test --all-features
+```
+
+### Issue Templates
+
+When reporting bugs or requesting features, please use the provided templates:
+- [Bug Report](.github/ISSUE_TEMPLATE/bug_report.yml)
+- [Feature Request](.github/ISSUE_TEMPLATE/feature_request.yml)
+
+### Security
+
+For security vulnerabilities, please see our [Security Policy](SECURITY.md) and report issues privately through GitHub Security Advisories.
+
 ## Citation Guide
 
 To reproduce any metrics, we recomend to use the python implementation via `pip install deepfilternet`.

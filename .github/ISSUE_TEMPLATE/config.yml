@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Question or Discussion
+    url: https://github.com/Rikorose/DeepFilterNet/discussions
+    about: Please ask questions and have discussions in GitHub Discussions
+  - name: Security Vulnerability
+    url: https://github.com/Rikorose/DeepFilterNet/security/advisories/new
+    about: Please report security vulnerabilities privately

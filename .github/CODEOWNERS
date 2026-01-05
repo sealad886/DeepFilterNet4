@@ -1,0 +1,38 @@
+# CODEOWNERS file for DeepFilterNet
+# 
+# This file defines code owners for different parts of the repository.
+# Code owners are automatically requested for review when someone opens a pull request that modifies code that they own.
+#
+# More info: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default owner for everything in the repo
+# This is a placeholder - update with actual maintainer GitHub username(s)
+# * @Rikorose
+
+# GitHub workflows and CI/CD
+/.github/ @Rikorose
+
+# Rust components
+/libDF/ @Rikorose
+/pyDF/ @Rikorose
+/pyDF-data/ @Rikorose
+/ladspa/ @Rikorose
+/demo/ @Rikorose
+*.rs @Rikorose
+Cargo.toml @Rikorose
+Cargo.lock @Rikorose
+
+# Python components
+/DeepFilterNet/ @Rikorose
+*.py @Rikorose
+pyproject.toml @Rikorose
+poetry.lock @Rikorose
+
+# Documentation
+*.md @Rikorose
+/docs/ @Rikorose
+
+# Configuration files
+.flake8 @Rikorose
+rustfmt.toml @Rikorose
+clippy.toml @Rikorose
