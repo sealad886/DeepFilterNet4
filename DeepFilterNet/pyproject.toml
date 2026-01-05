@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "DeepFilterNet"
-version = "0.5.7-pre"
+version = "0.6.0"
 description = "Noise supression using deep filtering"
 authors = ["Hendrik Schröter"]
 repository = "https://github.com/Rikorose/DeepFilterNet"
