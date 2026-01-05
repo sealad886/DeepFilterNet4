@@ -25,7 +25,7 @@ include = [
 [tool.poetry.dependencies]
 deepfilterlib = { path = "../pyDF/" }
 deepfilterdataloader = { path = "../pyDF-data/", optional = true }
-python = ">=3.9,<4.0"
+python = ">=3.10,<3.15"
 numpy = ">=1.22,<2.0"
 loguru = ">=0.5"
 appdirs = "^1.4"
@@ -68,7 +68,7 @@ asr-mlx = ["openai-whisper", "mlx", "mlx-whisper"]
 deepFilter = "df.enhance:run"
 deep-filter-py = "df.enhance:run"
 
-[tool.poetry.dev-dependencies]
+[tool.poetry.group.dev.dependencies]
 poethepoet = "^0.26"
 
 [tool.poe.tasks]

@@ -1,0 +1,33 @@
+# Repository Guidelines
+
+## Project Structure & Module Organization
+- `DeepFilterNet/` is the main Python package (training, inference, configs, scripts). Core code lives in `DeepFilterNet/df/`.
+- `DeepFilterNet/tests/` contains Python tests (pytest).
+- `libDF/` and `ladspa/` host Rust crates for DSP/runtime and the LADSPA plugin.
+- `models/` stores packaged pretrained model archives.
+- `docs/`, `assets/`, and `demo/` contain documentation, media, and the demo app.
+- `pyDF/` and `pyDF-data/` provide Python bindings and data loading utilities.
+
+## Build, Test, and Development Commands
+- `poetry -C DeepFilterNet install` — install Python deps for the DeepFilterNet package.
+- `poetry -C DeepFilterNet lock --regenerate` — refresh `DeepFilterNet/poetry.lock`.
+- `python -m pytest` (run inside `DeepFilterNet/`) — execute Python tests in `DeepFilterNet/tests/`.
+- `python df/train.py --model-type dfnet4 ...` (run inside `DeepFilterNet/`) — train DFNet4 models.
+- `cargo build` / `cargo test` — build and test Rust crates from repo root.
+- `cargo +nightly run -p df-demo --features ui --bin df-demo --release` — run the UI demo (Linux).
+
+## Coding Style & Naming Conventions
+- Python is formatted with Black (`line-length = 100`) and imports organized with isort (see `pyproject.toml`).
+- Use `snake_case` for functions/variables, `PascalCase` for classes, and keep module names lowercase.
+- Rust formatting follows `rustfmt.toml`; prefer `cargo fmt` before commits.
+- Type checking uses Pyright (`pyrightconfig.json`).
+
+## Testing Guidelines
+- Primary framework: pytest (`DeepFilterNet/tests/`).
+- Name new tests `test_*.py` and place in the closest relevant module folder.
+- Use the `mps` marker for Apple Silicon–specific tests (see `DeepFilterNet/pyproject.toml`).
+
+## Commit & Pull Request Guidelines
+- Commit messages follow a Conventional Commits style (e.g., `feat(whisper): ...`, `chore(lint): ...`).
+- PRs should include a concise summary, tests run (or why not), and any model/data changes.
+- If a change affects checkpoints or configs, mention the expected model directory layout (`config.ini` + `checkpoints/`).
