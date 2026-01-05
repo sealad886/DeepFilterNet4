@@ -3,16 +3,8 @@ import shutil
 import tarfile
 from copy import deepcopy
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple, Union
-
 import numpy as np
-import onnx
-import onnx.checker
-import onnx.helper
-import onnxruntime as ort
 import torch
-from loguru import logger
-from torch import Tensor
 
 from df.enhance import (
     ModelParams,
@@ -23,110 +15,8 @@ from df.enhance import (
     setup_df_argument_parser,
 )
 from df.io import get_test_sample, save_audio
+from df.scripts.export_onnx import export_impl
 from libdf import DF
-
-
-def shapes_dict(
-    tensors: Tuple[Tensor], names: Union[Tuple[str], List[str]]
-) -> Dict[str, Tuple[int]]:
-    if len(tensors) != len(names):
-        logger.warning(
-            f"  Number of tensors ({len(tensors)}) does not match provided names: {names}"
-        )
-    return {k: v.shape for (k, v) in zip(names, tensors)}
-
-
-def onnx_simplify(
-    path: str, input_data: Dict[str, Tensor], input_shapes: Dict[str, Iterable[int]]
-) -> str:
-    import onnxsim
-
-    model = onnx.load(path)
-    model_simp, check = onnxsim.simplify(
-        model,
-        input_data=input_data,
-        test_input_shapes=input_shapes,
-    )
-    model_n = os.path.splitext(os.path.basename(path))[0]
-    assert check, "Simplified ONNX model could not be validated"
-    logger.debug(model_n + ": " + onnx.helper.printable_graph(model.graph))
-    try:
-        onnx.checker.check_model(model_simp, full_check=True)
-    except Exception as e:
-        logger.error(f"Failed to simplify model {model_n}. Skipping: {e}")
-        return path
-    # new_path = os.path.join(os.path.dirname(path), model_n + "_simplified.onnx")
-    onnx.save_model(model_simp, path)
-    return path
-
-
-def onnx_check(path: str, input_dict: Dict[str, Tensor], output_names: Tuple[str]):
-    model = onnx.load(path)
-    logger.debug(os.path.basename(path) + ": " + onnx.helper.printable_graph(model.graph))
-    onnx.checker.check_model(model, full_check=True)
-    sess = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
-    return sess.run(output_names, {k: v.numpy() for (k, v) in input_dict.items()})
-
-
-def export_impl(
-    path: str,
-    model: torch.nn.Module,
-    inputs: Tuple[Tensor, ...],
-    input_names: List[str],
-    output_names: List[str],
-    dynamic_axes: Dict[str, Dict[int, str]],
-    jit: bool = True,
-    opset_version=14,
-    check: bool = True,
-    simplify: bool = True,
-    print_graph: bool = False,
-):
-    export_dir = os.path.dirname(path)
-    if not os.path.isdir(export_dir):
-        logger.info(f"Creating export directory: {export_dir}")
-        os.makedirs(export_dir)
-    model_name = os.path.splitext(os.path.basename(path))[0]
-    logger.info(f"Exporting model '{model_name}' to {export_dir}")
-
-    input_shapes = shapes_dict(inputs, input_names)
-    logger.info(f"  Input shapes: {input_shapes}")
-
-    outputs = model(*inputs)
-    output_shapes = shapes_dict(outputs, output_names)
-    logger.info(f"  Output shapes: {output_shapes}")
-
-    if jit:
-        model = torch.jit.script(model, example_inputs=[tuple(a for a in inputs)])
-
-    logger.info(f"  Dynamic axis: {dynamic_axes}")
-    torch.onnx.export(
-        model=deepcopy(model),
-        f=path,
-        args=inputs,
-        input_names=input_names,
-        dynamic_axes=dynamic_axes,
-        output_names=output_names,
-        opset_version=opset_version,
-        keep_initializers_as_inputs=False,
-    )
-
-    input_dict = {k: v for (k, v) in zip(input_names, inputs)}
-    if check:
-        onnx_outputs = onnx_check(path, input_dict, tuple(output_names))
-        for name, out, onnx_out in zip(output_names, outputs, onnx_outputs):
-            try:
-                np.testing.assert_allclose(
-                    out.numpy().squeeze(), onnx_out.squeeze(), rtol=1e-6, atol=1e-5
-                )
-            except AssertionError as e:
-                logger.warning(f"  Elements not close for {name}: {e}")
-    if simplify:
-        path = onnx_simplify(path, input_dict, shapes_dict(inputs, input_names))
-        logger.info(f"  Saved simplified model {path}")
-    if print_graph:
-        onnx.helper.printable_graph(onnx.load_model(path).graph)
-
-    return outputs
 
 
 @torch.no_grad()
@@ -172,6 +62,8 @@ def export(
             simplify=simplify,
             opset_version=opset,
             print_graph=print_graph,
+            rtol=1e-6,
+            atol=1e-5,
         )
 
     # Export encoder
@@ -203,6 +95,8 @@ def export(
         simplify=simplify,
         opset_version=opset,
         print_graph=print_graph,
+        rtol=1e-6,
+        atol=1e-5,
     )
     np.savez_compressed(
         os.path.join(export_dir, "enc_input.npz"),
@@ -253,8 +147,10 @@ def export(
         simplify=simplify,
         opset_version=opset,
         print_graph=print_graph,
+        rtol=1e-6,
+        atol=1e-5,
     )
-    np.savez_compressed(os.path.join(export_dir, "erb_dec_output.npz"), m=m.numpy())
+    np.savez_compressed(os.path.join(export_dir, "erb_dec_output.npz"), m=m[0].numpy())
 
     # Export df decoder
     np.savez_compressed(
@@ -281,8 +177,10 @@ def export(
         simplify=simplify,
         opset_version=opset,
         print_graph=print_graph,
+        rtol=1e-6,
+        atol=1e-5,
     )
-    np.savez_compressed(os.path.join(export_dir, "df_dec_output.npz"), coefs=coefs.numpy())
+    np.savez_compressed(os.path.join(export_dir, "df_dec_output.npz"), coefs=coefs[0].numpy())
 
 
 def main(args):

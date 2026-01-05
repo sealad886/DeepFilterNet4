@@ -153,7 +153,7 @@ def dnsmos_local(
     session_bak_ovr = get_ort_session(bak_ovr)
 
     if len(audio) < INPUT_LENGTH * SR:
-        audio = np.pad(audio, (0, int(INPUT_LENGTH * SR - len(audio))), mode="wrap")
+        audio = np.pad(audio, (0, int(INPUT_LENGTH * SR - len(audio))), mode="wrap")  # type: ignore[assignment]
     num_hops = int(np.floor(len(audio) / SR) - INPUT_LENGTH) + 1
     hop_len_samples = SR
     predicted_mos_sig_seg = []
@@ -183,7 +183,7 @@ def dnsmos_local(
     mod_sig = np.mean(predicted_mos_sig_seg)
     mod_bak = np.mean(predicted_mos_bak_seg)
     mod_ovr = np.mean(predicted_mos_ovr_seg)
-    return mod_sig, mod_bak, mod_ovr
+    return mod_sig, mod_bak, mod_ovr  # type: ignore[return-value]
 
 
 def dnsmos_api_req(url: str, key: str, audio: Tensor, verbose=False) -> Dict[str, float]:

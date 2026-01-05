@@ -1,5 +1,146 @@
 # DeepFilterNet
-A Low Complexity Speech Enhancement Framework for Full-Band Audio (48kHz) using on Deep Filtering.
+
+This file is a pointer to the canonical README at the repository root.
+
+See [../README.md](../README.md).
+
+```bash
+python df/train.py --model-type dfnet4 path/to/dataset.cfg path/to/data/ path/to/output/
+```
+
+#### GAN Training
+
+Enable adversarial training for improved perceptual quality:
+
+```python
+from df.deepfilternet4 import DfNet4, DfNet4Discriminator
+
+# Generator
+model = DfNet4(config)
+
+# Discriminator
+discriminator = DfNet4Discriminator(
+    in_channels=1,
+    hidden_channels=[64, 128, 256, 512],
+    num_scales=3,
+    num_layers_per_scale=3,
+)
+```
+
+#### Quantization-Aware Training (QAT)
+
+Train models for INT8 deployment:
+
+```python
+from df.deepfilternet4 import DfNet4, prepare_qat
+
+model = DfNet4(config)
+qat_model = prepare_qat(model)
+
+# Train as usual, then convert
+quantized_model = torch.quantization.convert(qat_model)
+```
+
+#### Knowledge Distillation
+
+Train a lightweight student model:
+
+```python
+from df.deepfilternet4 import DfNet4, DfNet4Lite, DistillationLoss
+
+teacher = DfNet4(config).eval()
+student = DfNet4Lite(config)
+
+loss_fn = DistillationLoss(
+    teacher_model=teacher,
+    alpha_kd=0.5,      # Distillation weight
+    temperature=4.0,   # Softmax temperature
+)
+```
+
+### ONNX Export
+
+Export DFNet4 for deployment:
+
+```bash
+# Full model export
+python df/scripts/export_onnx.py output_dir/ \
+    --checkpoint path/to/checkpoint.pt \
+    --full-model \
+    --simplify
+
+# Component-wise export (encoder, ERB decoder, DF decoder)
+python df/scripts/export_onnx.py output_dir/ \
+    --checkpoint path/to/checkpoint.pt
+
+# Create deployment archive
+python df/scripts/export_onnx.py output_dir/ \
+    --checkpoint path/to/checkpoint.pt \
+    --archive
+```
+
+### Benchmarking
+
+Compare performance with previous versions:
+
+```bash
+# Run benchmarks on VoiceBank-DEMAND
+python df/scripts/benchmark_dfnet4.py \
+    --checkpoint path/to/dfnet4.pt \
+    --test-dir path/to/voicebank/ \
+    --metrics pesq stoi dnsmos \
+    --compare-dfnet3
+
+# RTF-only benchmark
+python df/scripts/benchmark_dfnet4.py \
+    --checkpoint path/to/dfnet4.pt \
+    --rtf-only \
+    --device cuda
+```
+
+### Configuration Reference
+
+Full configuration options:
+
+```python
+DfNet4Config(
+    # ERB/Spectral dimensions
+    nb_erb=32,             # Number of ERB bands
+    nb_df=96,              # DF frequency bins
+    df_order=5,            # Deep filter order
+    df_lookahead=2,        # Lookahead frames
+
+    # Mamba parameters
+    mamba_d_model=256,     # Model dimension
+    mamba_d_state=64,      # State space dimension
+    mamba_d_conv=4,        # Convolution width
+    mamba_expand=2,        # Expansion factor
+    num_mamba_layers=4,    # Number of layers
+
+    # Optional features
+    hybrid_encoder=False,       # Multi-domain encoder
+    use_time_domain_enc=False,  # Time-domain branch
+    use_phase_enc=False,        # Phase branch
+    multi_res_df=False,         # Multi-resolution DF
+    adaptive_df_order=False,    # Adaptive filter order
+
+    # Decoder
+    hidden_dim=256,        # Hidden dimension
+    num_hidden_layers=2,   # Decoder layers
+)
+```
+
+### Migration from DFNet3
+
+See the [Migration Guide](docs/MIGRATION.md) for detailed instructions on migrating from DeepFilterNet3 to DeepFilterNet4.
+
+Key changes:
+- Configuration format: INI → Python dataclass
+- Model class: `ModelParams` → `DfNet4Config`
+- Encoder: GRU → Mamba SSM
+- New optional components: hybrid encoder, multi-resolution DF, adaptive order
+
+---
 
 ![deepfilternet3](https://user-images.githubusercontent.com/16517898/225623209-a54fea75-ca00-404c-a394-c91d2d1146d2.svg)
 
@@ -15,6 +156,16 @@ cargo +nightly run -p df-demo --features ui --bin df-demo --release
 ```
 
 ### News
+
+- **DeepFilterNet4** - Next generation architecture with improved quality and efficiency:
+  - Mamba backbone (state-space models) for efficient long-range temporal modeling
+  - Hybrid encoder with optional time-domain and phase branches
+  - Multi-resolution deep filtering for better frequency detail preservation
+  - Adaptive filter order based on signal complexity
+  - GAN training support with discriminator and feature matching losses
+  - Quantization-aware training (QAT) for INT8 deployment
+  - Knowledge distillation for lightweight DfNet4Lite variant (~1.3M params)
+  - See [DeepFilterNet4 Documentation](DeepFilterNet/README.md#deepfilternet4) for details
 
 - New DeepFilterNet Demo: *DeepFilterNet: Perceptually Motivated Real-Time Speech Enhancement*
   - Paper: https://arxiv.org/abs/2305.08227

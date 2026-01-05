@@ -410,6 +410,13 @@ class DfNet(nn.Module):
         feat_spec = self.pad_feat(feat_spec)
         e0, e1, e2, e3, emb, c0, lsnr = self.enc(feat_erb, feat_spec)
 
+        # Initialize variables that may be conditionally set  
+        # Control flow guarantees initialization but pyright can't track it
+        m: Tensor = torch.zeros((), device=spec.device)  # placeholder, will be overwritten
+        df_coefs: Tensor = torch.zeros((), device=spec.device)  # placeholder, will be overwritten
+        idcs: Optional[Tensor] = None
+        spec_m = spec  # placeholder for spec_m
+        
         if self.lsnr_droput:
             idcs = lsnr.squeeze() > -10.0
             b, t = (spec.shape[0], spec.shape[2])
@@ -424,8 +431,8 @@ class DfNet(nn.Module):
             c0 = c0[:, :, idcs]
 
         if self.run_erb:
-            if self.lsnr_droput:
-                m[:, :, idcs] = self.erb_dec(emb, e3, e2, e1, e0)
+            if self.lsnr_droput and idcs is not None:
+                m[:, :, idcs] = self.erb_dec(emb, e3, e2, e1, e0)  # type: ignore[index]
             else:
                 m = self.erb_dec(emb, e3, e2, e1, e0)
             spec_m = self.mask(spec, m)
@@ -434,8 +441,8 @@ class DfNet(nn.Module):
             spec_m = torch.zeros_like(spec)
 
         if self.run_df:
-            if self.lsnr_droput:
-                df_coefs[:, idcs] = self.df_dec(emb, c0)
+            if self.lsnr_droput and idcs is not None:
+                df_coefs[:, idcs] = self.df_dec(emb, c0)  # type: ignore[index]
             else:
                 df_coefs = self.df_dec(emb, c0)
             df_coefs = self.df_out_transform(df_coefs)

@@ -208,14 +208,14 @@ def log_model_summary(model: torch.nn.Module, verbose=False, force=False):
             GroupedLinearEinsum: grouped_linear_flops_counter_hook,
         },
     )
-    logger.info(f"Model complexity: {params/1e6:.3f}M #Params, {macs/1e6:.1f}M MACS")
+    logger.info(f"Model complexity: {float(params)/1e6:.3f}M #Params, {float(macs)/1e6:.1f}M MACS")
 
 
 def grouped_linear_flops_counter_hook(module: GroupedLinearEinsum, input, output):
     # input: ([B, T, I],)
     # output: [B, T, H]
     input = input[0]  # [B, T, I]
-    output_last_dim = module.weight.shape[-1]
+    output_last_dim = module.weight.shape[-1]  # type: ignore[union-attr]
     input = input.unflatten(-1, (module.groups, module.ws))  # [B, T, G, I/G]
     # GroupedLinear calculates "...gi,...gih->...gh"
     weight_flops = np.prod(input.shape) * output_last_dim

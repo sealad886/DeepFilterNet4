@@ -10,9 +10,11 @@ from torch.nn import init
 from torch.nn.parameter import Parameter
 from typing_extensions import Final
 
+from df.config import config
 from df.model import ModelParams
-from df.utils import as_complex, as_real, get_device, get_norm_alpha
+from df.utils import as_complex, as_real, get_device, get_norm_alpha, mps_supports_complex
 from libdf import unit_norm_init
+from loguru import logger
 
 
 class Conv2dNormAct(nn.Sequential):
@@ -323,6 +325,26 @@ class DfOp(nn.Module):
         self.df_bins = df_bins
         self.df_lookahead = df_lookahead
         self.freq_bins = freq_bins
+        
+        # Check for config override (handle case when no config is loaded)
+        try:
+            use_complex_override = config(
+                "DF_USE_COMPLEX", cast=bool, section="df", default=None, save=False
+            )
+        except ValueError:
+            use_complex_override = None
+        
+        if use_complex_override is not None:
+            if use_complex_override:
+                method = "complex_strided"
+            else:
+                method = "real_unfold"
+            logger.info(f"Forward method overridden via config: use_complex={use_complex_override}")
+        elif method == "complex_strided" and not mps_supports_complex():
+            # Auto-select real-valued forward for MPS compatibility on macOS < 14
+            method = "real_unfold"
+            logger.info("Using real-valued forward method for MPS compatibility")
+        
         self.set_forward(method)
 
     def set_forward(self, method: str):
@@ -542,7 +564,7 @@ class GroupedGRULayer(nn.Module):
 
     def flatten_parameters(self):
         for layer in self.layers:
-            layer.flatten_parameters()
+            layer.flatten_parameters()  # type: ignore[operator]
 
     def get_h0(self, batch_size: int = 1, device: torch.device = torch.device("cpu")):
         return torch.zeros(
@@ -696,7 +718,7 @@ class SqueezedGRU(nn.Module):
         if self.gru_skip is not None:
             x = x + self.gru_skip(input)
         x = self.linear_out(x)
-        return x, h
+        return x, h  # type: ignore[return-value]
 
 
 class SqueezedGRU_S(nn.Module):
@@ -735,7 +757,7 @@ class SqueezedGRU_S(nn.Module):
         x = self.linear_out(x)
         if self.gru_skip is not None:
             x = x + self.gru_skip(input)
-        return x, h
+        return x, h  # type: ignore[return-value]
 
 
 class GroupedLinearEinsum(nn.Module):
@@ -836,11 +858,10 @@ class LocalSnrTarget(nn.Module):
         if max_bin is not None:
             clean = as_complex(clean[..., :max_bin])
             noise = as_complex(noise[..., :max_bin])
-        return (
-            local_snr(clean, noise, window_size=self.ws, db=self.db, window_size_ns=self.ws_ns)[0]
-            .clamp(self.range[0], self.range[1])
-            .squeeze(1)
-        )
+        lsnr = local_snr(clean, noise, window_size=self.ws, db=self.db, window_size_ns=self.ws_ns)[0]
+        if self.range is not None:
+            lsnr = lsnr.clamp(self.range[0], self.range[1])
+        return lsnr.squeeze(1)
 
 
 def _local_energy(x: Tensor, ws: int, device: torch.device) -> Tensor:
@@ -893,17 +914,17 @@ def test_grouped_gru():
 
     # Should be exportable as raw nn.Module
     torch.onnx.export(
-        m, (input, h0), "out/grouped.onnx", example_outputs=(out, hout), opset_version=13
+        m, (input, h0), "out/grouped.onnx", example_outputs=(out, hout), opset_version=13  # type: ignore[call-arg]
     )
     # Should be exportable as traced
     m = torch.jit.trace(m, (input, h0))
     torch.onnx.export(
-        m, (input, h0), "out/grouped.onnx", example_outputs=(out, hout), opset_version=13
+        m, (input, h0), "out/grouped.onnx", example_outputs=(out, hout), opset_version=13  # type: ignore[call-arg]
     )
     # and as scripted module
     m = torch.jit.script(m)
     torch.onnx.export(
-        m, (input, h0), "out/grouped.onnx", example_outputs=(out, hout), opset_version=13
+        m, (input, h0), "out/grouped.onnx", example_outputs=(out, hout), opset_version=13  # type: ignore[call-arg]
     )
 
     # now grouped gru
@@ -917,12 +938,12 @@ def test_grouped_gru():
     # Should be exportable as traced
     m = torch.jit.trace(m, (input, h0))
     torch.onnx.export(
-        m, (input, h0), "out/grouped.onnx", example_outputs=(out, hout), opset_version=13
+        m, (input, h0), "out/grouped.onnx", example_outputs=(out, hout), opset_version=13  # type: ignore[call-arg]
     )
     # and scripted module
     m = torch.jit.script(m)
     torch.onnx.export(
-        m, (input, h0), "out/grouped.onnx", example_outputs=(out, hout), opset_version=13
+        m, (input, h0), "out/grouped.onnx", example_outputs=(out, hout), opset_version=13  # type: ignore[call-arg]
     )
 
 

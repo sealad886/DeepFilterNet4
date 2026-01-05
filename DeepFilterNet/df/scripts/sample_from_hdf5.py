@@ -1,21 +1,14 @@
 import argparse
-import io
 import os
 import random
 import sys
 from typing import Optional
 
 import h5py
-import numpy as np
 import torch
 import torchaudio as ta
 
-
-def load_encoded(buffer: np.ndarray, codec: str):
-    # In some rare cases, torch audio failes to fully decode vorbis resulting in a way shorter signal
-    wav, _ = ta.load(io.BytesIO(buffer[...].tobytes()), format=codec.lower())
-    return wav
-
+from df.scripts.hdf5_utils import load_encoded
 
 def save_sample(group, key: str, codec: str, out_dir: str, sr: int, n_channels: Optional[int]):
     ds = group[key]

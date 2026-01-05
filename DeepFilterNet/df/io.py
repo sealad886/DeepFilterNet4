@@ -5,21 +5,73 @@ import torch
 import torchaudio as ta
 from loguru import logger
 from numpy import ndarray
+from packaging import version
 from torch import Tensor
 
+# Version detection for TorchAudio 2.9+ compatibility
+TORCHAUDIO_VERSION = version.parse(ta.__version__)
+USE_TORCHCODEC = TORCHAUDIO_VERSION >= version.parse("2.9.0")
+
+# Try to import TorchCodec for TorchAudio 2.9+ metadata support
+HAS_TORCHCODEC = False
+if USE_TORCHCODEC:
+    try:
+        from torchcodec.decoders import AudioDecoder
+        HAS_TORCHCODEC = True
+    except ImportError:
+        pass
+
+# Handle AudioMetaData import across TorchAudio versions
 try:
     from torchaudio import AudioMetaData
-
     TA_RESAMPLE_SINC = "sinc_interp_hann"
     TA_RESAMPLE_KAISER = "sinc_interp_kaiser"
 except ImportError:
-    from torchaudio.backend.common import AudioMetaData
+    try:
+        from torchaudio.backend.common import AudioMetaData  # type: ignore[import-unresolved]  # noqa: F401
+        TA_RESAMPLE_SINC = "sinc_interpolation"
+        TA_RESAMPLE_KAISER = "kaiser_window"
+    except ImportError:
+        # TorchAudio 2.9+: AudioMetaData may not be available, use dataclass fallback
+        from dataclasses import dataclass
 
-    TA_RESAMPLE_SINC = "sinc_interpolation"
-    TA_RESAMPLE_KAISER = "kaiser_window"
+        @dataclass
+        class AudioMetaData:
+            """Fallback AudioMetaData for TorchAudio 2.9+ when using TorchCodec."""
+            sample_rate: int
+            num_frames: int
+            num_channels: int
+            bits_per_sample: int = 0
+            encoding: str = ""
+
+        TA_RESAMPLE_SINC = "sinc_interp_hann"
+        TA_RESAMPLE_KAISER = "sinc_interp_kaiser"
 
 from df.logger import warn_once
 from df.utils import download_file, get_cache_dir, get_git_root
+
+
+def get_audio_metadata(file: str) -> AudioMetaData:
+    """Get audio metadata using TorchCodec for TorchAudio 2.9+ or torchaudio.info() for earlier versions.
+    
+    Args:
+        file: Path to an audio file.
+        
+    Returns:
+        AudioMetaData with sample_rate, num_frames, num_channels, etc.
+    """
+    if USE_TORCHCODEC and HAS_TORCHCODEC:
+        decoder = AudioDecoder(file)  # type: ignore[possibly-undefined]
+        metadata = decoder.metadata
+        return AudioMetaData(
+            sample_rate=metadata.sample_rate,
+            num_frames=metadata.num_frames if hasattr(metadata, 'num_frames') else 0,
+            num_channels=metadata.num_channels,
+            bits_per_sample=getattr(metadata, 'bits_per_sample', 0),
+            encoding=getattr(metadata, 'codec', ""),
+        )
+    else:
+        return ta.info(file)
 
 
 def load_audio(
@@ -43,7 +95,7 @@ def load_audio(
     rkwargs = {}
     if "method" in kwargs:
         rkwargs["method"] = kwargs.pop("method")
-    info: AudioMetaData = ta.info(file, **ikwargs)
+    info: AudioMetaData = get_audio_metadata(file)
     if "num_frames" in kwargs and sr is not None:
         kwargs["num_frames"] *= info.sample_rate // sr
     audio, orig_sr = ta.load(file, **kwargs)

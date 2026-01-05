@@ -52,6 +52,7 @@ def main(args):
         config_allow_defaults=True,
         epoch=args.epoch,
         mask_only=args.no_df_stage,
+        device=getattr(args, 'device', None),
     )
     suffix = suffix if args.suffix else None
     if args.output_dir is None:
@@ -70,13 +71,14 @@ def main(args):
     ds = AudioDataset(input_files, df_sr)
     loader = DataLoader(ds, num_workers=2, pin_memory=True)
     n_samples = len(ds)
+    device = getattr(args, 'device', None)
     for i, (file, audio, audio_sr) in enumerate(loader):
         file = file[0]
         audio = audio.squeeze(0)
         progress = (i + 1) / n_samples * 100
         t0 = time.time()
         audio = enhance(
-            model, df_state, audio, pad=args.compensate_delay, atten_lim_db=args.atten_lim
+            model, df_state, audio, pad=args.compensate_delay, atten_lim_db=args.atten_lim, device=device
         )
         t1 = time.time()
         t_audio = audio.shape[-1] / df_sr
@@ -107,6 +109,7 @@ def init_df(
     epoch: Union[str, int, None] = "best",
     default_model: str = DEFAULT_MODEL,
     mask_only: bool = False,
+    device: Optional[str] = None,
 ) -> Tuple[nn.Module, DF, str, int]:
     """Initializes and loads config, model and deep filtering state.
 
@@ -119,6 +122,7 @@ def init_df(
         config_allow_defaults (bool): Whether to allow initializing new config values with defaults.
         epoch (str): Checkpoint epoch to load. Options are `best`, `latest`, `<int>`, and `none`.
             `none` disables checkpoint loading. Defaults to `best`.
+        device (str): Compute device. Options are `cpu`, `cuda`, `cuda:0`, `mps`, or None for auto-detection.
 
     Returns:
         model (nn.Modules): Intialized model, moved to GPU if available.
@@ -177,18 +181,18 @@ def init_df(
         logger.error("Could not find a checkpoint")
         exit(1)
     logger.debug(f"Loaded checkpoint from epoch {epoch}")
-    model = model.to(get_device())
+    model = model.to(get_device(device))
     # Set suffix to model name
     suffix = os.path.basename(os.path.abspath(model_base_dir))
     if post_filter:
         suffix += "_pf"
-    logger.info("Running on device {}".format(get_device()))
+    logger.info("Running on device {}".format(get_device(device)))
     logger.info("Model loaded")
     return model, df_state, suffix, epoch
 
 
 def df_features(audio: Tensor, df: DF, nb_df: int, device=None) -> Tuple[Tensor, Tensor, Tensor]:
-    spec = df.analysis(audio.numpy())  # [C, Tf] -> [C, Tf, F]
+    spec = df.analysis(audio.detach().cpu().numpy())  # [C, Tf] -> [C, Tf, F]
     a = get_norm_alpha(False)
     erb_fb = df.erb_widths()
     with warnings.catch_warnings():
@@ -205,7 +209,8 @@ def df_features(audio: Tensor, df: DF, nb_df: int, device=None) -> Tuple[Tensor,
 
 @torch.no_grad()
 def enhance(
-    model: nn.Module, df_state: DF, audio: Tensor, pad=True, atten_lim_db: Optional[float] = None
+    model: nn.Module, df_state: DF, audio: Tensor, pad=True, atten_lim_db: Optional[float] = None,
+    device: Optional[str] = None
 ):
     """Enhance a single audio given a preloaded model and DF state.
 
@@ -216,6 +221,7 @@ def enhance(
         pad (bool): Pad the audio to compensate for delay due to STFT/ISTFT.
         atten_lim_db (float): An optional noise attenuation limit in dB. E.g. an attenuation limit of
             12 dB only suppresses 12 dB and keeps the remaining noise in the resulting audio.
+        device (str): Compute device. If None, uses auto-detection.
 
     Returns:
         enhanced audio (Tensor): If `pad` was `False` of shape [C, T'] where T'<T slightly delayed due to STFT.
@@ -224,7 +230,7 @@ def enhance(
     model.eval()
     bs = audio.shape[0]
     if hasattr(model, "reset_h0"):
-        model.reset_h0(batch_size=bs, device=get_device())
+        model.reset_h0(batch_size=bs, device=get_device(device))  # type: ignore[operator]
     orig_len = audio.shape[-1]
     n_fft, hop = 0, 0
     if pad:
@@ -232,7 +238,7 @@ def enhance(
         # Pad audio to compensate for the delay due to the real-time STFT implementation
         audio = F.pad(audio, (0, n_fft))
     nb_df = getattr(model, "nb_df", getattr(model, "df_bins", ModelParams().nb_df))
-    spec, erb_feat, spec_feat = df_features(audio, df_state, nb_df, device=get_device())
+    spec, erb_feat, spec_feat = df_features(audio, df_state, nb_df, device=get_device(device))
     enhanced = model(spec.clone(), erb_feat, spec_feat)[0].cpu()
     enhanced = as_complex(enhanced.squeeze(1))
     if atten_lim_db is not None and abs(atten_lim_db) > 0:
@@ -337,6 +343,13 @@ def setup_df_argument_parser(
         help="Epoch for checkpoint loading. Can be one of ['best', 'latest', <int>].",
     )
     parser.add_argument("-v", "--version", action=PrintVersion)
+    parser.add_argument(
+        "--device",
+        "-D",
+        type=str,
+        default=None,
+        help="Compute device: cpu, cuda, cuda:0, mps, or auto (default: auto)"
+    )
     return parser
 
 

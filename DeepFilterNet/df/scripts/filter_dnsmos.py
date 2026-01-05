@@ -1,25 +1,18 @@
 #!/usr/bin/env python3
 
 import argparse
-import io
 import os
 import sys
 
 import h5py
 import numpy as np
 import torch
-import torchaudio as ta
 from torch import Tensor
 
 import df.scripts.dnsmos as dnsmos
 from df.io import resample
+from df.scripts.hdf5_utils import load_encoded
 from df.scripts.prepare_data import encode
-
-
-def load_encoded(buffer: np.ndarray, codec: str) -> Tensor:
-    wav, _ = ta.load(io.BytesIO(buffer[...].tobytes()), format=codec)
-    return wav
-
 
 def to_f32(audio: Tensor) -> Tensor:
     if audio.dtype != torch.float32:

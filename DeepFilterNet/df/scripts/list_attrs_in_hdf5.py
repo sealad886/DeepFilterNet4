@@ -4,21 +4,13 @@ import os
 import h5py
 import torch
 
+from df.scripts.hdf5_utils import load_encoded
+
 parser = argparse.ArgumentParser()
 parser.add_argument("hdf5", nargs="+")
 parser.add_argument("--keys", "-k", action="store_true")
 parser.add_argument("--hours", action="store_true")
 args = parser.parse_args()
-
-
-def load_encoded(buffer, codec: str):
-    import io
-
-    import torchaudio as ta
-
-    # In some rare cases, torch audio failes to fully decode vorbis resulting in a way shorter signal
-    wav, _ = ta.load(io.BytesIO(buffer[...].tobytes()), format=codec.lower())
-    return wav
 
 
 total_hours = 0
