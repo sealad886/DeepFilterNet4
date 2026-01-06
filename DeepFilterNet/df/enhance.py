@@ -52,7 +52,7 @@ def main(args):
         config_allow_defaults=True,
         epoch=args.epoch,
         mask_only=args.no_df_stage,
-        device=getattr(args, 'device', None),
+        device=getattr(args, "device", None),
     )
     suffix = suffix if args.suffix else None
     if args.output_dir is None:
@@ -71,14 +71,19 @@ def main(args):
     ds = AudioDataset(input_files, df_sr)
     loader = DataLoader(ds, num_workers=2, pin_memory=True)
     n_samples = len(ds)
-    device = getattr(args, 'device', None)
+    device = getattr(args, "device", None)
     for i, (file, audio, audio_sr) in enumerate(loader):
         file = file[0]
         audio = audio.squeeze(0)
         progress = (i + 1) / n_samples * 100
         t0 = time.time()
         audio = enhance(
-            model, df_state, audio, pad=args.compensate_delay, atten_lim_db=args.atten_lim, device=device
+            model,
+            df_state,
+            audio,
+            pad=args.compensate_delay,
+            atten_lim_db=args.atten_lim,
+            device=device,
         )
         t1 = time.time()
         t_audio = audio.shape[-1] / df_sr
@@ -173,9 +178,7 @@ def init_df(
     load_cp = epoch is not None and not (isinstance(epoch, str) and epoch.lower() == "none")
     if not load_cp:
         checkpoint_dir = None
-    mask_only = mask_only or config(
-        "mask_only", cast=bool, section="train", default=False, save=False
-    )
+    mask_only = mask_only or config("mask_only", cast=bool, section="train", default=False, save=False)
     model, epoch = load_model_cp(checkpoint_dir, df_state, epoch=epoch, mask_only=mask_only)
     if (epoch is None or epoch == 0) and load_cp:
         logger.error("Could not find a checkpoint")
@@ -209,8 +212,12 @@ def df_features(audio: Tensor, df: DF, nb_df: int, device=None) -> Tuple[Tensor,
 
 @torch.no_grad()
 def enhance(
-    model: nn.Module, df_state: DF, audio: Tensor, pad=True, atten_lim_db: Optional[float] = None,
-    device: Optional[str] = None
+    model: nn.Module,
+    df_state: DF,
+    audio: Tensor,
+    pad=True,
+    atten_lim_db: Optional[float] = None,
+    device: Optional[str] = None,
 ):
     """Enhance a single audio given a preloaded model and DF state.
 
@@ -269,9 +276,7 @@ def maybe_download_model(name: str = DEFAULT_MODEL) -> str:
     if name.endswith(".zip"):
         name = name.removesuffix(".zip")
     model_dir = os.path.join(cache_dir, name)
-    if os.path.isfile(os.path.join(model_dir, "config.ini")) or os.path.isdir(
-        os.path.join(model_dir, "checkpoints")
-    ):
+    if os.path.isfile(os.path.join(model_dir, "config.ini")) or os.path.isdir(os.path.join(model_dir, "checkpoints")):
         return model_dir
     os.makedirs(cache_dir, exist_ok=True)
     url = f"https://github.com/Rikorose/DeepFilterNet/raw/main/models/{name}"
@@ -302,9 +307,7 @@ class PrintVersion(argparse.Action):
         exit(0)
 
 
-def setup_df_argument_parser(
-    default_log_level: str = "INFO", parser=None
-) -> argparse.ArgumentParser:
+def setup_df_argument_parser(default_log_level: str = "INFO", parser=None) -> argparse.ArgumentParser:
     if parser is None:
         parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -348,7 +351,7 @@ def setup_df_argument_parser(
         "-D",
         type=str,
         default=None,
-        help="Compute device: cpu, cuda, cuda:0, mps, or auto (default: auto)"
+        help="Compute device: cpu, cuda, cuda:0, mps, or auto (default: auto)",
     )
     return parser
 

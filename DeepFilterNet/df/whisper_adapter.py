@@ -485,9 +485,7 @@ class PyTorchWhisperBackend:
         Returns:
             Whisper tokenizer instance.
         """
-        return self._whisper.tokenizer.get_tokenizer(
-            self._model.is_multilingual, language=language, task=task
-        )
+        return self._whisper.tokenizer.get_tokenizer(self._model.is_multilingual, language=language, task=task)
 
     def get_decoder(self, temperature: float = 0.0) -> Any:
         """
@@ -528,8 +526,8 @@ class PyTorchWhisperBackend:
         if isinstance(audio, np.ndarray):
             audio = torch.from_numpy(audio)
         if length is None:
-            return self._whisper.pad_or_trim(audio)     # type: ignore
-        return self._whisper.pad_or_trim(audio, length)    # type: ignore
+            return self._whisper.pad_or_trim(audio)  # type: ignore
+        return self._whisper.pad_or_trim(audio, length)  # type: ignore
 
     def log_mel_spectrogram(self, audio: ArrayLike, n_mels: Optional[int] = None) -> torch.Tensor:
         """
@@ -623,7 +621,7 @@ class MLXWhisperBackend:
 
         # Load model - download_root may not be supported in all mlx-whisper versions
         try:
-            self._model = load_models.load_model(model_name, download_root=download_root)   # type: ignore
+            self._model = load_models.load_model(model_name, download_root=download_root)  # type: ignore
         except TypeError:
             # Fallback if download_root is not supported
             self._model = load_models.load_model(model_name)
@@ -668,9 +666,7 @@ class MLXWhisperBackend:
             mel = mx.array(to_numpy(mel))
         return self._model.embed_audio(mel)
 
-    def embed_audio_as_torch(
-        self, mel: ArrayLike, dtype: Optional[torch.dtype] = None
-    ) -> torch.Tensor:
+    def embed_audio_as_torch(self, mel: ArrayLike, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """
         Extract audio embeddings and return as PyTorch tensor.
 
@@ -812,8 +808,8 @@ class MLXWhisperBackend:
         if isinstance(audio, (np.ndarray, torch.Tensor)):
             audio = mx.array(to_numpy(audio))
         if length is None:
-            return self._mlx_audio.pad_or_trim(audio)       # type: ignore
-        return self._mlx_audio.pad_or_trim(audio, length)      # type: ignore
+            return self._mlx_audio.pad_or_trim(audio)  # type: ignore
+        return self._mlx_audio.pad_or_trim(audio, length)  # type: ignore
 
     def log_mel_spectrogram(self, audio: ArrayLike, n_mels: Optional[int] = None) -> "mx.array":
         """
@@ -849,7 +845,7 @@ class MLXWhisperBackend:
         """Convert input to MLX array."""
         mx = _get_mx()
         if _mlx_available and hasattr(arr, "__class__") and "mlx" in str(type(arr)):
-            return arr # Already MLX array  # type: ignore
+            return arr  # Already MLX array  # type: ignore
         return mx.array(to_numpy(arr))
 
     def to_numpy(self, arr: ArrayLike) -> np.ndarray:

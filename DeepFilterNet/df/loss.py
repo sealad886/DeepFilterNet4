@@ -170,9 +170,7 @@ class SpectralLoss(nn.Module):
             if self.gamma != 1:
                 input = input_abs * torch.exp(1j * angle.apply(input))  # type: ignore[operator]
                 target = target_abs * torch.exp(1j * angle.apply(target))  # type: ignore[operator]
-            loss_c = (
-                F.mse_loss(torch.view_as_real(input), target=torch.view_as_real(target)) * self.f_c
-            )
+            loss_c = F.mse_loss(torch.view_as_real(input), target=torch.view_as_real(target)) * self.f_c
             loss = loss + loss_c
         return loss
 
@@ -213,9 +211,7 @@ class MaskLoss(nn.Module):
         self.erb_fb: Tensor
         self.erb_inv_fb: Tensor
         self.register_buffer("erb_fb", erb_fb(df_state.erb_widths(), ModelParams().sr))
-        self.register_buffer(
-            "erb_inv_fb", erb_fb(df_state.erb_widths(), ModelParams().sr, inverse=True)
-        )
+        self.register_buffer("erb_inv_fb", erb_fb(df_state.erb_widths(), ModelParams().sr, inverse=True))
 
     def __repr__(self):
         s = f"MaskLoss {self.mask_fn} (gamma: {self.gamma}"
@@ -244,9 +240,7 @@ class MaskLoss(nn.Module):
     def erb_inv(self, x: Tensor) -> Tensor:
         return torch.matmul(x, self.erb_inv_fb)
 
-    def forward(
-        self, input: Tensor, clean: Tensor, noisy: Tensor, max_bin: Optional[Tensor] = None
-    ) -> Tensor:
+    def forward(self, input: Tensor, clean: Tensor, noisy: Tensor, max_bin: Optional[Tensor] = None) -> Tensor:
         # Input mask shape: [B, C, T, F]
         b, _, _, f = input.shape
         if not torch.isfinite(input).all():
@@ -278,9 +272,7 @@ class MaskLoss(nn.Module):
 
 
 class MaskSpecLoss(nn.Module):
-    def __init__(
-        self, df_state: DF, factor=1.0, gamma: float = 0.6, f_max_idx: Optional[int] = None
-    ):
+    def __init__(self, df_state: DF, factor=1.0, gamma: float = 0.6, f_max_idx: Optional[int] = None):
         super().__init__()
         self.f_max_idx = f_max_idx
         self.apply_mask = Mask(erb_fb(df_state.erb_widths(), ModelParams().sr, inverse=True))
@@ -331,9 +323,7 @@ class DfAlphaLoss(nn.Module):
         l_on = 0.1 * ((1 - pred_alpha) * w).abs().mean()
         return l_off + l_on
 
-    def lsnr_mapping(
-        self, lsnr: Tensor, lsnr_thresh: float, lsnr_min: Optional[float] = None
-    ) -> Tensor:
+    def lsnr_mapping(self, lsnr: Tensor, lsnr_thresh: float, lsnr_min: Optional[float] = None) -> Tensor:
         """Map lsnr_min to 1 and lsnr_thresh to 0"""
         # s = a * lsnr + b
         lsnr_min = float(self.lsnr_min) if lsnr_min is None else lsnr_min
@@ -394,9 +384,7 @@ class SegSdrLoss(nn.Module):
         loss = torch.zeros((), device=input.device)
         for ws in self.window_sizes:
             if ws > input.size(-1):
-                warnings.warn(
-                    f"Input size {input.size(-1)} smaller than window size. Adjusting window size."
-                )
+                warnings.warn(f"Input size {input.size(-1)} smaller than window size. Adjusting window size.")
                 ws = input.size(1)
             loss += self.sdr(
                 input=input.unfold(-1, ws, int(self.hop * ws)).reshape(-1, ws),
@@ -458,16 +446,14 @@ class ASRLoss(nn.Module):
         # Initialize whisper backend (auto-selects MLX on Apple Silicon)
         self.backend = get_whisper_backend(model, backend=backend)
         # Disable gradients on the whisper model for feature extraction
-        if hasattr(self.backend.model, 'requires_grad_'):
+        if hasattr(self.backend.model, "requires_grad_"):
             self.backend.model.requires_grad_(False)
 
         self.options = self.backend.create_decoding_options(
             task=self.task, language=self.lang, without_timestamps=True, sample_len=self.max_ctx
         )
         self.mel_filters: Tensor
-        self.register_buffer(
-            "mel_filters", torch.from_numpy(self.get_mel_filters(self.target_sr, 400, 80))
-        )
+        self.register_buffer("mel_filters", torch.from_numpy(self.get_mel_filters(self.target_sr, 400, 80)))
         self.tokenizer = self.backend.get_tokenizer(language=self.lang, task=self.task)
         self.decoder = self.backend.get_decoder(temperature=0.0)
         self.sot_sequence = self.tokenizer.sot_sequence_including_notimestamps
@@ -483,12 +469,8 @@ class ASRLoss(nn.Module):
     def forward(self, input: Tensor, target: Tensor) -> Tensor:
         # Use backend with automatic tensor conversion for gradient flow
         if self.backend.backend_name == "mlx":
-            features_i = self.backend.embed_audio_as_torch(
-                self.preprocess(input), dtype=input.dtype
-            )
-            features_t = self.backend.embed_audio_as_torch(
-                self.preprocess(target), dtype=target.dtype
-            )
+            features_i = self.backend.embed_audio_as_torch(self.preprocess(input), dtype=input.dtype)
+            features_t = self.backend.embed_audio_as_torch(self.preprocess(target), dtype=target.dtype)
         else:
             features_i = self.backend.embed_audio(self.preprocess(input))
             features_t = self.backend.embed_audio(self.preprocess(target))
@@ -561,9 +543,7 @@ class ASRLoss(nn.Module):
     ) -> Tuple[Tensor, Tensor]:
         n = features.shape[0]
         sum_logprobs: Tensor = torch.zeros(n, device=features.device)
-        tokens: Tensor = start_tokens or torch.tensor(
-            [self.initial_tokens], device=features.device
-        ).repeat(n, 1)
+        tokens: Tensor = start_tokens or torch.tensor([self.initial_tokens], device=features.device).repeat(n, 1)
         logits: List[Tensor] = []
         for i in range(self.sample_len):
             # Use backend with automatic tensor conversion for MLX
@@ -586,6 +566,7 @@ class ASRLoss(nn.Module):
         # Convert back to torch tensor if needed
         if not isinstance(audio_padded, Tensor):
             import numpy as np
+
             audio_padded = torch.from_numpy(np.array(audio_padded)).to(audio.device)
         mel = self.log_mel_spectrogram(audio_padded, self.mel_filters.to(audio.device))
         return mel
@@ -665,18 +646,14 @@ class ASRLoss(nn.Module):
         prompt = self.options.prompt
 
         if prefix:
-            prefix_tokens = (
-                self.tokenizer.encode(" " + prefix.strip()) if isinstance(prefix, str) else prefix
-            )
+            prefix_tokens = self.tokenizer.encode(" " + prefix.strip()) if isinstance(prefix, str) else prefix
             if self.sample_len is not None:
                 max_prefix_len = self.n_ctx // 2 - self.sample_len
                 prefix_tokens = prefix_tokens[-max_prefix_len:]
             tokens = tokens + prefix_tokens
 
         if prompt:
-            prompt_tokens = (
-                self.tokenizer.encode(" " + prompt.strip()) if isinstance(prompt, str) else prompt
-            )
+            prompt_tokens = self.tokenizer.encode(" " + prompt.strip()) if isinstance(prompt, str) else prompt
             tokens = [self.tokenizer.sot_prev] + prompt_tokens[-(self.n_ctx // 2 - 1) :] + tokens
 
         return tuple(tokens)
@@ -684,55 +661,55 @@ class ASRLoss(nn.Module):
 
 class FeatureMatchingLoss(nn.Module):
     """Feature matching loss for GAN training stability.
-    
+
     Computes L1 distance between discriminator feature maps from real
     and generated samples to provide stable gradients to the generator.
-    
+
     Args:
         factor: Loss weight factor
     """
-    
+
     def __init__(self, factor: float = 2.0):
         super().__init__()
         self.factor = factor
-        
+
     def forward(
         self,
         real_fmaps: List[List[Tensor]],
         fake_fmaps: List[List[Tensor]],
     ) -> Tensor:
         """Compute feature matching loss.
-        
+
         Args:
             real_fmaps: Feature maps from discriminator on real samples
                 List of lists: [[disc1_layer1, disc1_layer2, ...], [disc2_layer1, ...], ...]
             fake_fmaps: Feature maps from discriminator on fake/generated samples
                 Same structure as real_fmaps
-                
+
         Returns:
             Feature matching loss (scalar)
         """
         loss = torch.zeros((), device=real_fmaps[0][0].device)
-        
+
         for real_fmap_list, fake_fmap_list in zip(real_fmaps, fake_fmaps):
             for real_fmap, fake_fmap in zip(real_fmap_list, fake_fmap_list):
                 # L1 loss between detached real and fake features
                 loss = loss + F.l1_loss(fake_fmap, real_fmap.detach())
-                
+
         return self.factor * loss
 
 
 class SpeakerContrastiveLoss(nn.Module):
     """Speaker embedding preservation loss.
-    
+
     Ensures enhanced speech preserves speaker characteristics by
     comparing speaker embeddings between clean and enhanced audio.
-    
+
     Args:
         factor: Loss weight factor
         negative_weight: Weight for pushing away from noise characteristics
     """
-    
+
     def __init__(
         self,
         factor: float = 0.1,
@@ -743,14 +720,15 @@ class SpeakerContrastiveLoss(nn.Module):
         self.negative_weight = negative_weight
         self.speaker_encoder = None
         self._encoder_loaded = False
-        
+
     def _load_encoder(self, device):
         """Lazy load speaker encoder to avoid import overhead."""
         if self._encoder_loaded:
             return
-            
+
         try:
             from resemblyzer import VoiceEncoder
+
             self.speaker_encoder = VoiceEncoder(device=str(device))
             # Freeze encoder weights
             for param in self.speaker_encoder.parameters():
@@ -763,7 +741,7 @@ class SpeakerContrastiveLoss(nn.Module):
             )
             self.speaker_encoder = None
             self._encoder_loaded = True
-            
+
     def forward(
         self,
         enhanced: Tensor,
@@ -771,46 +749,46 @@ class SpeakerContrastiveLoss(nn.Module):
         noisy: Optional[Tensor] = None,
     ) -> Tensor:
         """Compute speaker contrastive loss.
-        
+
         Args:
             enhanced: Enhanced audio [B, T] at 16kHz
             clean: Clean reference audio [B, T] at 16kHz
             noisy: Noisy audio [B, T] (optional, for negative contrast)
-            
+
         Returns:
             Speaker contrastive loss (scalar)
         """
         if self.speaker_encoder is None:
             self._load_encoder(enhanced.device)
-            
+
         if self.speaker_encoder is None:
             return torch.zeros((), device=enhanced.device)
-            
+
         # Get speaker embeddings
         with torch.no_grad():
             clean_emb = self._get_embedding(clean)
             if noisy is not None:
                 noisy_emb = self._get_embedding(noisy)
-                
+
         enhanced_emb = self._get_embedding(enhanced)
-        
+
         # Positive: pull enhanced toward clean speaker embedding
         pos_sim = F.cosine_similarity(enhanced_emb, clean_emb, dim=-1)
         loss = -pos_sim.mean()  # Maximize similarity (minimize negative)
-        
+
         # Negative: push away from noise characteristics (optional)
         if noisy is not None and self.negative_weight > 0:
             neg_sim = F.cosine_similarity(enhanced_emb, noisy_emb, dim=-1)  # type: ignore[possibly-undefined]
             loss = loss + self.negative_weight * neg_sim.mean()
-            
+
         return self.factor * loss
-        
+
     def _get_embedding(self, audio: Tensor) -> Tensor:
         """Get speaker embedding from audio.
-        
+
         Args:
             audio: Audio tensor [B, T]
-            
+
         Returns:
             Speaker embedding [B, D]
         """
@@ -825,15 +803,15 @@ class SpeakerContrastiveLoss(nn.Module):
 
 class GeneratorLoss(nn.Module):
     """Generator loss for GAN training.
-    
+
     Computes adversarial loss for the generator, trying to make
     the discriminator output high scores for generated samples.
-    
+
     Args:
         loss_type: Type of GAN loss ('lsgan', 'vanilla', 'hinge')
         factor: Loss weight factor
     """
-    
+
     def __init__(
         self,
         loss_type: str = "lsgan",
@@ -842,18 +820,18 @@ class GeneratorLoss(nn.Module):
         super().__init__()
         self.loss_type = loss_type
         self.factor = factor
-        
+
     def forward(self, fake_scores: List[Tensor]) -> Tensor:
         """Compute generator adversarial loss.
-        
+
         Args:
             fake_scores: Discriminator outputs for generated samples
-            
+
         Returns:
             Generator loss (scalar)
         """
         loss = torch.zeros((), device=fake_scores[0].device)
-        
+
         for fake_score in fake_scores:
             if self.loss_type == "lsgan":
                 # LS-GAN: G wants fake->1
@@ -866,21 +844,21 @@ class GeneratorLoss(nn.Module):
                 loss = loss - torch.mean(fake_score)
             else:
                 raise ValueError(f"Unknown loss type: {self.loss_type}")
-                
+
         return self.factor * loss
 
 
 class DiscriminatorLoss(nn.Module):
     """Discriminator loss for GAN training.
-    
+
     Computes adversarial loss for the discriminator, trying to
     distinguish real from generated samples.
-    
+
     Args:
         loss_type: Type of GAN loss ('lsgan', 'vanilla', 'hinge')
         factor: Loss weight factor
     """
-    
+
     def __init__(
         self,
         loss_type: str = "lsgan",
@@ -889,30 +867,30 @@ class DiscriminatorLoss(nn.Module):
         super().__init__()
         self.loss_type = loss_type
         self.factor = factor
-        
+
     def forward(
         self,
         real_scores: List[Tensor],
         fake_scores: List[Tensor],
     ) -> Tuple[Tensor, Tensor]:
         """Compute discriminator loss.
-        
+
         Args:
             real_scores: Discriminator outputs for real samples
             fake_scores: Discriminator outputs for generated samples
-            
+
         Returns:
             d_loss: Total discriminator loss
             d_real_loss: Loss on real samples (for logging)
         """
         d_loss = torch.zeros((), device=real_scores[0].device)
         d_real_loss = torch.zeros((), device=real_scores[0].device)
-        
+
         for real_score, fake_score in zip(real_scores, fake_scores):
             if self.loss_type == "lsgan":
                 # LS-GAN: D wants real->1, fake->0
                 r_loss = torch.mean((1 - real_score) ** 2)
-                f_loss = torch.mean(fake_score ** 2)
+                f_loss = torch.mean(fake_score**2)
             elif self.loss_type == "vanilla":
                 # Vanilla GAN
                 r_loss = -torch.mean(torch.log(real_score.sigmoid() + 1e-10))
@@ -923,10 +901,10 @@ class DiscriminatorLoss(nn.Module):
                 f_loss = torch.mean(F.relu(1 + fake_score))
             else:
                 raise ValueError(f"Unknown loss type: {self.loss_type}")
-                
+
             d_loss = d_loss + r_loss + f_loss
             d_real_loss = d_real_loss + r_loss
-            
+
         return self.factor * d_loss, d_real_loss
 
 
@@ -937,9 +915,9 @@ class Loss(nn.Module):
     """
 
     def __init__(
-        self, 
-        state: DF, 
-        istft: Optional[Istft] = None, 
+        self,
+        state: DF,
+        istft: Optional[Istft] = None,
         discriminator: Optional[nn.Module] = None,
     ):
         """Loss wrapper containing all methods for loss calculation.
@@ -1040,7 +1018,7 @@ class Loss(nn.Module):
         self.gan_type = config("type", "lsgan", str, section="GANLoss")
         self.fm_f = config("factor", 0, float, section="FeatureMatchingLoss")
         self.speaker_f = config("factor", 0, float, section="SpeakerLoss")
-        
+
         # Generator/discriminator losses (only created if GAN training enabled)
         if self.gan_f > 0:
             self.gen_loss = GeneratorLoss(loss_type=self.gan_type, factor=self.gan_f)
@@ -1048,20 +1026,17 @@ class Loss(nn.Module):
         else:
             self.gen_loss = None
             self.disc_loss = None
-            
+
         # Feature matching loss
         if self.fm_f > 0:
             self.fm_loss = FeatureMatchingLoss(factor=self.fm_f)
         else:
             self.fm_loss = None
-            
+
         # Speaker contrastive loss
         if self.speaker_f > 0:
             speaker_neg_weight = config("negative_weight", 0.1, float, section="SpeakerLoss")
-            self.speaker_loss = SpeakerContrastiveLoss(
-                factor=self.speaker_f, 
-                negative_weight=speaker_neg_weight
-            )
+            self.speaker_loss = SpeakerContrastiveLoss(factor=self.speaker_f, negative_weight=speaker_neg_weight)
         else:
             self.speaker_loss = None
 
@@ -1166,12 +1141,8 @@ class Loss(nn.Module):
         stoi_vals: Tensor = stoi(y=enh_td, x=clean_td, fs_source=self.sr)
         sdr_vals_ms, stoi_vals_ms = [], []
         for snr in torch.unique(snrs, sorted=False):
-            self.summaries[f"sdr_snr_{snr.item()}"].extend(
-                sdr_vals.masked_select(snr == snrs).detach().split(1)
-            )
-            self.summaries[f"stoi_snr_{snr.item()}"].extend(
-                stoi_vals.masked_select(snr == snrs).detach().split(1)
-            )
+            self.summaries[f"sdr_snr_{snr.item()}"].extend(sdr_vals.masked_select(snr == snrs).detach().split(1))
+            self.summaries[f"stoi_snr_{snr.item()}"].extend(stoi_vals.masked_select(snr == snrs).detach().split(1))
             for i, (sdr_i, stoi_i) in enumerate(zip(sdr_vals_ms, stoi_vals_ms)):
                 self.summaries[f"sdr_stage_{i}_snr_{snr.item()}"].extend(
                     sdr_i.masked_select(snr == snrs).detach().split(1)
@@ -1190,7 +1161,7 @@ class Loss(nn.Module):
         noisy_td: Optional[Tensor] = None,
     ) -> Dict[str, Tensor]:
         """Compute generator losses for GAN training.
-        
+
         Args:
             fake_scores: Discriminator outputs for enhanced samples
             real_fmaps: Feature maps from discriminator on real (clean) samples
@@ -1198,50 +1169,50 @@ class Loss(nn.Module):
             enhanced_td: Enhanced audio time-domain [B, T]
             clean_td: Clean audio time-domain [B, T]
             noisy_td: Noisy audio time-domain [B, T]
-            
+
         Returns:
             Dictionary with loss components for logging
         """
         losses = {}
         total_loss = torch.zeros((), device=fake_scores[0].device)
-        
+
         # Generator adversarial loss
         if self.gen_loss is not None:
             g_loss = self.gen_loss(fake_scores)
             losses["gen_adv"] = g_loss
             total_loss = total_loss + g_loss
-            
+
         # Feature matching loss
         if self.fm_loss is not None and real_fmaps is not None and fake_fmaps is not None:
             fm_loss = self.fm_loss(real_fmaps, fake_fmaps)
             losses["fm"] = fm_loss
             total_loss = total_loss + fm_loss
-            
+
         # Speaker contrastive loss
         if self.speaker_loss is not None and enhanced_td is not None and clean_td is not None:
             speaker_loss = self.speaker_loss(enhanced_td, clean_td, noisy_td)
             losses["speaker"] = speaker_loss
             total_loss = total_loss + speaker_loss
-            
+
         losses["total"] = total_loss
         return losses
-        
+
     def compute_discriminator_loss(
         self,
         real_scores: List[Tensor],
         fake_scores: List[Tensor],
     ) -> Dict[str, Tensor]:
         """Compute discriminator loss for GAN training.
-        
+
         Args:
             real_scores: Discriminator outputs for clean samples
             fake_scores: Discriminator outputs for enhanced samples
-            
+
         Returns:
             Dictionary with loss components for logging
         """
         losses = {}
-        
+
         if self.disc_loss is not None:
             d_loss, d_real_loss = self.disc_loss(real_scores, fake_scores)
             losses["disc_total"] = d_loss
@@ -1249,20 +1220,20 @@ class Loss(nn.Module):
         else:
             losses["disc_total"] = torch.zeros((), device=real_scores[0].device)
             losses["disc_real"] = torch.zeros((), device=real_scores[0].device)
-            
+
         return losses
-        
+
     def run_discriminator(
         self,
         disc: nn.Module,
         waveform: Tensor,
     ) -> Tuple[List[Tensor], List[List[Tensor]]]:
         """Run discriminator forward pass.
-        
+
         Args:
             disc: Discriminator module (MPD, MSD, or Combined)
             waveform: Input waveform [B, T] or [B, 1, T]
-            
+
         Returns:
             scores: List of discriminator scores
             fmaps: List of feature map lists
@@ -1270,7 +1241,7 @@ class Loss(nn.Module):
         if waveform.dim() == 2:
             waveform = waveform.unsqueeze(1)  # [B, 1, T]
         return disc(waveform)
-        
+
     def compute_d_loss_with_disc(
         self,
         disc: nn.Module,
@@ -1278,24 +1249,24 @@ class Loss(nn.Module):
         fake_wav: Tensor,
     ) -> Tensor:
         """Compute discriminator loss using discriminator forward pass.
-        
+
         Convenience method that runs discriminator on real/fake samples
         and computes the discriminator loss.
-        
+
         Args:
             disc: Discriminator module
             real_wav: Real (clean) waveform [B, T]
             fake_wav: Fake (enhanced) waveform [B, T], should be detached
-            
+
         Returns:
             Discriminator loss (scalar tensor)
         """
         real_scores, _ = self.run_discriminator(disc, real_wav)
         fake_scores, _ = self.run_discriminator(disc, fake_wav)
-        
+
         loss_dict = self.compute_discriminator_loss(real_scores, fake_scores)
         return loss_dict["disc_total"]
-        
+
     def compute_g_loss_with_disc(
         self,
         disc: nn.Module,
@@ -1304,22 +1275,22 @@ class Loss(nn.Module):
         noisy_wav: Optional[Tensor] = None,
     ) -> Tensor:
         """Compute generator loss using discriminator forward pass.
-        
+
         Convenience method that runs discriminator on real/fake samples
         and computes the generator loss (adversarial + feature matching + speaker).
-        
+
         Args:
             disc: Discriminator module
             real_wav: Real (clean) waveform [B, T]
             fake_wav: Fake (enhanced) waveform [B, T]
             noisy_wav: Noisy input waveform [B, T] (optional, for speaker loss)
-            
+
         Returns:
             Generator GAN loss (scalar tensor)
         """
         real_scores, real_fmaps = self.run_discriminator(disc, real_wav)
         fake_scores, fake_fmaps = self.run_discriminator(disc, fake_wav)
-        
+
         loss_dict = self.compute_generator_loss(
             fake_scores=fake_scores,
             real_fmaps=real_fmaps,
@@ -1366,9 +1337,7 @@ def test_local_snr():
         ax=ax[0],
     )
     ax[0].set_ylim(0, 10000)
-    lsnr, esp, ens = local_snr(
-        torch.from_numpy(clean).unsqueeze(0), torch.from_numpy(noise).unsqueeze(0), 4, True, 8
-    )
+    lsnr, esp, ens = local_snr(torch.from_numpy(clean).unsqueeze(0), torch.from_numpy(noise).unsqueeze(0), 4, True, 8)
     t = librosa.times_like(lsnr, sr=sr, hop_length=hop, n_fft=fft)  # type: ignore[call-arg]
     ax[1].plot(t, lsnr.clamp_min(-20).squeeze().numpy(), label="lsnr")
     ax1_ = ax[1].twinx()

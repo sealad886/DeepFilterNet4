@@ -14,6 +14,7 @@ from df.io import resample
 from df.scripts.hdf5_utils import load_encoded
 from df.scripts.prepare_data import encode
 
+
 def to_f32(audio: Tensor) -> Tensor:
     if audio.dtype != torch.float32:
         audio = audio.to(torch.float32) / (1 << 15)
@@ -67,9 +68,7 @@ def main(args):
                 audio = to_f32(audio)
                 for ch in range(audio.shape[0]):
                     resampled = resample(audio[ch], sr, dnsmos.SR)
-                    (ch_sig, ch_bak, ch_ovr) = dnsmos.dnsmos_local(
-                        resampled, onnx_sig, onnx_bak_ovr
-                    )
+                    (ch_sig, ch_bak, ch_ovr) = dnsmos.dnsmos_local(resampled, onnx_sig, onnx_bak_ovr)
                 sig, bak, ovr = np.mean(ch_sig), np.mean(ch_bak), np.mean(ch_ovr)
                 print(f" sig: {sig:.2f}, bak: {bak:.2f}, ovr: {ovr:.2f} ... ", end="")
                 if sig > t[0] and bak > t[1] and ovr > t[2]:

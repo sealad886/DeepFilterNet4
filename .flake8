@@ -1,5 +1,6 @@
 [flake8]
-ignore = E203, E266, E501, W503
+# F824: global X is unused (false positives on read-only globals)
+ignore = E203, E266, E501, W503, F824
 max-line-length = 100
 import-order-style = google
 application-import-names = flake8
