@@ -34,6 +34,12 @@ ARIA2_MAX_CONCURRENT="${ARIA2_MAX_CONCURRENT:-6}"
 ARIA2_FILE_ALLOC="${ARIA2_FILE_ALLOC:-prealloc}"
 ARIA2_USER_AGENT="${ARIA2_USER_AGENT:-Mozilla/5.0}"
 ZENODO_REFERER="${ZENODO_REFERER:-https://zenodo.org/records/4060432/}"
+VERIFY_CACHE="${VERIFY_CACHE:-1}"
+VERIFY_CACHE_FILE="${VERIFY_CACHE_FILE:-${DOWNLOAD_DIR}/.verify_cache.tsv}"
+
+# GitHub authentication (uses gh CLI if available)
+USE_GH_AUTH="${USE_GH_AUTH:-1}"  # use gh auth token for GitHub URLs
+GH_TOKEN=""
 
 # Optional: use audb to download AIR/OpenAIR (install if missing)
 USE_AUDB="${USE_AUDB:-1}"
@@ -52,7 +58,7 @@ DOWNLOAD_ACOUSTICROOMS="${DOWNLOAD_ACOUSTICROOMS:-}"
 mkdir -p "${LIST_DIR}"
 
 # Dataset root paths (override if you already downloaded elsewhere)
-VCTK_DIR="${VCTK_DIR:-${EXTRACT_DIR}/VCTK-Corpus}"
+VCTK_DIR="${VCTK_DIR:-${EXTRACT_DIR}/VCTK-Corpus-0.92}"
 LIBRISPEECH_DIR="${LIBRISPEECH_DIR:-${EXTRACT_DIR}/LibriSpeech}"
 MUSAN_DIR="${MUSAN_DIR:-${EXTRACT_DIR}/musan}"
 FSD50K_DIR="${FSD50K_DIR:-${EXTRACT_DIR}/FSD50K}"
@@ -81,6 +87,101 @@ write_list() {
   local pattern="$3"
   find "${src_dir}" -type f \( -iname "${pattern}" \) | sort > "${out_file}"
   echo "[ok] wrote $(wc -l < "${out_file}") entries -> ${out_file}"
+}
+
+stat_size() {
+  local path="$1"
+  if stat -f %z "${path}" >/dev/null 2>&1; then
+    stat -f %z "${path}"
+  else
+    stat -c %s "${path}"
+  fi
+}
+
+stat_mtime() {
+  local path="$1"
+  if stat -f %m "${path}" >/dev/null 2>&1; then
+    stat -f %m "${path}"
+  else
+    stat -c %Y "${path}"
+  fi
+}
+
+checksum_file() {
+  local path="$1"
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "${path}" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "${path}" | awk '{print $1}'
+  else
+    python3 "${ROOT_DIR}/scripts/datasets/sha256sum.py" "${path}"
+  fi
+}
+
+supports_range_requests() {
+  local url="$1"
+  local headers
+  headers=$(curl -sI -L --max-time 10 "${url}" 2>/dev/null | grep -Ei '^Accept-Ranges:')
+  if [[ "${headers}" =~ [Bb]ytes ]]; then
+    return 0
+  fi
+  return 1
+}
+
+get_gh_token() {
+  if [[ -n "${GH_TOKEN}" ]]; then
+    echo "${GH_TOKEN}"
+    return 0
+  fi
+  if [[ "${USE_GH_AUTH}" != "1" ]]; then
+    return 1
+  fi
+  if command -v gh >/dev/null 2>&1; then
+    local token
+    token=$(gh auth token 2>/dev/null || true)
+    if [[ -n "${token}" ]]; then
+      GH_TOKEN="${token}"
+      echo "${token}"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+is_github_url() {
+  local url="$1"
+  [[ "${url}" == *"github.com"* || "${url}" == *"githubusercontent.com"* || "${url}" == *"raw.githubusercontent.com"* ]]
+}
+
+cache_lookup() {
+  local path="$1"
+  local size
+  size="$(stat_size "${path}")"
+  if [[ ! -f "${VERIFY_CACHE_FILE}" ]]; then
+    return 1
+  fi
+  # Match on path and size only; mtime is stored but not used for lookup
+  # so that touching a file doesn't invalidate the cache
+  awk -F'\t' -v p="${path}" -v s="${size}" \
+    '$1==p && $2==s {found=1} END {exit(found?0:1)}' \
+    "${VERIFY_CACHE_FILE}" >/dev/null 2>&1
+}
+
+cache_store() {
+  local path="$1"
+  local size mtime checksum tmp
+  size="$(stat_size "${path}")"
+  mtime="$(stat_mtime "${path}")"
+  checksum="$(checksum_file "${path}")"
+  mkdir -p "$(dirname "${VERIFY_CACHE_FILE}")"
+  tmp="${VERIFY_CACHE_FILE}.tmp"
+  if [[ -f "${VERIFY_CACHE_FILE}" ]]; then
+    awk -F'\t' -v p="${path}" '$1!=p' "${VERIFY_CACHE_FILE}" > "${tmp}" || true
+  else
+    : > "${tmp}"
+  fi
+  printf "%s\t%s\t%s\t%s\n" "${path}" "${size}" "${mtime}" "${checksum}" >> "${tmp}"
+  mv "${tmp}" "${VERIFY_CACHE_FILE}"
 }
 
 should_download() {
@@ -151,7 +252,7 @@ download_file() {
     fi
   fi
   if [[ "${USE_ARIA2}" == "1" ]] && command -v aria2c >/dev/null 2>&1; then
-    # Some hosts do not handle multi-range requests well.
+    # Some hosts do not handle multi-range requests well (hardcoded fallbacks).
     if [[ "${url}" == *"datashare.ed.ac.uk"* || "${url}" == *"datashare.is.ed.ac.uk"* ]]; then
       aria2_conn=1
       aria2_split=1
@@ -165,18 +266,32 @@ download_file() {
       aria2_conn=1
       aria2_split=1
       aria2_file_alloc="none"
+    elif ! supports_range_requests "${url}"; then
+      # Server doesn't advertise range support; use single connection
+      echo "[info] server does not support range requests, using single connection: ${url}" >&2
+      aria2_conn=1
+      aria2_split=1
+    fi
+    # Build aria2c auth header for GitHub URLs
+    local aria2_auth_header=""
+    local gh_token
+    if is_github_url "${url}" && gh_token=$(get_gh_token); then
+      aria2_auth_header="--header=Authorization: token ${gh_token}"
+      echo "[info] using GitHub authentication for: ${url}" >&2
     fi
     if [[ "${aria2_continue}" == "1" ]]; then
       aria2c -x "${aria2_conn}" -s "${aria2_split}" -k "${ARIA2_MIN_SPLIT}" -c \
         --check-integrity=true \
         --file-allocation="${aria2_file_alloc}" \
         --user-agent="${ARIA2_USER_AGENT}" \
+        ${aria2_auth_header} \
         -d "$(dirname "${out}")" -o "$(basename "${out}")" "${url}"
     else
       aria2c -x "${aria2_conn}" -s "${aria2_split}" -k "${ARIA2_MIN_SPLIT}" \
       --check-integrity=true \
       --file-allocation="${aria2_file_alloc}" \
       --user-agent="${ARIA2_USER_AGENT}" \
+      ${aria2_auth_header} \
       -d "$(dirname "${out}")" -o "$(basename "${out}")" "${url}"
     fi
     status=$?
@@ -191,25 +306,55 @@ download_file() {
     fi
   fi
   if [[ "${USE_ARIA2}" != "1" ]]; then
+    local auth_header=""
+    local gh_token
+    if is_github_url "${url}" && gh_token=$(get_gh_token); then
+      auth_header="-H 'Authorization: token ${gh_token}'"
+      echo "[info] using GitHub authentication for: ${url}" >&2
+    fi
     if command -v curl >/dev/null 2>&1; then
       if [[ "${RESUME}" == "1" ]]; then
-        if ! curl -L -C - --fail -o "${out}" "${url}"; then
-          echo "[warn] curl resume failed, retrying full download: ${url}" >&2
-          rm -f "${out}"
-          curl -L --fail -o "${out}" "${url}"
+        if [[ -n "${auth_header}" ]]; then
+          if ! curl -L -C - --fail -H "Authorization: token ${gh_token}" -o "${out}" "${url}"; then
+            echo "[warn] curl resume failed, retrying full download: ${url}" >&2
+            rm -f "${out}"
+            curl -L --fail -H "Authorization: token ${gh_token}" -o "${out}" "${url}"
+          fi
+        else
+          if ! curl -L -C - --fail -o "${out}" "${url}"; then
+            echo "[warn] curl resume failed, retrying full download: ${url}" >&2
+            rm -f "${out}"
+            curl -L --fail -o "${out}" "${url}"
+          fi
         fi
       else
-        curl -L --fail -o "${out}" "${url}"
+        if [[ -n "${auth_header}" ]]; then
+          curl -L --fail -H "Authorization: token ${gh_token}" -o "${out}" "${url}"
+        else
+          curl -L --fail -o "${out}" "${url}"
+        fi
       fi
     elif command -v wget >/dev/null 2>&1; then
       if [[ "${RESUME}" == "1" ]]; then
-        if ! wget -c -O "${out}" "${url}"; then
-          echo "[warn] wget resume failed, retrying full download: ${url}" >&2
-          rm -f "${out}"
-          wget -O "${out}" "${url}"
+        if [[ -n "${auth_header}" ]]; then
+          if ! wget -c --header="Authorization: token ${gh_token}" -O "${out}" "${url}"; then
+            echo "[warn] wget resume failed, retrying full download: ${url}" >&2
+            rm -f "${out}"
+            wget --header="Authorization: token ${gh_token}" -O "${out}" "${url}"
+          fi
+        else
+          if ! wget -c -O "${out}" "${url}"; then
+            echo "[warn] wget resume failed, retrying full download: ${url}" >&2
+            rm -f "${out}"
+            wget -O "${out}" "${url}"
+          fi
         fi
       else
-        wget -O "${out}" "${url}"
+        if [[ -n "${auth_header}" ]]; then
+          wget --header="Authorization: token ${gh_token}" -O "${out}" "${url}"
+        else
+          wget -O "${out}" "${url}"
+        fi
       fi
     else
       echo "Need curl or wget to download files." >&2
@@ -238,21 +383,47 @@ extract_archive() {
 
 verify_archive() {
   local archive="$1"
+  local status=0
+  if [[ "${VERIFY_CACHE}" == "1" ]]; then
+    if cache_lookup "${archive}"; then
+      return 0
+    fi
+  fi
   case "${archive}" in
     *.zip)
       command -v unzip >/dev/null 2>&1 || return 0
       unzip -tqq "${archive}" >/dev/null 2>&1
-      return $?
+      status=$?
+      if [[ ${status} -eq 0 && "${VERIFY_CACHE}" == "1" ]]; then
+        cache_store "${archive}"
+      fi
+      return ${status}
       ;;
     *.tar.gz|*.tgz)
       command -v tar >/dev/null 2>&1 || return 0
       tar -tzf "${archive}" >/dev/null 2>&1
-      return $?
+      status=$?
+      if [[ ${status} -eq 0 && "${VERIFY_CACHE}" == "1" ]]; then
+        cache_store "${archive}"
+      fi
+      return ${status}
       ;;
     *)
       return 0
       ;;
   esac
+}
+
+extract_if_present() {
+  local name="$1"
+  local archive="$2"
+  local dest="$3"
+  if [[ -f "${archive}" ]]; then
+    echo "[info] extracting ${name} from ${archive}"
+    extract_archive "${archive}" "${dest}"
+    return 0
+  fi
+  return 1
 }
 
 queue_download() {
@@ -303,9 +474,21 @@ queue_download() {
     aria2_file_alloc="none"
     aria2_retry_wait="10"
     aria2_max_tries="10"
+  elif ! supports_range_requests "${url}"; then
+    # Server doesn't advertise range support; use single connection
+    echo "[info] server does not support range requests, using single connection: ${url}" >&2
+    aria2_conn=1
+    aria2_split=1
   fi
 
   mkdir -p "${out_dir}"
+  # Get GitHub auth token if applicable
+  local gh_token
+  local use_gh_auth=""
+  if is_github_url "${url}" && gh_token=$(get_gh_token); then
+    use_gh_auth="1"
+    echo "[info] queuing with GitHub authentication: ${url}" >&2
+  fi
   {
     echo "${url}"
     echo "  dir=${out_dir}"
@@ -315,6 +498,9 @@ queue_download() {
     echo "  min-split-size=${ARIA2_MIN_SPLIT}"
     echo "  file-allocation=${aria2_file_alloc}"
     echo "  user-agent=${aria2_user_agent}"
+    if [[ -n "${use_gh_auth}" ]]; then
+      echo "  header=Authorization: token ${gh_token}"
+    fi
     if [[ "${url}" == *"zenodo.org"* ]]; then
       echo "  header=Referer: ${ZENODO_REFERER}"
     fi
@@ -587,6 +773,38 @@ if [[ "${DOWNLOAD}" == "1" ]]; then
     run_parallel_downloads
     process_fsd50k_merge_queue
     process_extract_queue
+  fi
+fi
+
+# Ensure extracted datasets if archives already exist
+if [[ ! -d "${VCTK_DIR}" ]]; then
+  extract_if_present "VCTK" "${DOWNLOAD_DIR}/VCTK-Corpus-0.92.zip" "${EXTRACT_DIR}"
+  if [[ -d "${EXTRACT_DIR}/VCTK-Corpus-0.92" ]]; then
+    VCTK_DIR="${EXTRACT_DIR}/VCTK-Corpus-0.92"
+  elif [[ -d "${EXTRACT_DIR}/VCTK-Corpus" ]]; then
+    VCTK_DIR="${EXTRACT_DIR}/VCTK-Corpus"
+  fi
+fi
+
+if [[ ! -d "${LIBRISPEECH_DIR}" ]]; then
+  shopt -s nullglob
+  archives=(
+    "${DOWNLOAD_DIR}"/train-*.tar.gz
+    "${DOWNLOAD_DIR}"/dev-*.tar.gz
+    "${DOWNLOAD_DIR}"/test-*.tar.gz
+  )
+  if (( ${#archives[@]} > 0 )); then
+    echo "[info] extracting LibriSpeech archives from ${DOWNLOAD_DIR}"
+    for tgz in "${archives[@]}"; do
+      extract_archive "${tgz}" "${EXTRACT_DIR}"
+    done
+  fi
+  shopt -u nullglob
+fi
+
+if [[ -d "${FSD50K_DIR}" ]]; then
+  if [[ ! -f "${FSD50K_DIR}/FSD50K.metadata/FSD50K.metadata.csv" ]]; then
+    extract_if_present "FSD50K metadata" "${DOWNLOAD_DIR}/FSD50K.metadata.zip" "${FSD50K_DIR}"
   fi
 fi
 
