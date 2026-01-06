@@ -96,9 +96,7 @@ class MultiFrameModule(nn.Module):
 
     @staticmethod
     def solve(Rxx, rss, diag_eps: float = 1e-8, eps: float = 1e-7) -> Tensor:
-        return torch.einsum(
-            "...nm,...m->...n", torch.inverse(_tik_reg(Rxx, diag_eps, eps)), rss
-        )  # [T, F, N]
+        return torch.einsum("...nm,...m->...n", torch.inverse(_tik_reg(Rxx, diag_eps, eps)), rss)  # [T, F, N]
 
     @staticmethod
     def apply_coefs(spec: Tensor, coefs: Tensor) -> Tensor:
@@ -209,11 +207,11 @@ class DFreal(MultiFrameModule):
 
 class MultiResolutionDF(nn.Module):
     """Apply deep filtering at multiple frequency resolutions.
-    
+
     Combines deep filtering at different frequency resolutions with learnable
     weighting to balance fine-grained high-frequency detail with robust
     low-frequency enhancement.
-    
+
     Args:
         resolutions: List of (num_freqs, frame_size) tuples defining each resolution.
             Each tuple specifies the number of frequency bins and the temporal
@@ -222,7 +220,7 @@ class MultiResolutionDF(nn.Module):
         learnable_weights: If True, resolution weights are learnable parameters.
             If False, equal weights are used as a fixed buffer.
         use_real: If True, use DFreal for real-valued processing. Otherwise use DF.
-    
+
     Example:
         >>> mr_df = MultiResolutionDF(
         ...     resolutions=[(96, 5), (48, 3), (24, 2)],
@@ -236,7 +234,7 @@ class MultiResolutionDF(nn.Module):
         ... ]
         >>> enhanced = mr_df(spec, coefs_list)
     """
-    
+
     def __init__(
         self,
         resolutions: List[Tuple[int, int]] = [(96, 5), (48, 3), (24, 2)],
@@ -245,35 +243,29 @@ class MultiResolutionDF(nn.Module):
         use_real: bool = False,
     ):
         super().__init__()
-        
+
         self.resolutions = resolutions
         self.use_real = use_real
-        
+
         # Create DF operations for each resolution
         df_class = DFreal if use_real else DF
-        self.df_ops = nn.ModuleList([
-            df_class(num_freqs=nf, frame_size=fs, lookahead=lookahead)
-            for nf, fs in resolutions
-        ])
-        
+        self.df_ops = nn.ModuleList(
+            [df_class(num_freqs=nf, frame_size=fs, lookahead=lookahead) for nf, fs in resolutions]
+        )
+
         # Resolution weighting
         if learnable_weights:
-            self.resolution_weights = nn.Parameter(
-                torch.ones(len(resolutions)) / len(resolutions)
-            )
+            self.resolution_weights = nn.Parameter(torch.ones(len(resolutions)) / len(resolutions))
         else:
-            self.register_buffer(
-                "resolution_weights",
-                torch.ones(len(resolutions)) / len(resolutions)
-            )
-            
+            self.register_buffer("resolution_weights", torch.ones(len(resolutions)) / len(resolutions))
+
     def forward(
         self,
         spec: Tensor,
         coefs_list: List[Tensor],
     ) -> Tensor:
         """Apply multi-resolution deep filtering.
-        
+
         Args:
             spec: Input spectrum [B, C, T, F, 2] where F is the maximum
                 frequency bin count across all resolutions.
@@ -281,30 +273,27 @@ class MultiResolutionDF(nn.Module):
                 Each tensor has shape [B, O, T, F_res, 2] where O is the
                 frame_size for that resolution and F_res is num_freqs.
                 This is the format output by DfOutputReshape.
-                
+
         Returns:
             Enhanced spectrum [B, C, T, F, 2] with the same shape as input.
         """
         if len(coefs_list) != len(self.resolutions):
-            raise ValueError(
-                f"Expected {len(self.resolutions)} coefficient tensors, "
-                f"got {len(coefs_list)}"
-            )
-        
+            raise ValueError(f"Expected {len(self.resolutions)} coefficient tensors, " f"got {len(coefs_list)}")
+
         # Softmax over resolution weights for proper weighting
         weights = F.softmax(self.resolution_weights, dim=0)
-        
+
         # Store full frequency dimension
         full_freqs = spec.shape[-2]
-        
+
         outputs = []
         for df_op, coefs, (nf, _) in zip(self.df_ops, coefs_list, self.resolutions):
             # Extract the frequency range for this resolution
             spec_res = spec[..., :nf, :].clone()
-            
+
             # Apply DF at this resolution
             out_res = df_op(spec_res, coefs)
-            
+
             # Pad back to full frequency range if needed
             if nf < full_freqs:
                 # For frequencies beyond this resolution, use original spec
@@ -313,14 +302,14 @@ class MultiResolutionDF(nn.Module):
                 outputs.append(padded)
             else:
                 outputs.append(out_res)
-                
+
         # Weighted combination of all resolutions
         result = torch.zeros_like(spec)
         for w, out in zip(weights, outputs):
             result = result + w * out
-            
+
         return result
-    
+
     def get_resolution_weights(self) -> Tensor:
         """Return the current softmax-normalized resolution weights."""
         return F.softmax(self.resolution_weights, dim=0)
@@ -328,18 +317,18 @@ class MultiResolutionDF(nn.Module):
 
 class AdaptiveOrderPredictor(nn.Module):
     """Predict optimal filter order based on input characteristics.
-    
+
     Uses learned embeddings to predict the optimal deep filter order for
     each time-frequency region. During training, uses Gumbel-Softmax for
     differentiable soft selection. During inference, uses hard selection.
-    
+
     Args:
         emb_dim: Input embedding dimension.
         max_order: Maximum filter order (inclusive).
         min_order: Minimum filter order (inclusive).
         hidden_dim: Hidden layer dimension in the predictor network.
         dropout: Dropout probability in the predictor.
-        
+
     Example:
         >>> predictor = AdaptiveOrderPredictor(emb_dim=256, max_order=7, min_order=2)
         >>> emb = torch.randn(2, 100, 256)  # [B, T, emb_dim]
@@ -347,7 +336,7 @@ class AdaptiveOrderPredictor(nn.Module):
         >>> print(order_weights.shape)  # [2, 100, 6] for orders 2-7
         >>> print(predicted_order.shape)  # [2, 100]
     """
-    
+
     def __init__(
         self,
         emb_dim: int,
@@ -360,40 +349,38 @@ class AdaptiveOrderPredictor(nn.Module):
         self.max_order = max_order
         self.min_order = min_order
         self.num_orders = max_order - min_order + 1
-        
+
         if self.num_orders <= 0:
-            raise ValueError(
-                f"max_order ({max_order}) must be >= min_order ({min_order})"
-            )
-        
+            raise ValueError(f"max_order ({max_order}) must be >= min_order ({min_order})")
+
         self.predictor = nn.Sequential(
             nn.Linear(emb_dim, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, self.num_orders),
         )
-        
+
     def forward(
         self,
         emb: Tensor,
         temperature: float = 1.0,
     ) -> Tuple[Tensor, Tensor]:
         """Predict filter order from embeddings.
-        
+
         Args:
             emb: Input embedding [B, T, emb_dim] or [B, T, F, emb_dim].
             temperature: Gumbel-Softmax temperature. Lower values produce
                 sharper (more one-hot-like) distributions. Only used during training.
-                
+
         Returns:
-            order_weights: Soft weights over orders [B, T, num_orders] or 
+            order_weights: Soft weights over orders [B, T, num_orders] or
                 [B, T, F, num_orders]. During training, these are Gumbel-Softmax
                 samples. During inference, these are one-hot.
             predicted_order: The selected order as integers [B, T] or [B, T, F],
                 ranging from min_order to max_order.
         """
         logits = self.predictor(emb)  # [..., num_orders]
-        
+
         if self.training:
             # Gumbel-Softmax for differentiable sampling
             order_weights = F.gumbel_softmax(logits, tau=temperature, hard=False)
@@ -401,18 +388,18 @@ class AdaptiveOrderPredictor(nn.Module):
             # Hard selection via argmax + one_hot
             order_idx = logits.argmax(dim=-1)
             order_weights = F.one_hot(order_idx, self.num_orders).float()
-            
+
         # Convert logits argmax to actual order value
         predicted_order = logits.argmax(dim=-1) + self.min_order
-        
+
         return order_weights, predicted_order
-    
+
     def get_order_distribution(self, emb: Tensor) -> Tensor:
         """Get the probability distribution over orders (without sampling).
-        
+
         Args:
             emb: Input embedding [B, T, emb_dim].
-            
+
         Returns:
             order_probs: Probability distribution over orders [B, T, num_orders].
         """
@@ -639,9 +626,7 @@ def _compute_mat_trace(input: torch.Tensor, dim1: int = -2, dim2: int = -1) -> t
         Tensor: trace of the input Tensor
     """
     assert input.ndim >= 2, "The dimension of the tensor must be at least 2."
-    assert (
-        input.shape[dim1] == input.shape[dim2]
-    ), "The size of ``dim1`` and ``dim2`` must be the same."
+    assert input.shape[dim1] == input.shape[dim2], "The size of ``dim1`` and ``dim2`` must be the same."
     input = torch.diagonal(input, 0, dim1=dim1, dim2=dim2)
     return input.sum(dim=-1)
 
@@ -671,9 +656,7 @@ def compute_corr(X: Tensor, N: int):
     return Rxx
 
 
-def compute_ideal_wf(
-    rxx_via_rssrnn=True, cholesky_decomp=False, inverse=True, enforce_constraints=True, manual=False
-):
+def compute_ideal_wf(rxx_via_rssrnn=True, cholesky_decomp=False, inverse=True, enforce_constraints=True, manual=False):
     from icecream import ic, install
 
     import libdf
@@ -701,12 +684,8 @@ def compute_ideal_wf(
     n_freqs = p.fft_size // 2 + 1
 
     df = libdf.DF(sr=p.sr, fft_size=p.fft_size, hop_size=p.hop_size, nb_bands=p.nb_erb)
-    s = load_audio("assets/clean_freesound_33711.wav", p.sr, num_frames=5 * p.sr)[0].mean(
-        0, keepdim=True
-    )
-    n = load_audio("assets/noise_freesound_2530.wav", p.sr, num_frames=5 * p.sr)[0].mean(
-        0, keepdim=True
-    )
+    s = load_audio("assets/clean_freesound_33711.wav", p.sr, num_frames=5 * p.sr)[0].mean(0, keepdim=True)
+    n = load_audio("assets/noise_freesound_2530.wav", p.sr, num_frames=5 * p.sr)[0].mean(0, keepdim=True)
     x = s + n
     save_audio("out/noisy.wav", x, p.sr)
 
@@ -780,12 +759,8 @@ def compute_ideal_mvdr(cholesky_decomp=False, inverse=True, enforce_constraints=
     n_freqs = p.fft_size // 2 + 1
 
     df = libdf.DF(sr=p.sr, fft_size=p.fft_size, hop_size=p.hop_size, nb_bands=p.nb_erb)
-    s = load_audio("assets/clean_freesound_33711.wav", p.sr, num_frames=5 * p.sr)[0].mean(
-        0, keepdim=True
-    )
-    n = load_audio("assets/noise_freesound_2530.wav", p.sr, num_frames=5 * p.sr)[0].mean(
-        0, keepdim=True
-    )
+    s = load_audio("assets/clean_freesound_33711.wav", p.sr, num_frames=5 * p.sr)[0].mean(0, keepdim=True)
+    n = load_audio("assets/noise_freesound_2530.wav", p.sr, num_frames=5 * p.sr)[0].mean(0, keepdim=True)
     x = s + n
     save_audio("out/noisy.wav", x, p.sr)
 

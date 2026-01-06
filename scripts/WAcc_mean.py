@@ -11,8 +11,4 @@ assert len(sys.argv) > 1, USAGE
 assert os.path.isfile(sys.argv[1]), USAGE
 
 df = pd.read_csv(sys.argv[1])
-print(
-    "Mean WAcc for the file {} is {:.2f} %".format(
-        os.path.basename(sys.argv[1]), np.mean(df["wacc"]) * 100
-    )
-)
+print("Mean WAcc for the file {} is {:.2f} %".format(os.path.basename(sys.argv[1]), np.mean(df["wacc"]) * 100))

@@ -34,6 +34,12 @@ ARIA2_MAX_CONCURRENT="${ARIA2_MAX_CONCURRENT:-6}"
 ARIA2_FILE_ALLOC="${ARIA2_FILE_ALLOC:-prealloc}"
 ARIA2_USER_AGENT="${ARIA2_USER_AGENT:-Mozilla/5.0}"
 ZENODO_REFERER="${ZENODO_REFERER:-https://zenodo.org/records/4060432/}"
+VERIFY_CACHE="${VERIFY_CACHE:-1}"
+VERIFY_CACHE_FILE="${VERIFY_CACHE_FILE:-${DOWNLOAD_DIR}/.verify_cache.tsv}"
+
+# GitHub authentication (uses gh CLI if available)
+USE_GH_AUTH="${USE_GH_AUTH:-1}"  # use gh auth token for GitHub URLs
+GH_TOKEN=""
 
 # Optional: use audb to download AIR/OpenAIR (install if missing)
 USE_AUDB="${USE_AUDB:-1}"
@@ -52,12 +58,13 @@ DOWNLOAD_ACOUSTICROOMS="${DOWNLOAD_ACOUSTICROOMS:-}"
 mkdir -p "${LIST_DIR}"
 
 # Dataset root paths (override if you already downloaded elsewhere)
-VCTK_DIR="${VCTK_DIR:-${EXTRACT_DIR}/VCTK-Corpus}"
+VCTK_DIR="${VCTK_DIR:-${EXTRACT_DIR}/VCTK-Corpus-0.92}"
 LIBRISPEECH_DIR="${LIBRISPEECH_DIR:-${EXTRACT_DIR}/LibriSpeech}"
 MUSAN_DIR="${MUSAN_DIR:-${EXTRACT_DIR}/musan}"
 FSD50K_DIR="${FSD50K_DIR:-${EXTRACT_DIR}/FSD50K}"
-AIR_RIR_DIR="${AIR_RIR_DIR:-${EXTRACT_DIR}/AIR}"
-OPENAIR_DIR="${OPENAIR_DIR:-${EXTRACT_DIR}/OpenAIR}"
+# AIR/OpenAIR via audb: AIR goes to data/, OpenAIR goes to wav/
+AIR_RIR_DIR="${AIR_RIR_DIR:-${AUDB_DIR}/data}"
+OPENAIR_DIR="${OPENAIR_DIR:-${AUDB_DIR}/wav}"
 ACOUSTICROOMS_DIR="${ACOUSTICROOMS_DIR:-${EXTRACT_DIR}/AcousticRooms}"
 
 ARIA2_PARALLEL_ACTIVE=0
@@ -81,6 +88,101 @@ write_list() {
   local pattern="$3"
   find "${src_dir}" -type f \( -iname "${pattern}" \) | sort > "${out_file}"
   echo "[ok] wrote $(wc -l < "${out_file}") entries -> ${out_file}"
+}
+
+stat_size() {
+  local path="$1"
+  if stat -f %z "${path}" >/dev/null 2>&1; then
+    stat -f %z "${path}"
+  else
+    stat -c %s "${path}"
+  fi
+}
+
+stat_mtime() {
+  local path="$1"
+  if stat -f %m "${path}" >/dev/null 2>&1; then
+    stat -f %m "${path}"
+  else
+    stat -c %Y "${path}"
+  fi
+}
+
+checksum_file() {
+  local path="$1"
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "${path}" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "${path}" | awk '{print $1}'
+  else
+    python3 "${ROOT_DIR}/scripts/datasets/sha256sum.py" "${path}"
+  fi
+}
+
+supports_range_requests() {
+  local url="$1"
+  local headers
+  headers=$(curl -sI -L --max-time 10 "${url}" 2>/dev/null | grep -Ei '^Accept-Ranges:')
+  if [[ "${headers}" =~ [Bb]ytes ]]; then
+    return 0
+  fi
+  return 1
+}
+
+get_gh_token() {
+  if [[ -n "${GH_TOKEN}" ]]; then
+    echo "${GH_TOKEN}"
+    return 0
+  fi
+  if [[ "${USE_GH_AUTH}" != "1" ]]; then
+    return 1
+  fi
+  if command -v gh >/dev/null 2>&1; then
+    local token
+    token=$(gh auth token 2>/dev/null || true)
+    if [[ -n "${token}" ]]; then
+      GH_TOKEN="${token}"
+      echo "${token}"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+is_github_url() {
+  local url="$1"
+  [[ "${url}" == *"github.com"* || "${url}" == *"githubusercontent.com"* || "${url}" == *"raw.githubusercontent.com"* ]]
+}
+
+cache_lookup() {
+  local path="$1"
+  local size
+  size="$(stat_size "${path}")"
+  if [[ ! -f "${VERIFY_CACHE_FILE}" ]]; then
+    return 1
+  fi
+  # Match on path and size only; mtime is stored but not used for lookup
+  # so that touching a file doesn't invalidate the cache
+  awk -F'\t' -v p="${path}" -v s="${size}" \
+    '$1==p && $2==s {found=1} END {exit(found?0:1)}' \
+    "${VERIFY_CACHE_FILE}" >/dev/null 2>&1
+}
+
+cache_store() {
+  local path="$1"
+  local size mtime checksum tmp
+  size="$(stat_size "${path}")"
+  mtime="$(stat_mtime "${path}")"
+  checksum="$(checksum_file "${path}")"
+  mkdir -p "$(dirname "${VERIFY_CACHE_FILE}")"
+  tmp="${VERIFY_CACHE_FILE}.tmp"
+  if [[ -f "${VERIFY_CACHE_FILE}" ]]; then
+    awk -F'\t' -v p="${path}" '$1!=p' "${VERIFY_CACHE_FILE}" > "${tmp}" || true
+  else
+    : > "${tmp}"
+  fi
+  printf "%s\t%s\t%s\t%s\n" "${path}" "${size}" "${mtime}" "${checksum}" >> "${tmp}"
+  mv "${tmp}" "${VERIFY_CACHE_FILE}"
 }
 
 should_download() {
@@ -151,7 +253,7 @@ download_file() {
     fi
   fi
   if [[ "${USE_ARIA2}" == "1" ]] && command -v aria2c >/dev/null 2>&1; then
-    # Some hosts do not handle multi-range requests well.
+    # Some hosts do not handle multi-range requests well (hardcoded fallbacks).
     if [[ "${url}" == *"datashare.ed.ac.uk"* || "${url}" == *"datashare.is.ed.ac.uk"* ]]; then
       aria2_conn=1
       aria2_split=1
@@ -165,18 +267,37 @@ download_file() {
       aria2_conn=1
       aria2_split=1
       aria2_file_alloc="none"
+    elif ! supports_range_requests "${url}"; then
+      # Server doesn't advertise range support; use single connection
+      echo "[info] server does not support range requests, using single connection: ${url}" >&2
+      aria2_conn=1
+      aria2_split=1
+    fi
+    # Build aria2c auth header for GitHub URLs
+    # NOTE: Token is passed via command line, which is visible via `ps` on multi-user systems.
+    # For shared environments, consider setting GH_TOKEN via a secrets manager or using
+    # `gh release download` directly for GitHub releases.
+    local aria2_auth_header=""
+    local gh_token
+    if is_github_url "${url}" && gh_token=$(get_gh_token); then
+      aria2_auth_header="--header=Authorization: token ${gh_token}"
+      echo "[info] using GitHub authentication for: ${url}" >&2
     fi
     if [[ "${aria2_continue}" == "1" ]]; then
+      # shellcheck disable=SC2086  # Intentionally unquoted to allow empty expansion
       aria2c -x "${aria2_conn}" -s "${aria2_split}" -k "${ARIA2_MIN_SPLIT}" -c \
         --check-integrity=true \
         --file-allocation="${aria2_file_alloc}" \
         --user-agent="${ARIA2_USER_AGENT}" \
+        ${aria2_auth_header} \
         -d "$(dirname "${out}")" -o "$(basename "${out}")" "${url}"
     else
+      # shellcheck disable=SC2086  # Intentionally unquoted to allow empty expansion
       aria2c -x "${aria2_conn}" -s "${aria2_split}" -k "${ARIA2_MIN_SPLIT}" \
       --check-integrity=true \
       --file-allocation="${aria2_file_alloc}" \
       --user-agent="${ARIA2_USER_AGENT}" \
+      ${aria2_auth_header} \
       -d "$(dirname "${out}")" -o "$(basename "${out}")" "${url}"
     fi
     status=$?
@@ -191,25 +312,57 @@ download_file() {
     fi
   fi
   if [[ "${USE_ARIA2}" != "1" ]]; then
+    # NOTE: Token is passed via command line, which is visible via `ps` on multi-user systems.
+    # For shared environments, consider using `gh release download` directly for GitHub releases.
+    local auth_header=""
+    local gh_token
+    if is_github_url "${url}" && gh_token=$(get_gh_token); then
+      auth_header="-H 'Authorization: token ${gh_token}'"
+      echo "[info] using GitHub authentication for: ${url}" >&2
+    fi
     if command -v curl >/dev/null 2>&1; then
       if [[ "${RESUME}" == "1" ]]; then
-        if ! curl -L -C - --fail -o "${out}" "${url}"; then
-          echo "[warn] curl resume failed, retrying full download: ${url}" >&2
-          rm -f "${out}"
-          curl -L --fail -o "${out}" "${url}"
+        if [[ -n "${auth_header}" ]]; then
+          if ! curl -L -C - --fail -H "Authorization: token ${gh_token}" -o "${out}" "${url}"; then
+            echo "[warn] curl resume failed, retrying full download: ${url}" >&2
+            rm -f "${out}"
+            curl -L --fail -H "Authorization: token ${gh_token}" -o "${out}" "${url}"
+          fi
+        else
+          if ! curl -L -C - --fail -o "${out}" "${url}"; then
+            echo "[warn] curl resume failed, retrying full download: ${url}" >&2
+            rm -f "${out}"
+            curl -L --fail -o "${out}" "${url}"
+          fi
         fi
       else
-        curl -L --fail -o "${out}" "${url}"
+        if [[ -n "${auth_header}" ]]; then
+          curl -L --fail -H "Authorization: token ${gh_token}" -o "${out}" "${url}"
+        else
+          curl -L --fail -o "${out}" "${url}"
+        fi
       fi
     elif command -v wget >/dev/null 2>&1; then
       if [[ "${RESUME}" == "1" ]]; then
-        if ! wget -c -O "${out}" "${url}"; then
-          echo "[warn] wget resume failed, retrying full download: ${url}" >&2
-          rm -f "${out}"
-          wget -O "${out}" "${url}"
+        if [[ -n "${auth_header}" ]]; then
+          if ! wget -c --header="Authorization: token ${gh_token}" -O "${out}" "${url}"; then
+            echo "[warn] wget resume failed, retrying full download: ${url}" >&2
+            rm -f "${out}"
+            wget --header="Authorization: token ${gh_token}" -O "${out}" "${url}"
+          fi
+        else
+          if ! wget -c -O "${out}" "${url}"; then
+            echo "[warn] wget resume failed, retrying full download: ${url}" >&2
+            rm -f "${out}"
+            wget -O "${out}" "${url}"
+          fi
         fi
       else
-        wget -O "${out}" "${url}"
+        if [[ -n "${auth_header}" ]]; then
+          wget --header="Authorization: token ${gh_token}" -O "${out}" "${url}"
+        else
+          wget -O "${out}" "${url}"
+        fi
       fi
     else
       echo "Need curl or wget to download files." >&2
@@ -227,7 +380,7 @@ extract_archive() {
       tar -xzf "${archive}" -C "${dest}"
       ;;
     *.zip)
-      unzip -q "${archive}" -d "${dest}"
+      unzip -n -q "${archive}" -d "${dest}"
       ;;
     *)
       echo "Unknown archive format: ${archive}" >&2
@@ -238,21 +391,58 @@ extract_archive() {
 
 verify_archive() {
   local archive="$1"
+  local status=0
+  if [[ "${VERIFY_CACHE}" == "1" ]]; then
+    if cache_lookup "${archive}"; then
+      return 0
+    fi
+  fi
   case "${archive}" in
     *.zip)
       command -v unzip >/dev/null 2>&1 || return 0
+      # Check if this is a split zip (has .z01 sibling) - skip verification
+      # since the parts are verified individually and the main .zip alone
+      # cannot be verified without the parts present
+      local base="${archive%.zip}"
+      if [[ -f "${base}.z01" ]]; then
+        # Split zip: trust that parts are valid, cache based on size only
+        if [[ "${VERIFY_CACHE}" == "1" ]]; then
+          cache_store "${archive}"
+        fi
+        return 0
+      fi
       unzip -tqq "${archive}" >/dev/null 2>&1
-      return $?
+      status=$?
+      if [[ ${status} -eq 0 && "${VERIFY_CACHE}" == "1" ]]; then
+        cache_store "${archive}"
+      fi
+      return ${status}
       ;;
     *.tar.gz|*.tgz)
       command -v tar >/dev/null 2>&1 || return 0
       tar -tzf "${archive}" >/dev/null 2>&1
-      return $?
+      status=$?
+      if [[ ${status} -eq 0 && "${VERIFY_CACHE}" == "1" ]]; then
+        cache_store "${archive}"
+      fi
+      return ${status}
       ;;
     *)
       return 0
       ;;
   esac
+}
+
+extract_if_present() {
+  local name="$1"
+  local archive="$2"
+  local dest="$3"
+  if [[ -f "${archive}" ]]; then
+    echo "[info] extracting ${name} from ${archive}"
+    extract_archive "${archive}" "${dest}"
+    return 0
+  fi
+  return 1
 }
 
 queue_download() {
@@ -303,9 +493,23 @@ queue_download() {
     aria2_file_alloc="none"
     aria2_retry_wait="10"
     aria2_max_tries="10"
+  elif ! supports_range_requests "${url}"; then
+    # Server doesn't advertise range support; use single connection
+    echo "[info] server does not support range requests, using single connection: ${url}" >&2
+    aria2_conn=1
+    aria2_split=1
   fi
 
   mkdir -p "${out_dir}"
+  # Get GitHub auth token if applicable
+  # NOTE: Token is written to aria2 input file. Ensure this file is not world-readable
+  # on shared systems. The file is created in DOWNLOAD_DIR with default permissions.
+  local gh_token
+  local use_gh_auth=""
+  if is_github_url "${url}" && gh_token=$(get_gh_token); then
+    use_gh_auth="1"
+    echo "[info] queuing with GitHub authentication: ${url}" >&2
+  fi
   {
     echo "${url}"
     echo "  dir=${out_dir}"
@@ -315,6 +519,9 @@ queue_download() {
     echo "  min-split-size=${ARIA2_MIN_SPLIT}"
     echo "  file-allocation=${aria2_file_alloc}"
     echo "  user-agent=${aria2_user_agent}"
+    if [[ -n "${use_gh_auth}" ]]; then
+      echo "  header=Authorization: token ${gh_token}"
+    fi
     if [[ "${url}" == *"zenodo.org"* ]]; then
       echo "  header=Referer: ${ZENODO_REFERER}"
     fi
@@ -426,7 +633,7 @@ fsd50k_merge_and_unzip() {
   local zip_base="$1"
   local out_dir="$2"
   (cd "${DOWNLOAD_DIR}" && zip -s 0 "${zip_base}" --out "${zip_base}.merged.zip")
-  unzip -q "${DOWNLOAD_DIR}/${zip_base}.merged.zip" -d "${out_dir}"
+  unzip -n -q "${DOWNLOAD_DIR}/${zip_base}.merged.zip" -d "${out_dir}"
   if [[ "${KEEP_ARCHIVES}" == "0" ]]; then
     rm -f "${DOWNLOAD_DIR:?}/${zip_base}.merged.zip"
   fi
@@ -520,10 +727,11 @@ if [[ "${DOWNLOAD}" == "1" ]]; then
     esac
   fi
 
-  # VCTK
+  # VCTK (zip has no top-level dir, so extract into dedicated subdirectory)
   if should_download "${DOWNLOAD_VCTK}"; then
     VCTK_URL="${VCTK_URL:-https://datashare.is.ed.ac.uk/bitstream/handle/10283/3443/VCTK-Corpus-0.92.zip}"
-    download_and_extract "${VCTK_URL}" "${EXTRACT_DIR}"
+    mkdir -p "${EXTRACT_DIR}/VCTK-Corpus-0.92"
+    download_and_extract "${VCTK_URL}" "${EXTRACT_DIR}/VCTK-Corpus-0.92"
   fi
 
   # LibriSpeech
@@ -560,16 +768,15 @@ if [[ "${DOWNLOAD}" == "1" ]]; then
   fi
 
   # AIR/OpenAIR via audb (optional)
+  # audb downloads AIR to data/ and OpenAIR to wav/ within AUDB_DIR
   if [[ "${USE_AUDB}" == "1" ]]; then
     if maybe_install_audb; then
       mkdir -p "${AUDB_DIR}"
       if should_download "${DOWNLOAD_AIR}"; then
         AUDB_NAME="air" AUDB_VERSION="${AIR_VERSION:-1.4.2}" AUDB_ROOT="${AUDB_DIR}" download_with_audb
-        AIR_RIR_DIR="${AUDB_DIR}/air"
       fi
       if should_download "${DOWNLOAD_OPENAIR}"; then
         AUDB_NAME="openair" AUDB_VERSION="${OPENAIR_VERSION:-1.0.0}" AUDB_ROOT="${AUDB_DIR}" download_with_audb
-        OPENAIR_DIR="${AUDB_DIR}/openair"
       fi
     else
       echo "[skip] audb not installed; set INSTALL_AUDB=1 to auto-install." >&2
@@ -581,6 +788,15 @@ if [[ "${DOWNLOAD}" == "1" ]]; then
     mkdir -p "${ACOUSTICROOMS_DIR}"
     download_and_extract "https://github.com/facebookresearch/AcousticRooms/raw/clean-main/single_channel_ir.zip" "${ACOUSTICROOMS_DIR}"
     download_and_extract "https://github.com/facebookresearch/AcousticRooms/raw/clean-main/metadata.zip" "${ACOUSTICROOMS_DIR}"
+    # AcousticRooms has nested zips inside single_channel_ir that need extraction
+    if [[ -d "${ACOUSTICROOMS_DIR}/single_channel_ir_1" ]]; then
+      echo "[info] extracting nested AcousticRooms zips..."
+      for nested_zip in "${ACOUSTICROOMS_DIR}/single_channel_ir_1"/*.zip; do
+        if [[ -f "${nested_zip}" ]]; then
+          unzip -o -q "${nested_zip}" -d "${ACOUSTICROOMS_DIR}/single_channel_ir_1/"
+        fi
+      done
+    fi
   fi
 
   if [[ "${ARIA2_PARALLEL_ACTIVE}" == "1" ]]; then
@@ -590,9 +806,49 @@ if [[ "${DOWNLOAD}" == "1" ]]; then
   fi
 fi
 
+# Ensure extracted datasets if archives already exist
+if [[ ! -d "${VCTK_DIR}" ]]; then
+  # Check if VCTK was extracted flat into EXTRACT_DIR (no subdirectory)
+  if [[ -d "${EXTRACT_DIR}/wav48_silence_trimmed" && -f "${EXTRACT_DIR}/speaker-info.txt" ]]; then
+    VCTK_DIR="${EXTRACT_DIR}"
+  else
+    mkdir -p "${EXTRACT_DIR}/VCTK-Corpus-0.92"
+    extract_if_present "VCTK" "${DOWNLOAD_DIR}/VCTK-Corpus-0.92.zip" "${EXTRACT_DIR}/VCTK-Corpus-0.92"
+    if [[ -d "${EXTRACT_DIR}/VCTK-Corpus-0.92/wav48_silence_trimmed" ]]; then
+      VCTK_DIR="${EXTRACT_DIR}/VCTK-Corpus-0.92"
+    elif [[ -d "${EXTRACT_DIR}/VCTK-Corpus" ]]; then
+      VCTK_DIR="${EXTRACT_DIR}/VCTK-Corpus"
+    fi
+  fi
+fi
+
+if [[ ! -d "${LIBRISPEECH_DIR}" ]]; then
+  shopt -s nullglob
+  archives=(
+    "${DOWNLOAD_DIR}"/train-*.tar.gz
+    "${DOWNLOAD_DIR}"/dev-*.tar.gz
+    "${DOWNLOAD_DIR}"/test-*.tar.gz
+  )
+  if (( ${#archives[@]} > 0 )); then
+    echo "[info] extracting LibriSpeech archives from ${DOWNLOAD_DIR}"
+    for tgz in "${archives[@]}"; do
+      extract_archive "${tgz}" "${EXTRACT_DIR}"
+    done
+  fi
+  shopt -u nullglob
+fi
+
+if [[ -d "${FSD50K_DIR}" ]]; then
+  # Check for JSON metadata files (the actual format FSD50K uses)
+  if [[ ! -f "${FSD50K_DIR}/FSD50K.metadata/dev_clips_info_FSD50K.json" ]]; then
+    extract_if_present "FSD50K metadata" "${DOWNLOAD_DIR}/FSD50K.metadata.zip" "${FSD50K_DIR}"
+  fi
+fi
+
 # Clean speech lists
 if require_dir "VCTK" "${VCTK_DIR}"; then
-  write_list "${VCTK_DIR}" "${LIST_DIR}/vctk_clean.txt" "*.wav"
+  # VCTK 0.92 uses FLAC format in wav48_silence_trimmed
+  write_list "${VCTK_DIR}" "${LIST_DIR}/vctk_clean.txt" "*.flac"
 fi
 if require_dir "LibriSpeech" "${LIBRISPEECH_DIR}"; then
   write_list "${LIBRISPEECH_DIR}" "${LIST_DIR}/librispeech_clean.txt" "*.flac"
@@ -626,9 +882,74 @@ if require_dir "AcousticRooms" "${ACOUSTICROOMS_DIR}"; then
   write_list "${ACOUSTICROOMS_DIR}" "${LIST_DIR}/acousticrooms_rir.txt" "*.wav"
 fi
 
+# Combine lists for build_hdf5.sh based on profile
+echo "[info] combining lists for profile=${PROFILE}..."
+
+# Clean speech: VCTK (always) + LibriSpeech (production/apple with DOWNLOAD_LIBRISPEECH=1)
+{
+  if [[ -f "${LIST_DIR}/vctk_clean.txt" ]]; then
+    cat "${LIST_DIR}/vctk_clean.txt"
+  fi
+  if [[ -f "${LIST_DIR}/librispeech_clean.txt" ]]; then
+    cat "${LIST_DIR}/librispeech_clean.txt"
+  fi
+} > "${LIST_DIR}/clean_all.txt"
+echo "[ok] wrote $(wc -l < "${LIST_DIR}/clean_all.txt") entries -> ${LIST_DIR}/clean_all.txt"
+
+# Noise + music: MUSAN noise/music + FSD50K filtered
+{
+  if [[ -f "${LIST_DIR}/musan_noise.txt" ]]; then
+    cat "${LIST_DIR}/musan_noise.txt"
+  fi
+  if [[ -f "${LIST_DIR}/musan_music.txt" ]]; then
+    cat "${LIST_DIR}/musan_music.txt"
+  fi
+  if [[ -f "${LIST_DIR}/fsd50k_filtered.txt" ]]; then
+    cat "${LIST_DIR}/fsd50k_filtered.txt"
+  fi
+} > "${LIST_DIR}/noise_music.txt"
+echo "[ok] wrote $(wc -l < "${LIST_DIR}/noise_music.txt") entries -> ${LIST_DIR}/noise_music.txt"
+
+# RIR: AIR + OpenAIR + AcousticRooms (production/apple with DOWNLOAD_ACOUSTICROOMS=1)
+{
+  if [[ -f "${LIST_DIR}/air_rir.txt" ]]; then
+    cat "${LIST_DIR}/air_rir.txt"
+  fi
+  if [[ -f "${LIST_DIR}/openair_rir.txt" ]]; then
+    cat "${LIST_DIR}/openair_rir.txt"
+  fi
+  if [[ -f "${LIST_DIR}/acousticrooms_rir.txt" ]]; then
+    cat "${LIST_DIR}/acousticrooms_rir.txt"
+  fi
+} > "${LIST_DIR}/rir_all.txt"
+echo "[ok] wrote $(wc -l < "${LIST_DIR}/rir_all.txt") entries -> ${LIST_DIR}/rir_all.txt"
+
+# Sanity checks for build_hdf5.sh
+errors=0
+if [[ ! -s "${LIST_DIR}/clean_all.txt" ]]; then
+  echo "[error] clean_all.txt is empty - need at least VCTK" >&2
+  errors=1
+fi
+if [[ ! -s "${LIST_DIR}/noise_music.txt" ]]; then
+  echo "[error] noise_music.txt is empty - need MUSAN and/or FSD50K" >&2
+  errors=1
+fi
+if [[ ! -s "${LIST_DIR}/rir_all.txt" ]]; then
+  echo "[error] rir_all.txt is empty - need AIR, OpenAIR, or AcousticRooms" >&2
+  errors=1
+fi
+if [[ "${errors}" -eq 1 ]]; then
+  echo "[error] one or more combined lists are empty; build_hdf5.sh will fail" >&2
+  exit 1
+fi
+
 cat <<'MSG'
 Done.
-Next steps:
-- Combine lists for your target config (prototype vs production).
-- Run df.scripts.prepare_data to build speech_clean.hdf5, noise_music.hdf5, rir.hdf5.
+Combined lists ready for build_hdf5.sh:
+  - clean_all.txt (speech)
+  - noise_music.txt (noise + music)
+  - rir_all.txt (room impulse responses)
+
+Next step:
+  DATA_DIR=/path/to/data PROFILE=<profile> bash scripts/datasets/build_hdf5.sh
 MSG

@@ -7,8 +7,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from df.scripts.prepare_data import encode
 from df.scripts.hdf5_utils import load_encoded
+from df.scripts.prepare_data import encode
 
 
 def windowed_energy(x: Tensor, ws: int, hop) -> Tensor:
@@ -49,9 +49,10 @@ def trim(audio: Tensor, sr: int) -> (Tensor, bool):
 def main(path: str):
     assert os.path.isfile(path)
     group = sys.argv[2] if len(sys.argv) > 2 else "speech"
-    with h5py.File(path, "r", libver="latest") as fr, h5py.File(
-        path.replace(".hdf5", "_trimmed.hdf5"), "w", libver="latest"
-    ) as fw:
+    with (
+        h5py.File(path, "r", libver="latest") as fr,
+        h5py.File(path.replace(".hdf5", "_trimmed.hdf5"), "w", libver="latest") as fw,
+    ):
         assert group in fr
         grp = fw.create_group(group)
         sr = int(fr.attrs["sr"])

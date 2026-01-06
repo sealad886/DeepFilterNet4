@@ -91,16 +91,12 @@ impl Default for DfParams {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub enum ReduceMask {
+    #[default]
     NONE = 0,
     MAX = 1,
     MEAN = 2,
-}
-impl Default for ReduceMask {
-    fn default() -> Self {
-        ReduceMask::NONE
-    }
 }
 impl TryFrom<i32> for ReduceMask {
     type Error = ();
@@ -682,7 +678,7 @@ impl DfTract {
         Ok(())
     }
 
-    pub fn get_spec_noisy(&self) -> ArrayView2<Complex32> {
+    pub fn get_spec_noisy(&self) -> ArrayView2<'_, Complex32> {
         as_arrayview_complex(
             self.rolling_spec_buf_x
                 .get(self.lookahead.max(self.df_order) - self.lookahead - 1)
@@ -694,7 +690,7 @@ impl DfTract {
         .into_dimensionality::<Ix2>()
         .unwrap()
     }
-    pub fn get_spec_enh(&self) -> ArrayView2<Complex32> {
+    pub fn get_spec_enh(&self) -> ArrayView2<'_, Complex32> {
         as_arrayview_complex(
             self.spec_buf.to_array_view::<f32>().unwrap(),
             &[self.ch, self.n_freqs],
@@ -702,7 +698,7 @@ impl DfTract {
         .into_dimensionality::<Ix2>()
         .unwrap()
     }
-    pub fn get_mut_spec_enh(&mut self) -> ArrayViewMut2<Complex32> {
+    pub fn get_mut_spec_enh(&mut self) -> ArrayViewMut2<'_, Complex32> {
         as_arrayview_mut_complex(
             self.spec_buf.to_array_view_mut::<f32>().unwrap(),
             &[self.ch, self.n_freqs],
@@ -1066,7 +1062,7 @@ pub fn as_arrayview_mut_complex<'a>(
         ArrayViewMutD::from_shape_ptr(shape, ptr)
     }
 }
-pub fn tvalue_to_array_view_mut(x: &mut TValue) -> ArrayViewMutD<f32> {
+pub fn tvalue_to_array_view_mut(x: &mut TValue) -> ArrayViewMutD<'_, f32> {
     unsafe {
         match x {
             TValue::Var(x) => {
