@@ -23,7 +23,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: [self-hosted, Linux, ARM64]
+          - os: "ubuntu-latest"
           # - os: "macos-latest"  # Fails to install hdf5 from git
           - os: "windows-latest"
     defaults:
@@ -31,6 +31,20 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+      # Free up disk space on ubuntu for PyTorch installation
+      - name: Free disk space
+        if: runner.os == 'Linux'
+        run: |
+          echo "Disk space before cleanup:"
+          df -h /
+          # Remove large unnecessary packages
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force || true
+          echo "Disk space after cleanup:"
+          df -h /
       - name: Echo git tag
         run: |
           echo "git tag: ${{github.event.head_commit.message}}"
