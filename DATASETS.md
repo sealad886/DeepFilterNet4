@@ -63,6 +63,10 @@ Notes:
   the script automatically forces single-connection downloads for those URLs.
 - The VCTK host does not reliably support resume; the script will re-download it from scratch
   if a partial file is detected.
+- If you already have archives in `downloads/`, the script will extract them to `raw/` automatically
+  (e.g., VCTK zip or LibriSpeech tarballs).
+- Verification results are cached in `downloads/.verify_cache.tsv` so re-runs don't re-scan large
+  archives. Set `VERIFY_CACHE=0` to disable.
 
 ## Step 2: Generate file lists
 
