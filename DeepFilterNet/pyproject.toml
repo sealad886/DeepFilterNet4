@@ -32,7 +32,7 @@ appdirs = "^1.4"
 requests = "^2.27"
 packaging = ">=23,<25"
 sympy = ">=1.6"
-soundfile = { version = ">=0.10,<0.13", optional = true }
+soundfile = { version = ">=0.10,<0.14", optional = true }
 icecream = { version = ">=2,<3", optional = true }
 pystoi = { version = ">=0.3,<0.5", optional = true }
 pesq = { version = ">=0.0.3,<0.0.5", optional = true }
