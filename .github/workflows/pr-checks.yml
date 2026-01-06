@@ -1,0 +1,54 @@
+name: "PR Checks"
+
+on:
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  # This job aggregates the status of required checks for PRs
+  pr-check-status:
+    name: PR Check Status
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for modified lockfiles
+        id: lockfile-check
+        run: |
+          # Check if Cargo.lock or poetry.lock were modified
+          CARGO_CHANGED=$(git diff --name-only origin/main...HEAD | grep -c "Cargo.lock" || echo "0")
+          POETRY_CHANGED=$(git diff --name-only origin/main...HEAD | grep -c "poetry.lock" || echo "0")
+          
+          echo "Cargo.lock changed: $CARGO_CHANGED"
+          echo "poetry.lock changed: $POETRY_CHANGED"
+          
+          if [ "$CARGO_CHANGED" -gt 0 ] || [ "$POETRY_CHANGED" -gt 0 ]; then
+            echo "lockfiles_changed=true" >> $GITHUB_OUTPUT
+            echo "::notice::Lockfiles were modified in this PR. Please ensure dependencies are intentional."
+          else
+            echo "lockfiles_changed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check commit message format
+        run: |
+          # Get commit messages from this PR
+          COMMITS=$(git log --format=%s origin/main..HEAD)
+          echo "Checking commit messages for conventional commit format..."
+          echo "$COMMITS"
+          
+          # This is informational only - we don't fail the check
+          echo "::notice::Consider using conventional commit format: type(scope): description"
+          echo "::notice::Types: feat, fix, docs, style, refactor, test, chore"
+
+      - name: PR check summary
+        run: |
+          echo "### PR Checks Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ PR checks completed successfully" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.lockfile-check.outputs.lockfiles_changed }}" == "true" ]; then
+            echo "⚠️ Lockfiles were modified - please review dependency changes" >> $GITHUB_STEP_SUMMARY
+          fi
