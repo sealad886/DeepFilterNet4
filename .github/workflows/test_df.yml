@@ -23,7 +23,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: "ubuntu-latest"
+          - os: [self-hosted, Linux, ARM64]
           # - os: "macos-latest"  # Fails to install hdf5 from git
           - os: "windows-latest"
     defaults:
