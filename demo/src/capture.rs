@@ -1,3 +1,5 @@
+#![allow(static_mut_refs)]
+
 use std::env;
 use std::fmt::Display;
 use std::io::{self, stdout, Write};

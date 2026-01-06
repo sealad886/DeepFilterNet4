@@ -1,3 +1,5 @@
+#![allow(static_mut_refs, mismatched_lifetime_syntaxes)]
+
 use std::env;
 use std::future::Future;
 use std::path::PathBuf;

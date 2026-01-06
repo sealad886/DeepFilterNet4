@@ -21,20 +21,14 @@ def update_batch_size(
     if batchconfig_bs is not None:
         # Overwrite training config
         if current_bs is not None and batchconfig_bs != current_bs:
-            print(
-                f"Found host specific {batchconfig_key} ({batchconfig_bs}) for host {host_key}. "
-                "Updating config."
-            )
+            print(f"Found host specific {batchconfig_key} ({batchconfig_bs}) for host {host_key}. " "Updating config.")
             if not config_parser.has_section("train"):
                 config_parser.add_section("train")
             config_parser.set("train", config_key, batchconfig_bs)
             config_changed = True
     elif current_bs is not None:
         # No host_key specific batch config found. Store current batch size for current host
-        print(
-            f"Host specific {batchconfig_key} not found for host {host_key}. "
-            "Updating host batch size config."
-        )
+        print(f"Host specific {batchconfig_key} not found for host {host_key}. " "Updating host batch size config.")
         if not host_bs_parser.has_section(host_key):
             host_bs_parser.add_section(host_key)
         host_bs_parser.set(host_key, batchconfig_key, current_bs)
@@ -69,24 +63,14 @@ def main(config_path, host_bs_config, host_key=None):
         host_bs_parser.read_file(f)
     # For eval, don't distinguish between autocasting
     changed: List[Tuple[bool, bool]] = []
-    changed.append(
-        update_batch_size(
-            host_key, config_parser, host_bs_parser, "batch_size_eval", "batch_size_eval"
-        )
-    )
+    changed.append(update_batch_size(host_key, config_parser, host_bs_parser, "batch_size_eval", "batch_size_eval"))
     autocast_enabled = cast_bool(config_parser.get("train", "train_autocast", fallback=False))
     if autocast_enabled:
         changed.append(
-            update_batch_size(
-                host_key, config_parser, host_bs_parser, "batch_size", "batch_size_autocast_train"
-            )
+            update_batch_size(host_key, config_parser, host_bs_parser, "batch_size", "batch_size_autocast_train")
         )
     else:
-        changed.append(
-            update_batch_size(
-                host_key, config_parser, host_bs_parser, "batch_size", "batch_size_train"
-            )
-        )
+        changed.append(update_batch_size(host_key, config_parser, host_bs_parser, "batch_size", "batch_size_train"))
     # check whether the training config was changed
     if any(c[0] for c in changed):
         with open(config_path, "w") as f:

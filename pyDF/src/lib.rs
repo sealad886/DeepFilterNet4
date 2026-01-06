@@ -5,8 +5,8 @@ use df::transforms::{
 use df::{Complex32, DFState, UNIT_NORM_INIT};
 use ndarray::{Array1, Array2, Array3, Array4, ArrayD, ArrayView4, Axis, ShapeError};
 use numpy::{
-    IntoPyArray, PyArray1, PyArray2, PyArray3, PyArrayDyn, PyReadonlyArray1, PyReadonlyArray2,
-    PyReadonlyArray3, PyReadonlyArrayDyn, PyArrayMethods, PyUntypedArrayMethods,
+    IntoPyArray, PyArray1, PyArray2, PyArray3, PyArrayDyn, PyArrayMethods, PyReadonlyArray1,
+    PyReadonlyArray2, PyReadonlyArray3, PyReadonlyArrayDyn, PyUntypedArrayMethods,
 };
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -207,8 +207,7 @@ fn libdf(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
         if e != erb_fb_len {
             return Err(PyValueError::new_err(format!(
                 "Number of erb bands do not match with input: {}, {}",
-                e,
-                erb_fb_len
+                e, erb_fb_len
             )));
         }
         let (bs, ch, t) = match indim {
@@ -301,7 +300,7 @@ fn libdf(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     #[pyfn(m)]
     #[pyo3(name = "unit_norm_init")]
-    fn unit_norm_init(py: Python, num_freq_bins: usize) -> PyResult<Bound<'_, PyArray2<f32>>> {
+    fn unit_norm_init(py: Python<'_>, num_freq_bins: usize) -> PyResult<Bound<'_, PyArray2<f32>>> {
         let arr = Array1::<f32>::linspace(UNIT_NORM_INIT[0], UNIT_NORM_INIT[1], num_freq_bins)
             .into_shape([1, num_freq_bins])
             .to_py_err()?;

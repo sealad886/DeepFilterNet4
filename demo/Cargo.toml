@@ -1,6 +1,7 @@
 [package]
 name = "df-demo"
-version = "0.5.7-pre"
+version = "0.6.0"
+authors = ["Dr. Andrew Cox <155285242+sealad886@users.noreply.github.com>", "Hendrik Schröter"]
 edition = "2021"
 
 [[bin]]

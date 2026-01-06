@@ -13,42 +13,22 @@ class ModelParams(DfParams):
 
     def __init__(self):
         super().__init__()
-        self.conv_lookahead: int = config(
-            "CONV_LOOKAHEAD", cast=int, default=0, section=self.section
-        )
+        self.conv_lookahead: int = config("CONV_LOOKAHEAD", cast=int, default=0, section=self.section)
         self.conv_k_enc: int = config("CONV_K_ENC", cast=int, default=2, section=self.section)
         self.conv_k_dec: int = config("CONV_K_DEC", cast=int, default=1, section=self.section)
         self.conv_ch: int = config("CONV_CH", cast=int, default=16, section=self.section)
-        self.conv_width_f: int = config(
-            "CONV_WIDTH_FACTOR", cast=int, default=1, section=self.section
-        )
-        self.conv_dec_mode: str = config(
-            "CONV_DEC_MODE", default="transposed", section=self.section
-        )
-        self.conv_depthwise: bool = config(
-            "CONV_DEPTHWISE", cast=bool, default=True, section=self.section
-        )
-        self.convt_depthwise: bool = config(
-            "CONVT_DEPTHWISE", cast=bool, default=True, section=self.section
-        )
-        self.emb_hidden_dim: int = config(
-            "EMB_HIDDEN_DIM", cast=int, default=256, section=self.section
-        )
-        self.emb_num_layers: int = config(
-            "EMB_NUM_LAYERS", cast=int, default=1, section=self.section
-        )
-        self.df_hidden_dim: int = config(
-            "DF_HIDDEN_DIM", cast=int, default=256, section=self.section
-        )
+        self.conv_width_f: int = config("CONV_WIDTH_FACTOR", cast=int, default=1, section=self.section)
+        self.conv_dec_mode: str = config("CONV_DEC_MODE", default="transposed", section=self.section)
+        self.conv_depthwise: bool = config("CONV_DEPTHWISE", cast=bool, default=True, section=self.section)
+        self.convt_depthwise: bool = config("CONVT_DEPTHWISE", cast=bool, default=True, section=self.section)
+        self.emb_hidden_dim: int = config("EMB_HIDDEN_DIM", cast=int, default=256, section=self.section)
+        self.emb_num_layers: int = config("EMB_NUM_LAYERS", cast=int, default=1, section=self.section)
+        self.df_hidden_dim: int = config("DF_HIDDEN_DIM", cast=int, default=256, section=self.section)
         self.df_num_layers: int = config("DF_NUM_LAYERS", cast=int, default=3, section=self.section)
         self.gru_groups: int = config("GRU_GROUPS", cast=int, default=1, section=self.section)
         self.lin_groups: int = config("LINEAR_GROUPS", cast=int, default=1, section=self.section)
-        self.group_shuffle: bool = config(
-            "GROUP_SHUFFLE", cast=bool, default=True, section=self.section
-        )
-        self.dfop_method: str = config(
-            "DFOP_METHOD", cast=str, default="real_unfold", section=self.section
-        )
+        self.group_shuffle: bool = config("GROUP_SHUFFLE", cast=bool, default=True, section=self.section)
+        self.dfop_method: str = config("DFOP_METHOD", cast=str, default="real_unfold", section=self.section)
         self.mask_pf: bool = config("MASK_PF", cast=bool, default=False, section=self.section)
 
 
@@ -75,23 +55,15 @@ class Encoder(nn.Module):
         cl = 1 if p.conv_lookahead > 0 else 0
         self.erb_conv0 = convkxf(1, layer_width, k=k0, fstride=1, lookahead=cl, **kwargs)
         cl = 1 if p.conv_lookahead > 1 else 0
-        self.erb_conv1 = convkxf(
-            layer_width * wf**0, layer_width * wf**1, k=k, lookahead=cl, **kwargs
-        )
+        self.erb_conv1 = convkxf(layer_width * wf**0, layer_width * wf**1, k=k, lookahead=cl, **kwargs)
         cl = 1 if p.conv_lookahead > 2 else 0
-        self.erb_conv2 = convkxf(
-            layer_width * wf**1, layer_width * wf**2, k=k, lookahead=cl, **kwargs
-        )
+        self.erb_conv2 = convkxf(layer_width * wf**1, layer_width * wf**2, k=k, lookahead=cl, **kwargs)
         self.erb_conv3 = convkxf(layer_width * wf**2, layer_width * wf**2, k=k, fstride=1, **kwargs)
-        self.df_conv0 = convkxf(
-            2, layer_width, fstride=1, k=k0, lookahead=p.conv_lookahead, **kwargs
-        )
+        self.df_conv0 = convkxf(2, layer_width, fstride=1, k=k0, lookahead=p.conv_lookahead, **kwargs)
         self.df_conv1 = convkxf(layer_width, layer_width * wf**1, k=k, **kwargs)
         self.erb_bins = p.nb_erb
         self.emb_dim = layer_width * p.nb_erb // 4 * wf**2
-        self.df_fc_emb = GroupedLinear(
-            layer_width * p.nb_df // 2, self.emb_dim, groups=p.lin_groups
-        )
+        self.df_fc_emb = GroupedLinear(layer_width * p.nb_df // 2, self.emb_dim, groups=p.lin_groups)
         self.emb_out_dim = p.emb_hidden_dim
         self.emb_n_layers = p.emb_num_layers
         self.gru_groups = p.gru_groups
@@ -142,9 +114,7 @@ class ErbDecoder(nn.Module):
         self.emb_width = layer_width * wf**2
         self.emb_dim = self.emb_width * (p.nb_erb // 4)
         self.fc_emb = nn.Sequential(
-            GroupedLinear(
-                p.emb_hidden_dim, self.emb_dim, groups=p.lin_groups, shuffle=p.group_shuffle
-            ),
+            GroupedLinear(p.emb_hidden_dim, self.emb_dim, groups=p.lin_groups, shuffle=p.group_shuffle),
             nn.ReLU(inplace=True),
         )
         k = p.conv_k_dec
@@ -192,9 +162,7 @@ class DfDecoder(nn.Module):
         self.df_lookahead = p.df_lookahead
         self.gru_groups = p.gru_groups
 
-        self.df_convp = convkxf(
-            layer_width, self.df_order * 2, k=1, f=1, complex_in=True, batch_norm=True
-        )
+        self.df_convp = convkxf(layer_width, self.df_order * 2, k=1, f=1, complex_in=True, batch_norm=True)
         self.df_gru = GroupedGRU(
             p.emb_hidden_dim,
             self.df_n_hidden,
@@ -204,9 +172,7 @@ class DfDecoder(nn.Module):
             shuffle=p.group_shuffle,
             add_outputs=True,
         )
-        self.df_fc_out = nn.Sequential(
-            nn.Linear(self.df_n_hidden, self.df_bins * self.df_order * 2), nn.Tanh()
-        )
+        self.df_fc_out = nn.Sequential(nn.Linear(self.df_n_hidden, self.df_bins * self.df_order * 2), nn.Tanh())
         self.df_fc_a = nn.Sequential(nn.Linear(self.df_n_hidden, 1), nn.Sigmoid())
 
     def forward(self, emb: Tensor, c0: Tensor) -> Tuple[Tensor, Tensor]:

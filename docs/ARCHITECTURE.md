@@ -174,16 +174,16 @@ class MambaBlock:
     def forward(self, x):
         # Input projection: d_model → d_inner
         x_proj = self.in_proj(x)
-        
+
         # Split into main and gate paths
         x_main, x_gate = x_proj.chunk(2, dim=-1)
-        
+
         # Causal convolution for local context
         x_conv = self.conv1d(x_main)
-        
+
         # SSM computation
         x_ssm = self.ssm(x_conv)
-        
+
         # Gated output
         return self.out_proj(x_ssm * F.silu(x_gate))
 ```
@@ -327,12 +327,12 @@ def deep_filter(input_spec, coefficients, order, lookahead):
     coefficients: (B, T, F, order, 2)  - Filter coeffs
     """
     output = torch.zeros_like(input_spec[..., :1, :])
-    
+
     for k in range(order):
         t_idx = t - lookahead + k
         # Complex multiplication
         output += input_spec[..., t_idx, :] * coefficients[..., k, :]
-    
+
     return output
 ```
 
@@ -506,13 +506,13 @@ class DfNet4Config:
     sr: int = 48000                # Sample rate
     fft_size: int = 960            # FFT size
     hop_size: int = 480            # Hop size (10ms)
-    
+
     # Feature dimensions
     nb_erb: int = 32               # ERB bands
     nb_df: int = 96                # DF frequency bins
     df_order: int = 5              # Default filter order
     df_lookahead: int = 2          # Lookahead frames
-    
+
     # Mamba backbone
     mamba_d_model: int = 256       # Model dimension
     mamba_d_state: int = 64        # State dimension
@@ -520,24 +520,24 @@ class DfNet4Config:
     mamba_expand: int = 2          # Expansion factor
     num_mamba_layers: int = 4      # Number of layers
     mamba_dropout: float = 0.0     # Dropout rate
-    
+
     # Optional features
     hybrid_encoder: bool = False   # Multi-domain encoder
     use_time_domain_enc: bool = False  # Time-domain branch
     use_phase_enc: bool = False    # Phase branch
     multi_res_df: bool = False     # Multi-resolution DF
     adaptive_df_order: bool = False # Adaptive order
-    
+
     # Adaptive DF parameters
     df_order_range: Tuple[int, int] = (3, 8)
-    
+
     # Multi-res DF parameters
     df_resolutions: List[int] = field(default_factory=lambda: [2, 4])
-    
+
     # Decoder parameters
     hidden_dim: int = 256
     num_hidden_layers: int = 2
-    
+
     # Training
     use_fp16: bool = False         # Mixed precision
 ```

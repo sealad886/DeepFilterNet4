@@ -39,15 +39,11 @@ class ComputeScore:
         self.p808_onnx_sess = get_ort_session(p808_model_path, providers="cpu" if cpu else "gpu")
         n_fft = 320
         self.w = torch.hann_window(n_fft + 1).to(TORCH_DEVICE)
-        self.mel = torch.as_tensor(librosa.filters.mel(n_mels=120, sr=16000, n_fft=n_fft)).to(
-            TORCH_DEVICE
-        )
+        self.mel = torch.as_tensor(librosa.filters.mel(n_mels=120, sr=16000, n_fft=n_fft)).to(TORCH_DEVICE)
 
         # melspec: np.ndarray = np.einsum("...ft,mf->...mt", S, mel_basis, optimize=True)
 
-    def audio_melspec_torch(
-        self, audio, n_mels=120, frame_size=320, hop_length=160, sr=16000, to_db=True
-    ):
+    def audio_melspec_torch(self, audio, n_mels=120, frame_size=320, hop_length=160, sr=16000, to_db=True):
         audio = torch.as_tensor(audio).to(TORCH_DEVICE).to(torch.float32)
         powspec = (
             torch.stft(
@@ -65,9 +61,7 @@ class ComputeScore:
             mel_spec = (librosa.power_to_db(mel_spec, ref=np.max) + 40) / 40
         return mel_spec
 
-    def audio_melspec(
-        self, audio, n_mels=120, frame_size=320, hop_length=160, sr=16000, to_db=True
-    ):
+    def audio_melspec(self, audio, n_mels=120, frame_size=320, hop_length=160, sr=16000, to_db=True):
         mel_spec = librosa.feature.melspectrogram(
             y=audio, sr=sr, n_fft=frame_size + 1, hop_length=hop_length, n_mels=n_mels
         )
@@ -128,23 +122,17 @@ class ComputeScore:
         predicted_p808_mos = []
 
         for idx in range(num_hops):
-            audio_seg = audio[
-                int(idx * hop_len_samples) : int((idx + INPUT_LENGTH) * hop_len_samples)
-            ]
+            audio_seg = audio[int(idx * hop_len_samples) : int((idx + INPUT_LENGTH) * hop_len_samples)]
             if len(audio_seg) < len_samples:
                 continue
 
             input_features = np.array(audio_seg).astype("float32")[np.newaxis, :]
-            p808_input_features = np.array(feat_impl(audio=audio_seg[:-160])).astype("float32")[
-                np.newaxis, :, :
-            ]
+            p808_input_features = np.array(feat_impl(audio=audio_seg[:-160])).astype("float32")[np.newaxis, :, :]
             oi = {"input_1": input_features}
             p808_oi = {"input_1": p808_input_features}
             p808_mos = self.p808_onnx_sess.run(None, p808_oi)[0][0][0]
             mos_sig_raw, mos_bak_raw, mos_ovr_raw = self.onnx_sess.run(None, oi)[0][0]
-            mos_sig, mos_bak, mos_ovr = self.get_polyfit_val(
-                mos_sig_raw, mos_bak_raw, mos_ovr_raw, is_personalized_MOS
-            )
+            mos_sig, mos_bak, mos_ovr = self.get_polyfit_val(mos_sig_raw, mos_bak_raw, mos_ovr_raw, is_personalized_MOS)
             predicted_mos_sig_seg_raw.append(mos_sig_raw)
             predicted_mos_bak_seg_raw.append(mos_bak_raw)
             predicted_mos_ovr_seg_raw.append(mos_ovr_raw)
@@ -230,10 +218,7 @@ def eval_dir_dnsmos(args):
         exit(1)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.num_workers) as executor:
-        future_to_url = {
-            executor.submit(compute_score, clip, desired_fs, is_personalized_eval): clip
-            for clip in clips
-        }
+        future_to_url = {executor.submit(compute_score, clip, desired_fs, is_personalized_eval): clip for clip in clips}
         for future in tqdm(concurrent.futures.as_completed(future_to_url)):
             clip = future_to_url[future]
             try:
@@ -332,20 +317,14 @@ if __name__ == "__main__":
     eval_sample_parser.add_argument("file", type=str)
     eval_sample_parser.add_argument("--target_mos", "-t", type=float, nargs="*")
     eval_dir_parser = subparsers.add_parser("eval-dir", aliases=["e"])
-    eval_dir_parser.add_argument(
-        "testset_dir", help="Path to the dir containing audio clips in .wav to be evaluated"
-    )
-    eval_dir_parser.add_argument(
-        "-o", "--csv-file", help="If you want the scores in a CSV file provide the full path"
-    )
+    eval_dir_parser.add_argument("testset_dir", help="Path to the dir containing audio clips in .wav to be evaluated")
+    eval_dir_parser.add_argument("-o", "--csv-file", help="If you want the scores in a CSV file provide the full path")
     eval_dir_parser.add_argument("--cpu", help="Only run on CPU", action="store_true")
     eval_dir_parser.add_argument("--num-workers", type=int, default=1)
     eval_ds_parser = subparsers.add_parser("eval-ds")
     eval_ds_parser.add_argument("ds", help="Path to the hdf5 dataset file", nargs="+")
     eval_ds_parser.add_argument("--use-torch", action="store_true")
-    eval_ds_parser.add_argument(
-        "-o", "--csv-file", help="If you want the scores in a CSV file provide the full path"
-    )
+    eval_ds_parser.add_argument("-o", "--csv-file", help="If you want the scores in a CSV file provide the full path")
 
     args = parser.parse_args()
     if args.subparser_name is None:

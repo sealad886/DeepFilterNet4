@@ -3,17 +3,11 @@ import shutil
 import tarfile
 from copy import deepcopy
 from pathlib import Path
+
 import numpy as np
 import torch
 
-from df.enhance import (
-    ModelParams,
-    df_features,
-    enhance,
-    get_model_basedir,
-    init_df,
-    setup_df_argument_parser,
-)
+from df.enhance import ModelParams, df_features, enhance, get_model_basedir, init_df, setup_df_argument_parser
 from df.io import get_test_sample, save_audio
 from df.scripts.export_onnx import export_impl
 from libdf import DF
@@ -153,9 +147,7 @@ def export(
     np.savez_compressed(os.path.join(export_dir, "erb_dec_output.npz"), m=m[0].numpy())
 
     # Export df decoder
-    np.savez_compressed(
-        os.path.join(export_dir, "df_dec_input.npz"), emb=emb.numpy(), c0=c0.numpy()
-    )
+    np.savez_compressed(os.path.join(export_dir, "df_dec_input.npz"), emb=emb.numpy(), c0=c0.numpy())
     inputs = (emb.clone(), c0)
     input_names = ["emb", "c0"]
     output_names = ["coefs"]

@@ -76,13 +76,14 @@ def any_device():
 @pytest.fixture(scope="session", autouse=False)
 def df_config():
     """Initialize df.config with minimal settings for testing.
-    
+
     Use this fixture for tests that need Loss class or other config-dependent code.
     """
-    import tempfile
     import os
+    import tempfile
+
     from df.config import config
-    
+
     # Create a minimal config file
     config_content = """
 [train]
@@ -133,11 +134,11 @@ factor = 0
 [optim]
 LR = 1e-4
 """
-    
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.ini', delete=False) as f:
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".ini", delete=False) as f:
         f.write(config_content)
         config_path = f.name
-    
+
     try:
         config.load(config_path)
         yield config

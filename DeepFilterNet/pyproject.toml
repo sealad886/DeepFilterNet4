@@ -1,9 +1,15 @@
-[tool.poetry]
-name = "DeepFilterNet"
-version = "0.5.7-pre"
-description = "Noise supression using deep filtering"
-authors = ["Hendrik Schröter"]
-repository = "https://github.com/Rikorose/DeepFilterNet"
+[project]
+name = "DeepFilterNet4"
+version = "0.6.0"
+description = "Noise supression using deep filtering; an advancement in real-time speech enhancement."
+requires-python = ">=3.10,<3.15"
+dynamic = ["dependencies"]
+license = "MIT"
+license-files = ["LICENSE*"]
+authors = [
+  { name = "Dr. Andrew Cox", email = "155285242+sealad886@users.noreply.github.com" },
+  { name = "Hendrik Schröter" },
+]
 keywords = ["noise reduction", "neural network"]
 classifiers = [
   "Topic :: Multimedia :: Sound/Audio :: Speech",
@@ -12,8 +18,36 @@ classifiers = [
   "Topic :: Utilities",
   "Programming Language :: Rust",
   "Programming Language :: Python",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Operating System :: OS Independent",
 ]
-license = "MIT"
+
+[project.urls]
+Repository = "https://github.com/sealad886/DeepFilterNet4"
+
+[project.optional-dependencies]
+train = ["deepfilterdataloader", "icecream"]
+eval = ["pystoi", "pesq", "scipy"]
+soundfile = ["soundfile"]
+dnsmos-local = ["onnxruntime"]
+# ASR-based loss and evaluation (requires openai-whisper)
+asr = ["openai-whisper"]
+mlx = ["mlx", "mlx-whisper"]
+# Combined ASR with MLX optimization
+asr-mlx = ["openai-whisper", "mlx", "mlx-whisper"]
+
+[project.scripts]
+deepFilter = "df.enhance:run"
+deep-filter-py = "df.enhance:run"
+
+[tool.poetry]
+# Poetry 2.x: package metadata lives in `[project]`; keep only Poetry-specific config here.
 packages = [{ include = "df" }]
 include = [
   { path = "pretrained_models/DeepFilterNet/config.ini" },
@@ -25,7 +59,7 @@ include = [
 [tool.poetry.dependencies]
 deepfilterlib = { path = "../pyDF/" }
 deepfilterdataloader = { path = "../pyDF-data/", optional = true }
-python = ">=3.9,<4.0"
+python = ">=3.10,<3.15"
 numpy = ">=1.22,<2.0"
 loguru = ">=0.5"
 appdirs = "^1.4"
@@ -45,40 +79,34 @@ librosa = { version = "^0.11.0" }
 pandas = { version = "*" }
 tqdm = { version = "*" }
 h5py = { version = "*" }
+ptflops = { version = "*" }
+openai-whisper = { version = ">=20240930", optional = true }
+mlx = { version = ">=0.0.6", optional = true, markers = "sys_platform == 'darwin' and platform_machine == 'arm64'" }
+mlx-whisper = { version = ">=0.4.0", optional = true, markers = "sys_platform == 'darwin' and platform_machine == 'arm64'" }
 
-[tool.poetry.extras]
-train = ["deepfilterdataloader", "icecream"]
-eval = ["pystoi", "pesq", "scipy"]
-soundfile = ["soundfile"]
-dnsmos-local = ["onnxruntime"]
-
-[tool.poetry.scripts]
-deepFilter = "df.enhance:run"
-deep-filter-py = "df.enhance:run"
-
-[tool.poetry.dev-dependencies]
+[tool.poetry.group.dev.dependencies]
 poethepoet = "^0.26"
 
 [tool.poe.tasks]
-install-torch-cuda121 = "pip install torch==2.5.1+cu121 torchaudio==2.5.1+cu121 --extra-index-url https://download.pytorch.org/whl/cu121"
-install-torch-cuda124 = "pip install torch==2.5.1+cu124 torchaudio==2.5.1+cu124 --extra-index-url https://download.pytorch.org/whl/cu124"
-install-torch-cpu = "pip install torch==2.5.1+cpu torchaudio==2.5.1+cpu --extra-index-url https://download.pytorch.org/whl/cpu"
-install-torch-mps = "pip install torch==2.5.1 torchaudio==2.5.1"
+install-torch-cuda121 = "pip install torch==2.9.1+cu121 torchaudio==2.9.1+cu121 --extra-index-url https://download.pytorch.org/whl/cu121"
+install-torch-cuda124 = "pip install torch==2.9.1+cu124 torchaudio==2.9.1+cu124 --extra-index-url https://download.pytorch.org/whl/cu124"
+install-torch-cpu = "pip install torch==2.9.1+cpu torchaudio==2.9.1+cpu --extra-index-url https://download.pytorch.org/whl/cpu"
+install-torch-mps = "pip install torch==2.9.1 torchaudio==2.9.1"
 install-eval-utils = "python -m pip install -r requirements_eval.txt"
 install-dnsmos-utils = "python -m pip install -r requirements_dnsmos.txt"
 
 [build-system]
-requires = ["poetry-core>=1.0.0"]
+requires = ["poetry-core>=2.0.0"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.black]
-line-length = 100
+line-length = 120
 target-version = ["py39", "py310", "py311", "py312", "py313"]
-include = '\.pyi?$'
+include = "\\.pyi?$"
 
 [tool.isort]
 profile = "black"
-line_length = 100
+line_length = 120
 skip_gitignore = true
 known_first_party = ["df", "libdf", "libdfdata"]
 

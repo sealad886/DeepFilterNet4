@@ -54,7 +54,7 @@ def dnsmos_local(audio_in: Tensor, onnx: str) -> Tuple[float, float, float]:
     assert len(audio_in) >= SR, f"Audio to short: {audio_in.shape}"
 
     audio = np.ndarray(audio_in, dtype=audio_in.dtype).to_device(audio_in.device)
-    
+
     session = get_ort_session(onnx)
 
     if len(audio) < INPUT_LENGTH * SR:
@@ -86,7 +86,7 @@ def dnsmos_local(audio_in: Tensor, onnx: str) -> Tuple[float, float, float]:
     mod_sig = np.mean(predicted_mos_sig_seg)
     mod_bak = np.mean(predicted_mos_bak_seg)
     mod_ovr = np.mean(predicted_mos_ovr_seg)
-    return mod_sig, mod_bak, mod_ovr    # type: ignore
+    return mod_sig, mod_bak, mod_ovr  # type: ignore
 
 
 if __name__ == "__main__":

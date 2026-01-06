@@ -241,7 +241,8 @@ impl _FdDataLoader {
                     batch.max_freq.into_pyarray_bound(py),
                     batch.snr.into_pyarray_bound(py),
                     batch.gain.into_pyarray_bound(py),
-                    push_ret(batch.timings, (Instant::now() - t0).as_secs_f32()).into_pyarray_bound(py),
+                    push_ret(batch.timings, (Instant::now() - t0).as_secs_f32())
+                        .into_pyarray_bound(py),
                     batch.ids.into_pyarray_bound(py),
                 ))
             }

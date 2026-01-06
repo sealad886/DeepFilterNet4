@@ -1,7 +1,7 @@
 [package]
 name = "deep_filter"
-version = "0.5.7-pre"
-authors = ["Hendrik Schröter"]
+version = "0.6.0"
+authors = ["Dr. Andrew Cox <155285242+sealad886@users.noreply.github.com>", "Hendrik Schröter"]
 edition = "2021"
 description = "Noise supression using deep filtering"
 repository = "https://github.com/Rikorose/DeepFilterNet"

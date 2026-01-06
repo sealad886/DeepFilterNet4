@@ -19,7 +19,7 @@ DEPRECATED_NO = logger.level("WARNING").no + 2
 
 
 def init_logger(file: Optional[str] = None, level: str = "INFO", model: Optional[str] = None):
-    global _logger_initialized, _duplicate_filter
+    global _logger_initialized
     if _logger_initialized:
         logger.debug("Logger already initialized.")
     else:
@@ -208,7 +208,7 @@ def log_model_summary(model: torch.nn.Module, verbose=False, force=False):
             GroupedLinearEinsum: grouped_linear_flops_counter_hook,
         },
     )
-    logger.info(f"Model complexity: {float(params)/1e6:.3f}M #Params, {float(macs)/1e6:.1f}M MACS")
+    logger.info(f"Model complexity: {float(params) / 1e6:.3f}M #Params, {float(macs) / 1e6:.1f}M MACS")
 
 
 def grouped_linear_flops_counter_hook(module: GroupedLinearEinsum, input, output):
