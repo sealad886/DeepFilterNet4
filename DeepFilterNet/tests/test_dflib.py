@@ -57,9 +57,7 @@ def test_analysis_synthesis_stft(plot: Union[bool, str] = False):
     stft_norm = 1 / (n_fft**2 / (2 * hop))
     w = torch.from_numpy(state.fft_window())
     freq_torch: Tensor = (
-        torch.stft(
-            sigin, n_fft=n_fft, hop_length=hop, window=w, return_complex=True, normalized=False
-        ).transpose(1, 2)
+        torch.stft(sigin, n_fft=n_fft, hop_length=hop, window=w, return_complex=True, normalized=False).transpose(1, 2)
         * stft_norm
     )
     sigout_torch: Tensor = torch.istft(

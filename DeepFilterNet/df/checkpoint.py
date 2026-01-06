@@ -34,9 +34,7 @@ def load_model(
         model = torch.jit.script(model)
     blacklist: List[str] = config("CP_BLACKLIST", [], Csv(), save=False, section="train")  # type: ignore
     if cp_dir is not None:
-        epoch = read_cp(
-            model, "model", cp_dir, blacklist=blacklist, extension=extension, epoch=epoch
-        )
+        epoch = read_cp(model, "model", cp_dir, blacklist=blacklist, extension=extension, epoch=epoch)
         epoch = 0 if epoch is None else epoch
     else:
         epoch = 0
@@ -153,9 +151,7 @@ def cleanup(name: str, dirname: str, extension: str, nkeep=5):
         os.remove(cp)
 
 
-def check_patience(
-    dirname: str, max_patience: int, new_metric: float, cmp: str = "min", raise_: bool = True
-):
+def check_patience(dirname: str, max_patience: int, new_metric: float, cmp: str = "min", raise_: bool = True):
     cmp = "__lt__" if cmp == "min" else "__gt__"
     new_metric = float(new_metric)  # Make sure it is not an integer
     prev_patience, prev_metric = read_patience(dirname)

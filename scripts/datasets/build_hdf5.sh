@@ -3,6 +3,7 @@ set -euo pipefail
 
 # Build HDF5 datasets for DeepFilterNet training.
 # Requires: a Python environment with DeepFilterNet deps installed.
+# pip install DeepFilterNet4[train,eval,...]
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DATA_DIR="${DATA_DIR:-${ROOT_DIR}/data}"

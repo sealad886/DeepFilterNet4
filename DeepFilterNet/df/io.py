@@ -17,18 +17,30 @@ HAS_TORCHCODEC = False
 if USE_TORCHCODEC:
     try:
         from torchcodec.decoders import AudioDecoder
+
         HAS_TORCHCODEC = True
     except ImportError:
         pass
 
+# Try to import soundfile as fallback for audio metadata
+HAS_SOUNDFILE = False
+try:
+    import soundfile as sf
+
+    HAS_SOUNDFILE = True
+except ImportError:
+    pass  # soundfile is optional; if unavailable, operations fall back to torchaudio-based methods
+
 # Handle AudioMetaData import across TorchAudio versions
 try:
     from torchaudio import AudioMetaData
+
     TA_RESAMPLE_SINC = "sinc_interp_hann"
     TA_RESAMPLE_KAISER = "sinc_interp_kaiser"
 except ImportError:
     try:
         from torchaudio.backend.common import AudioMetaData  # type: ignore[import-unresolved]  # noqa: F401
+
         TA_RESAMPLE_SINC = "sinc_interpolation"
         TA_RESAMPLE_KAISER = "kaiser_window"
     except ImportError:
@@ -38,6 +50,7 @@ except ImportError:
         @dataclass
         class AudioMetaData:
             """Fallback AudioMetaData for TorchAudio 2.9+ when using TorchCodec."""
+
             sample_rate: int
             num_frames: int
             num_channels: int
@@ -47,16 +60,16 @@ except ImportError:
         TA_RESAMPLE_SINC = "sinc_interp_hann"
         TA_RESAMPLE_KAISER = "sinc_interp_kaiser"
 
-from df.logger import warn_once
-from df.utils import download_file, get_cache_dir, get_git_root
+from df.logger import warn_once  # noqa: E402
+from df.utils import download_file, get_cache_dir, get_git_root  # noqa: E402
 
 
 def get_audio_metadata(file: str) -> AudioMetaData:
     """Get audio metadata using TorchCodec for TorchAudio 2.9+ or torchaudio.info() for earlier versions.
-    
+
     Args:
         file: Path to an audio file.
-        
+
     Returns:
         AudioMetaData with sample_rate, num_frames, num_channels, etc.
     """
@@ -65,19 +78,28 @@ def get_audio_metadata(file: str) -> AudioMetaData:
         metadata = decoder.metadata
         return AudioMetaData(
             sample_rate=metadata.sample_rate,
-            num_frames=metadata.num_frames if hasattr(metadata, 'num_frames') else 0,
+            num_frames=metadata.num_frames if hasattr(metadata, "num_frames") else 0,
             num_channels=metadata.num_channels,
-            bits_per_sample=getattr(metadata, 'bits_per_sample', 0),
-            encoding=getattr(metadata, 'codec', ""),
+            bits_per_sample=getattr(metadata, "bits_per_sample", 0),
+            encoding=getattr(metadata, "codec", ""),
+        )
+    elif USE_TORCHCODEC and HAS_SOUNDFILE:
+        # TorchAudio 2.9+ without TorchCodec: use soundfile as fallback
+        info = sf.info(file)  # type: ignore[possibly-undefined]
+        return AudioMetaData(
+            sample_rate=info.samplerate,
+            num_frames=info.frames,
+            num_channels=info.channels,
+            bits_per_sample=0,
+            encoding=info.subtype or "",
         )
     else:
-        return ta.info(file)
+        # Older TorchAudio versions with torchaudio.info()
+        return ta.info(file)  # type: ignore[attr-defined]
 
 
-def load_audio(
-    file: str, sr: Optional[int] = None, verbose=True, **kwargs
-) -> Tuple[Tensor, AudioMetaData]:
-    """Loads an audio file using torchaudio.
+def load_audio(file: str, sr: Optional[int] = None, verbose=True, **kwargs) -> Tuple[Tensor, AudioMetaData]:
+    """Loads an audio file using torchaudio or soundfile fallback.
 
     Args:
         file (str): Path to an audio file.
@@ -98,13 +120,23 @@ def load_audio(
     info: AudioMetaData = get_audio_metadata(file)
     if "num_frames" in kwargs and sr is not None:
         kwargs["num_frames"] *= info.sample_rate // sr
-    audio, orig_sr = ta.load(file, **kwargs)
+
+    # TorchAudio 2.9+ requires TorchCodec; use soundfile as fallback
+    if USE_TORCHCODEC and not HAS_TORCHCODEC and HAS_SOUNDFILE:
+        # Use soundfile for loading when TorchCodec is not available
+        result = sf.read(file, dtype="float32")  # type: ignore[possibly-undefined]
+        data, orig_sr = result[0], result[1]
+        # soundfile returns (frames, channels) for multi-channel, convert to (channels, frames)
+        if data.ndim == 1:
+            audio = torch.from_numpy(data).unsqueeze(0)
+        else:
+            audio = torch.from_numpy(data.T)
+    else:
+        audio, orig_sr = ta.load(file, **kwargs)
+
     if sr is not None and orig_sr != sr:
         if verbose:
-            warn_once(
-                f"Audio sampling rate does not match model sampling rate ({orig_sr}, {sr}). "
-                "Resampling..."
-            )
+            warn_once(f"Audio sampling rate does not match model sampling rate ({orig_sr}, {sr}). " "Resampling...")
         audio = resample(audio, orig_sr, sr, **rkwargs)
     return audio.contiguous(), info
 
@@ -133,7 +165,15 @@ def save_audio(
         audio = (audio * (1 << 15)).to(torch.int16)
     if dtype == torch.float32 and audio.dtype != torch.float32:
         audio = audio.to(torch.float32) / (1 << 15)
-    ta.save(outpath, audio, sr)
+    # TorchAudio 2.9+ requires TorchCodec for ta.save(); use soundfile as fallback
+    if USE_TORCHCODEC and not HAS_TORCHCODEC and HAS_SOUNDFILE:
+        # soundfile expects shape (samples, channels) and float32/int16 numpy array
+        audio_np = audio.numpy()
+        if audio_np.ndim == 2:
+            audio_np = audio_np.T  # (channels, samples) -> (samples, channels)
+        sf.write(outpath, audio_np, sr)  # type: ignore[possibly-undefined]
+    else:
+        ta.save(outpath, audio, sr)
 
 
 try:

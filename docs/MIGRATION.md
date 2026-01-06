@@ -93,14 +93,14 @@ config = DfNet4Config(
     nb_df=96,
     df_order=5,
     df_lookahead=2,
-    
+
     # New Mamba parameters (replaces GRU)
     mamba_d_model=256,      # Similar to df_hidden_dim
     mamba_d_state=64,
     mamba_d_conv=4,
     mamba_expand=2,
     num_mamba_layers=4,     # Similar to nb_layers
-    
+
     # Optional new features
     hybrid_encoder=False,
     multi_res_df=False,
@@ -116,12 +116,12 @@ from df.deepfilternet4 import DfNet4Config
 def migrate_config_from_dfnet3(ini_path: str) -> DfNet4Config:
     """Convert DFNet3 INI config to DFNet4 dataclass."""
     import configparser
-    
+
     parser = configparser.ConfigParser()
     parser.read(ini_path)
-    
+
     dfnet3 = parser["deepfilternet"]
-    
+
     return DfNet4Config(
         fft_size=int(dfnet3.get("fft_size", 960)),
         hop_size=int(dfnet3.get("hop_size", 480)),
@@ -256,7 +256,7 @@ for batch in dataloader:
     # Generator step
     enhanced = model(noisy)
     g_loss = adversarial_loss(discriminator(enhanced))
-    
+
     # Discriminator step
     d_real = discriminator(clean)
     d_fake = discriminator(enhanced.detach())
@@ -322,7 +322,7 @@ RuntimeError: Error(s) in loading state_dict for DfNet4
 
 **Cause**: DFNet3 checkpoints are incompatible with DFNet4.
 
-**Solution**: 
+**Solution**:
 - Train DFNet4 from scratch
 - Use knowledge distillation
 - Don't attempt to load DFNet3 weights into DFNet4

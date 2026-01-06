@@ -35,11 +35,7 @@ def spec_figure(
         spec = spec.div_(w.pow(2).sum().sqrt())
     if torch.is_complex(spec) or spec.shape[-1] == 2:
         spec = as_complex(spec).abs().add_(1e-12).log10_().mul_(20)
-    if (
-        kwargs.get("vmax", None) is not None
-        and kwargs["vmax"] <= 0
-        and (spec_max := spec.max()) > 0
-    ):
+    if kwargs.get("vmax", None) is not None and kwargs["vmax"] <= 0 and (spec_max := spec.max()) > 0:
         kwargs["vmax"] = spec_max
     kwargs.setdefault("vmax", max(0.0, spec.max().item()))
 

@@ -14,7 +14,6 @@ should_stop = False
 
 def main():
     """Poor man's tensorboard summaries"""
-    global should_stop
     parser = argparse.ArgumentParser()
     parser.add_argument("summary_dir")
     parser.add_argument("--snr", default=0, type=int)

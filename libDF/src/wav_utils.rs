@@ -1,3 +1,6 @@
+// Unused assignment warnings are false positives from thiserror derive macro on ErrorDetail variant
+#![allow(unused_assignments)]
+
 use std::result::Result;
 use std::{
     fs::File,
