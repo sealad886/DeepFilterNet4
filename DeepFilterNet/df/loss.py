@@ -170,9 +170,7 @@ class SpectralLoss(nn.Module):
             if self.gamma != 1:
                 input = input_abs * torch.exp(1j * angle.apply(input))  # type: ignore[operator]
                 target = target_abs * torch.exp(1j * angle.apply(target))  # type: ignore[operator]
-            loss_c = (
-                F.mse_loss(torch.view_as_real(input), target=torch.view_as_real(target)) * self.f_c
-            )
+            loss_c = F.mse_loss(torch.view_as_real(input), target=torch.view_as_real(target)) * self.f_c
             loss = loss + loss_c
         return loss
 
@@ -213,9 +211,7 @@ class MaskLoss(nn.Module):
         self.erb_fb: Tensor
         self.erb_inv_fb: Tensor
         self.register_buffer("erb_fb", erb_fb(df_state.erb_widths(), ModelParams().sr))
-        self.register_buffer(
-            "erb_inv_fb", erb_fb(df_state.erb_widths(), ModelParams().sr, inverse=True)
-        )
+        self.register_buffer("erb_inv_fb", erb_fb(df_state.erb_widths(), ModelParams().sr, inverse=True))
 
     def __repr__(self):
         s = f"MaskLoss {self.mask_fn} (gamma: {self.gamma}"
@@ -244,9 +240,7 @@ class MaskLoss(nn.Module):
     def erb_inv(self, x: Tensor) -> Tensor:
         return torch.matmul(x, self.erb_inv_fb)
 
-    def forward(
-        self, input: Tensor, clean: Tensor, noisy: Tensor, max_bin: Optional[Tensor] = None
-    ) -> Tensor:
+    def forward(self, input: Tensor, clean: Tensor, noisy: Tensor, max_bin: Optional[Tensor] = None) -> Tensor:
         # Input mask shape: [B, C, T, F]
         b, _, _, f = input.shape
         if not torch.isfinite(input).all():
@@ -278,9 +272,7 @@ class MaskLoss(nn.Module):
 
 
 class MaskSpecLoss(nn.Module):
-    def __init__(
-        self, df_state: DF, factor=1.0, gamma: float = 0.6, f_max_idx: Optional[int] = None
-    ):
+    def __init__(self, df_state: DF, factor=1.0, gamma: float = 0.6, f_max_idx: Optional[int] = None):
         super().__init__()
         self.f_max_idx = f_max_idx
         self.apply_mask = Mask(erb_fb(df_state.erb_widths(), ModelParams().sr, inverse=True))
@@ -331,9 +323,7 @@ class DfAlphaLoss(nn.Module):
         l_on = 0.1 * ((1 - pred_alpha) * w).abs().mean()
         return l_off + l_on
 
-    def lsnr_mapping(
-        self, lsnr: Tensor, lsnr_thresh: float, lsnr_min: Optional[float] = None
-    ) -> Tensor:
+    def lsnr_mapping(self, lsnr: Tensor, lsnr_thresh: float, lsnr_min: Optional[float] = None) -> Tensor:
         """Map lsnr_min to 1 and lsnr_thresh to 0"""
         # s = a * lsnr + b
         lsnr_min = float(self.lsnr_min) if lsnr_min is None else lsnr_min
@@ -394,9 +384,7 @@ class SegSdrLoss(nn.Module):
         loss = torch.zeros((), device=input.device)
         for ws in self.window_sizes:
             if ws > input.size(-1):
-                warnings.warn(
-                    f"Input size {input.size(-1)} smaller than window size. Adjusting window size."
-                )
+                warnings.warn(f"Input size {input.size(-1)} smaller than window size. Adjusting window size.")
                 ws = input.size(1)
             loss += self.sdr(
                 input=input.unfold(-1, ws, int(self.hop * ws)).reshape(-1, ws),
@@ -465,9 +453,7 @@ class ASRLoss(nn.Module):
             task=self.task, language=self.lang, without_timestamps=True, sample_len=self.max_ctx
         )
         self.mel_filters: Tensor
-        self.register_buffer(
-            "mel_filters", torch.from_numpy(self.get_mel_filters(self.target_sr, 400, 80))
-        )
+        self.register_buffer("mel_filters", torch.from_numpy(self.get_mel_filters(self.target_sr, 400, 80)))
         self.tokenizer = self.backend.get_tokenizer(language=self.lang, task=self.task)
         self.decoder = self.backend.get_decoder(temperature=0.0)
         self.sot_sequence = self.tokenizer.sot_sequence_including_notimestamps
@@ -483,12 +469,8 @@ class ASRLoss(nn.Module):
     def forward(self, input: Tensor, target: Tensor) -> Tensor:
         # Use backend with automatic tensor conversion for gradient flow
         if self.backend.backend_name == "mlx":
-            features_i = self.backend.embed_audio_as_torch(
-                self.preprocess(input), dtype=input.dtype
-            )
-            features_t = self.backend.embed_audio_as_torch(
-                self.preprocess(target), dtype=target.dtype
-            )
+            features_i = self.backend.embed_audio_as_torch(self.preprocess(input), dtype=input.dtype)
+            features_t = self.backend.embed_audio_as_torch(self.preprocess(target), dtype=target.dtype)
         else:
             features_i = self.backend.embed_audio(self.preprocess(input))
             features_t = self.backend.embed_audio(self.preprocess(target))
@@ -561,9 +543,7 @@ class ASRLoss(nn.Module):
     ) -> Tuple[Tensor, Tensor]:
         n = features.shape[0]
         sum_logprobs: Tensor = torch.zeros(n, device=features.device)
-        tokens: Tensor = start_tokens or torch.tensor(
-            [self.initial_tokens], device=features.device
-        ).repeat(n, 1)
+        tokens: Tensor = start_tokens or torch.tensor([self.initial_tokens], device=features.device).repeat(n, 1)
         logits: List[Tensor] = []
         for i in range(self.sample_len):
             # Use backend with automatic tensor conversion for MLX
@@ -666,18 +646,14 @@ class ASRLoss(nn.Module):
         prompt = self.options.prompt
 
         if prefix:
-            prefix_tokens = (
-                self.tokenizer.encode(" " + prefix.strip()) if isinstance(prefix, str) else prefix
-            )
+            prefix_tokens = self.tokenizer.encode(" " + prefix.strip()) if isinstance(prefix, str) else prefix
             if self.sample_len is not None:
                 max_prefix_len = self.n_ctx // 2 - self.sample_len
                 prefix_tokens = prefix_tokens[-max_prefix_len:]
             tokens = tokens + prefix_tokens
 
         if prompt:
-            prompt_tokens = (
-                self.tokenizer.encode(" " + prompt.strip()) if isinstance(prompt, str) else prompt
-            )
+            prompt_tokens = self.tokenizer.encode(" " + prompt.strip()) if isinstance(prompt, str) else prompt
             tokens = [self.tokenizer.sot_prev] + prompt_tokens[-(self.n_ctx // 2 - 1) :] + tokens
 
         return tuple(tokens)
@@ -1060,9 +1036,7 @@ class Loss(nn.Module):
         # Speaker contrastive loss
         if self.speaker_f > 0:
             speaker_neg_weight = config("negative_weight", 0.1, float, section="SpeakerLoss")
-            self.speaker_loss = SpeakerContrastiveLoss(
-                factor=self.speaker_f, negative_weight=speaker_neg_weight
-            )
+            self.speaker_loss = SpeakerContrastiveLoss(factor=self.speaker_f, negative_weight=speaker_neg_weight)
         else:
             self.speaker_loss = None
 
@@ -1167,12 +1141,8 @@ class Loss(nn.Module):
         stoi_vals: Tensor = stoi(y=enh_td, x=clean_td, fs_source=self.sr)
         sdr_vals_ms, stoi_vals_ms = [], []
         for snr in torch.unique(snrs, sorted=False):
-            self.summaries[f"sdr_snr_{snr.item()}"].extend(
-                sdr_vals.masked_select(snr == snrs).detach().split(1)
-            )
-            self.summaries[f"stoi_snr_{snr.item()}"].extend(
-                stoi_vals.masked_select(snr == snrs).detach().split(1)
-            )
+            self.summaries[f"sdr_snr_{snr.item()}"].extend(sdr_vals.masked_select(snr == snrs).detach().split(1))
+            self.summaries[f"stoi_snr_{snr.item()}"].extend(stoi_vals.masked_select(snr == snrs).detach().split(1))
             for i, (sdr_i, stoi_i) in enumerate(zip(sdr_vals_ms, stoi_vals_ms)):
                 self.summaries[f"sdr_stage_{i}_snr_{snr.item()}"].extend(
                     sdr_i.masked_select(snr == snrs).detach().split(1)
@@ -1367,9 +1337,7 @@ def test_local_snr():
         ax=ax[0],
     )
     ax[0].set_ylim(0, 10000)
-    lsnr, esp, ens = local_snr(
-        torch.from_numpy(clean).unsqueeze(0), torch.from_numpy(noise).unsqueeze(0), 4, True, 8
-    )
+    lsnr, esp, ens = local_snr(torch.from_numpy(clean).unsqueeze(0), torch.from_numpy(noise).unsqueeze(0), 4, True, 8)
     t = librosa.times_like(lsnr, sr=sr, hop_length=hop, n_fft=fft)  # type: ignore[call-arg]
     ax[1].plot(t, lsnr.clamp_min(-20).squeeze().numpy(), label="lsnr")
     ax1_ = ax[1].twinx()

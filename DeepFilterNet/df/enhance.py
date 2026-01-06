@@ -178,9 +178,7 @@ def init_df(
     load_cp = epoch is not None and not (isinstance(epoch, str) and epoch.lower() == "none")
     if not load_cp:
         checkpoint_dir = None
-    mask_only = mask_only or config(
-        "mask_only", cast=bool, section="train", default=False, save=False
-    )
+    mask_only = mask_only or config("mask_only", cast=bool, section="train", default=False, save=False)
     model, epoch = load_model_cp(checkpoint_dir, df_state, epoch=epoch, mask_only=mask_only)
     if (epoch is None or epoch == 0) and load_cp:
         logger.error("Could not find a checkpoint")
@@ -278,9 +276,7 @@ def maybe_download_model(name: str = DEFAULT_MODEL) -> str:
     if name.endswith(".zip"):
         name = name.removesuffix(".zip")
     model_dir = os.path.join(cache_dir, name)
-    if os.path.isfile(os.path.join(model_dir, "config.ini")) or os.path.isdir(
-        os.path.join(model_dir, "checkpoints")
-    ):
+    if os.path.isfile(os.path.join(model_dir, "config.ini")) or os.path.isdir(os.path.join(model_dir, "checkpoints")):
         return model_dir
     os.makedirs(cache_dir, exist_ok=True)
     url = f"https://github.com/Rikorose/DeepFilterNet/raw/main/models/{name}"
@@ -311,9 +307,7 @@ class PrintVersion(argparse.Action):
         exit(0)
 
 
-def setup_df_argument_parser(
-    default_log_level: str = "INFO", parser=None
-) -> argparse.ArgumentParser:
+def setup_df_argument_parser(default_log_level: str = "INFO", parser=None) -> argparse.ArgumentParser:
     if parser is None:
         parser = argparse.ArgumentParser()
     parser.add_argument(

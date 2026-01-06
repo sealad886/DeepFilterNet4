@@ -485,9 +485,7 @@ class PyTorchWhisperBackend:
         Returns:
             Whisper tokenizer instance.
         """
-        return self._whisper.tokenizer.get_tokenizer(
-            self._model.is_multilingual, language=language, task=task
-        )
+        return self._whisper.tokenizer.get_tokenizer(self._model.is_multilingual, language=language, task=task)
 
     def get_decoder(self, temperature: float = 0.0) -> Any:
         """
@@ -668,9 +666,7 @@ class MLXWhisperBackend:
             mel = mx.array(to_numpy(mel))
         return self._model.embed_audio(mel)
 
-    def embed_audio_as_torch(
-        self, mel: ArrayLike, dtype: Optional[torch.dtype] = None
-    ) -> torch.Tensor:
+    def embed_audio_as_torch(self, mel: ArrayLike, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """
         Extract audio embeddings and return as PyTorch tensor.
 

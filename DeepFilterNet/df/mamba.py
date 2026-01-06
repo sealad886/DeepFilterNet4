@@ -26,9 +26,7 @@ def _init_A_log(d_inner: int, d_state: int) -> Tensor:
 
 def _init_dt_bias(d_inner: int, dt_min: float = 0.001, dt_max: float = 0.1) -> Tensor:
     """Initialize delta bias to map to [dt_min, dt_max] range."""
-    dt = torch.exp(
-        torch.rand(d_inner) * (math.log(dt_max) - math.log(dt_min)) + math.log(dt_min)
-    ).clamp(min=1e-4)
+    dt = torch.exp(torch.rand(d_inner) * (math.log(dt_max) - math.log(dt_min)) + math.log(dt_min)).clamp(min=1e-4)
     inv_dt = dt + torch.log(-torch.expm1(-dt))
     return inv_dt
 
@@ -299,9 +297,7 @@ class SqueezedMamba(nn.Module):
             self.linear_in = nn.Sequential(nn.Linear(input_size, hidden_size), linear_act_layer())
 
         # Mamba layers
-        self.mamba_layers = nn.ModuleList(
-            [Mamba(hidden_size, d_state, d_conv, expand) for _ in range(num_layers)]
-        )
+        self.mamba_layers = nn.ModuleList([Mamba(hidden_size, d_state, d_conv, expand) for _ in range(num_layers)])
 
         # Skip connection (same API as SqueezedGRU_S)
         self.gru_skip = gru_skip_op() if gru_skip_op is not None else None
@@ -316,9 +312,7 @@ class SqueezedMamba(nn.Module):
                     linear_act_layer(),
                 )
             else:
-                self.linear_out = nn.Sequential(
-                    nn.Linear(hidden_size, self.output_size), linear_act_layer()
-                )
+                self.linear_out = nn.Sequential(nn.Linear(hidden_size, self.output_size), linear_act_layer())
         else:
             self.linear_out = nn.Identity()
 

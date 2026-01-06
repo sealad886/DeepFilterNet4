@@ -29,9 +29,7 @@ def eval_metric(
 ) -> bool:
     logger.info(prefix + f"Computing {metric_name} metrics")
     m_t = torch.as_tensor(m_target)  # target metric
-    m_e = torch.as_tensor(
-        f(clean.squeeze(0).numpy(), enhanced.squeeze(0).numpy())
-    )  # enhanced metric
+    m_e = torch.as_tensor(f(clean.squeeze(0).numpy(), enhanced.squeeze(0).numpy()))  # enhanced metric
     m_e = m_e.to(torch.float32)
     logger.info(prefix + f"Expected {m_t}")
     logger.info(prefix + f"Got      {m_e}")
@@ -114,12 +112,8 @@ class TestDfModels(unittest.TestCase):
         prefix = prefix + " | " if prefix is not None else ""
         sr = df_state.sr()
         logger.info(prefix + "Loading audios")
-        noisy, _ = load_audio(
-            os.path.join(self.df_dir, os.path.pardir, "assets", "noisy_snr0.wav"), sr
-        )
-        clean, _ = load_audio(
-            os.path.join(self.df_dir, os.path.pardir, "assets", "clean_freesound_33711.wav"), sr
-        )
+        noisy, _ = load_audio(os.path.join(self.df_dir, os.path.pardir, "assets", "noisy_snr0.wav"), sr)
+        clean, _ = load_audio(os.path.join(self.df_dir, os.path.pardir, "assets", "clean_freesound_33711.wav"), sr)
         enhanced = enhance(model, df_state, noisy, pad=True)
         save_audio(out_n, enhanced, sr)
         is_close = True

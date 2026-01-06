@@ -275,9 +275,7 @@ class CombinedDiscriminator(nn.Module):
         super().__init__()
 
         self.mpd = MultiPeriodDiscriminator(periods=periods, use_spectral_norm=use_spectral_norm)
-        self.msd = MultiScaleDiscriminator(
-            num_scales=num_scales, use_spectral_norm=use_spectral_norm
-        )
+        self.msd = MultiScaleDiscriminator(num_scales=num_scales, use_spectral_norm=use_spectral_norm)
 
     def forward(
         self,

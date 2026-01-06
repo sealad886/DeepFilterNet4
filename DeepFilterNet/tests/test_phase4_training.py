@@ -243,9 +243,7 @@ class TestFeatureMatchingLossModule:
         loss = FeatureMatchingLoss(factor=1.0)
 
         real_fmaps = [[torch.randn(2, 16, 5, 5) for _ in range(2)] for _ in range(2)]
-        fake_fmaps = [
-            [torch.randn(2, 16, 5, 5, requires_grad=True) for _ in range(2)] for _ in range(2)
-        ]
+        fake_fmaps = [[torch.randn(2, 16, 5, 5, requires_grad=True) for _ in range(2)] for _ in range(2)]
 
         fm_loss = loss(real_fmaps, fake_fmaps)
         fm_loss.backward()

@@ -46,9 +46,7 @@ def du(path, block_size: str = "1"):
     # return sum(f.stat().st_size for f in path.glob("**/*") if f.is_file())
     try:
         return int(
-            subprocess.check_output(
-                ["du", "-shL", f"--block-size={block_size}", path], stderr=subprocess.STDOUT
-            )
+            subprocess.check_output(["du", "-shL", f"--block-size={block_size}", path], stderr=subprocess.STDOUT)
             .split()[0]
             .decode("utf-8")
         )
@@ -213,11 +211,7 @@ def copy_datasets(
                         )
                     if not os.path.exists(fn_tgt):
                         ln(fn_src, fn_tgt)
-                    elif (
-                        not have_read_locks
-                        and os.path.isfile(fn_tgt)
-                        and not os.path.islink(fn_tgt)
-                    ):
+                    elif not have_read_locks and os.path.isfile(fn_tgt) and not os.path.islink(fn_tgt):
                         # Just run rsync again to make sure the file is not corrupt
                         print("checking", fn_tgt, flush=True)
                         futures[executor.submit(cp, fn_src, fn_tgt)] = fn_tgt
@@ -287,9 +281,7 @@ if __name__ == "__main__":
         parser.print_help()
         exit(1)
     if args.subparser_name in ("cp", "copy-datasets"):
-        copy_datasets(
-            args.src_dir, args.target_dir, args.data_cfg, args.max_gb, args.lock, args.other_hosts
-        )
+        copy_datasets(args.src_dir, args.target_dir, args.data_cfg, args.max_gb, args.lock, args.other_hosts)
     else:
         if args.lock is not None:
             remove_lock(args.target_dir, args.lock + ".read")

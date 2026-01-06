@@ -130,11 +130,7 @@ class DistillationLoss(nn.Module):
 
         # Combine losses
         soft_total = soft_loss + mask_loss
-        total_loss = (
-            self.alpha * soft_total
-            + (1 - self.alpha) * hard_loss
-            + self.feature_weight * feature_loss
-        )
+        total_loss = self.alpha * soft_total + (1 - self.alpha) * hard_loss + self.feature_weight * feature_loss
 
         return {
             "total": total_loss,
@@ -511,11 +507,7 @@ def main():
     parser.add_argument(
         "--device",
         type=str,
-        default=(
-            "cuda"
-            if torch.cuda.is_available()
-            else "mps" if torch.backends.mps.is_available() else "cpu"
-        ),
+        default=("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"),
         help="Device to train on",
     )
     parser.add_argument(

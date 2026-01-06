@@ -34,12 +34,8 @@ def SNRseg(clean_speech, processed_speech, fs, frameLen=0.03, overlap=0.75):
     MAX_SNR = 35  # maximum SNR in dB
 
     hannWin = 0.5 * (1 - np.cos(2 * np.pi * np.arange(1, winlength + 1) / (winlength + 1)))
-    clean_speech_framed = extractOverlappedWindows(
-        clean_speech, winlength, winlength - skiprate, hannWin
-    )
-    processed_speech_framed = extractOverlappedWindows(
-        processed_speech, winlength, winlength - skiprate, hannWin
-    )
+    clean_speech_framed = extractOverlappedWindows(clean_speech, winlength, winlength - skiprate, hannWin)
+    processed_speech_framed = extractOverlappedWindows(processed_speech, winlength, winlength - skiprate, hannWin)
 
     signal_energy = np.power(clean_speech_framed, 2).sum(-1)
     noise_energy = np.power(clean_speech_framed - processed_speech_framed, 2).sum(-1)
@@ -249,12 +245,8 @@ def llr(clean_speech, processed_speech, fs, frameLen=0.03, overlap=0.75):
         P = 16  # this could vary depending on sampling frequency.
 
     hannWin = 0.5 * (1 - np.cos(2 * np.pi * np.arange(1, winlength + 1) / (winlength + 1)))
-    clean_speech_framed = extractOverlappedWindows(
-        clean_speech, winlength, winlength - skiprate, hannWin
-    )
-    processed_speech_framed = extractOverlappedWindows(
-        processed_speech, winlength, winlength - skiprate, hannWin
-    )
+    clean_speech_framed = extractOverlappedWindows(clean_speech, winlength, winlength - skiprate, hannWin)
+    processed_speech_framed = extractOverlappedWindows(processed_speech, winlength, winlength - skiprate, hannWin)
     numFrames = clean_speech_framed.shape[0]
     if numFrames == 0:
         return None
@@ -465,9 +457,7 @@ def wss(clean_speech, processed_speech, fs, frameLen=0.03, overlap=0.75):
     clean_loc_peaks = np.zeros_like(log_clean_energy_slope)
     proc_loc_peaks = np.zeros_like(log_proc_energy_slope)
     for ii in range(numFrames):
-        clean_loc_peaks[:, ii] = findLocPeaks(
-            log_clean_energy_slope[:, ii], log_clean_energy[:, ii]
-        )
+        clean_loc_peaks[:, ii] = findLocPeaks(log_clean_energy_slope[:, ii], log_clean_energy[:, ii])
         proc_loc_peaks[:, ii] = findLocPeaks(log_proc_energy_slope[:, ii], log_proc_energy[:, ii])
 
     Wmax_clean = Kmax / (Kmax + dBMax_clean - log_clean_energy[:-1, :])

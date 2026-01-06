@@ -231,12 +231,8 @@ f = (np.arange(0, N_FFT // 2 + 1) * SR // 2 / (N_FFT // 2))[:MAX_BIN]
 t = np.arange(0, n_steps) * HOP / SR
 spec_non_df = np.full((MAX_BIN, n_steps), -100)
 spec_df = np.full((MAX_BIN, n_steps), -100)
-im_non_df = ax_non_df.pcolormesh(
-    t, f, spec_non_df, rasterized=True, shading="auto", cmap="inferno", vmin=-100, vmax=0
-)
-im_df = ax_df.pcolormesh(
-    t, f, spec_df, rasterized=True, shading="auto", cmap="inferno", vmin=-100, vmax=0
-)
+im_non_df = ax_non_df.pcolormesh(t, f, spec_non_df, rasterized=True, shading="auto", cmap="inferno", vmin=-100, vmax=0)
+im_df = ax_df.pcolormesh(t, f, spec_df, rasterized=True, shading="auto", cmap="inferno", vmin=-100, vmax=0)
 ax_non_df.set_title("Input")
 ax_df.set_title("DeepFilterNet Output")
 ax_non_df.set_ylim(0, MAX_FREQ)
@@ -276,8 +272,6 @@ def animate(i):
     return (im_non_df, im_df)
 
 
-anim = animation.FuncAnimation(
-    fig, animate, init_func=init, interval=ic(HOP / SR * 1000), blit=True
-)
+anim = animation.FuncAnimation(fig, animate, init_func=init, interval=ic(HOP / SR * 1000), blit=True)
 
 root.mainloop()

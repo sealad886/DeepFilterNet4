@@ -69,9 +69,7 @@ class WaveformEncoder(nn.Module):
             out_ch = base_channels * (2**i)
             layers.append(
                 nn.Sequential(
-                    nn.Conv1d(
-                        ch, out_ch, kernel_sizes[i], strides[i], padding=kernel_sizes[i] // 2
-                    ),
+                    nn.Conv1d(ch, out_ch, kernel_sizes[i], strides[i], padding=kernel_sizes[i] // 2),
                     nn.BatchNorm1d(out_ch),
                     nn.GELU(),
                 )
@@ -230,12 +228,8 @@ class CrossDomainAttention(nn.Module):
         self.phase_proj = nn.Linear(phase_dim, out_dim)
 
         # Cross-attention layers
-        self.time_mag_attn = nn.MultiheadAttention(
-            out_dim, num_heads, dropout=dropout, batch_first=True
-        )
-        self.mag_phase_attn = nn.MultiheadAttention(
-            out_dim, num_heads, dropout=dropout, batch_first=True
-        )
+        self.time_mag_attn = nn.MultiheadAttention(out_dim, num_heads, dropout=dropout, batch_first=True)
+        self.mag_phase_attn = nn.MultiheadAttention(out_dim, num_heads, dropout=dropout, batch_first=True)
 
         # Layer norms for attention outputs
         self.norm_tm = nn.LayerNorm(out_dim)
@@ -374,9 +368,7 @@ class MagnitudeEncoder(nn.Module):
         self.nb_df = nb_df
 
         # ERB pathway
-        self.erb_conv0 = Conv2dNormAct(
-            1, conv_ch, kernel_size=conv_kernel_inp, bias=False, separable=True
-        )
+        self.erb_conv0 = Conv2dNormAct(1, conv_ch, kernel_size=conv_kernel_inp, bias=False, separable=True)
         conv_layer = partial(
             Conv2dNormAct,
             in_ch=conv_ch,
@@ -390,9 +382,7 @@ class MagnitudeEncoder(nn.Module):
         self.erb_conv3 = conv_layer(fstride=1)
 
         # DF pathway
-        self.df_conv0 = Conv2dNormAct(
-            2, conv_ch, kernel_size=conv_kernel_inp, bias=False, separable=True
-        )
+        self.df_conv0 = Conv2dNormAct(2, conv_ch, kernel_size=conv_kernel_inp, bias=False, separable=True)
         self.df_conv1 = conv_layer(fstride=2)
 
         # Embedding dimensions
@@ -400,14 +390,10 @@ class MagnitudeEncoder(nn.Module):
         self.emb_out_dim = emb_hidden_dim
 
         # DF to embedding projection
-        df_fc_emb = GroupedLinearEinsum(
-            conv_ch * nb_df // 2, self.emb_in_dim, groups=enc_lin_groups
-        )
+        df_fc_emb = GroupedLinearEinsum(conv_ch * nb_df // 2, self.emb_in_dim, groups=enc_lin_groups)
         self.df_fc_emb = nn.Sequential(df_fc_emb, nn.ReLU(inplace=True))
 
-    def forward(
-        self, feat_erb: Tensor, feat_spec: Tensor
-    ) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    def forward(self, feat_erb: Tensor, feat_spec: Tensor) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
         """Encode magnitude features.
 
         Args:

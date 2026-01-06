@@ -309,9 +309,7 @@ def format_results(
         lines.append("\n⏱️  Real-Time Factor:")
         lines.append(f"   RTF: {rtf['rtf_mean']:.4f} ± {rtf['rtf_std']:.4f}")
         lines.append(f"   Latency: {rtf['latency_ms']:.2f} ms/frame")
-        lines.append(
-            f"   ({rtf['audio_duration_sec']:.1f}s audio in {rtf['process_time_sec']:.2f}s)"
-        )
+        lines.append(f"   ({rtf['audio_duration_sec']:.1f}s audio in {rtf['process_time_sec']:.2f}s)")
 
     lines.append("\n📈 Quality Metrics:")
 
@@ -377,9 +375,7 @@ def compare_models(
 
         indicator = "🔼" if diff > 0.01 else ("🔽" if diff < -0.01 else "➖")
 
-        lines.append(
-            f"{key:<15} | {v1:<12.4f} | {v2:<12.4f} | {diff:<+10.4f} | {indicator} {pct:+.1f}%"
-        )
+        lines.append(f"{key:<15} | {v1:<12.4f} | {v2:<12.4f} | {diff:<+10.4f} | {indicator} {pct:+.1f}%")
 
     lines.append(f"{'=' * 70}\n")
 

@@ -37,9 +37,7 @@ class Conv2dNormAct(nn.Sequential):
         """
         lookahead = 0  # This needs to be handled on the input feature side
         # Padding on time axis
-        kernel_size = (
-            (kernel_size, kernel_size) if isinstance(kernel_size, int) else tuple(kernel_size)
-        )
+        kernel_size = (kernel_size, kernel_size) if isinstance(kernel_size, int) else tuple(kernel_size)
         if fpad:
             fpad_ = kernel_size[1] // 2 + dilation - 1
         else:
@@ -178,9 +176,7 @@ def convkxf(
         #     dilation - (k - 1) - padding
         #   = 1        - (2 - 1) - 1 = 0; => padding = fpad (=1 for k=2)
         padding = (k - 1, fpad)
-        modules.append(
-            ("sconvt", nn.ConvTranspose2d(padding=padding, output_padding=convpad, **convkwargs))
-        )
+        modules.append(("sconvt", nn.ConvTranspose2d(padding=padding, output_padding=convpad, **convkwargs)))
     elif mode == "upsample":
         modules.append(("upsample", FreqUpsample(fstride)))
         convkwargs["stride"] = 1
@@ -328,9 +324,7 @@ class DfOp(nn.Module):
 
         # Check for config override (handle case when no config is loaded)
         try:
-            use_complex_override = config(
-                "DF_USE_COMPLEX", cast=bool, section="df", default=None, save=False
-            )
+            use_complex_override = config("DF_USE_COMPLEX", cast=bool, section="df", default=None, save=False)
         except ValueError:
             use_complex_override = None
 
@@ -359,27 +353,19 @@ class DfOp(nn.Module):
             "real_hidden_state_loop": self.forward_real_hidden_state_loop,
         }
         if method not in forward_methods.keys():
-            raise NotImplementedError(
-                f"`method` must be one of {forward_methods.keys()}, but got '{method}'"
-            )
+            raise NotImplementedError(f"`method` must be one of {forward_methods.keys()}, but got '{method}'")
         if method == "real_hidden_state_loop":
             assert self.freq_bins >= self.df_bins
             self.spec_buf: Tensor
             # Currently only designed for batch size of 1
-            self.register_buffer(
-                "spec_buf", torch.zeros(1, 1, self.df_order, self.freq_bins, 2), persistent=False
-            )
+            self.register_buffer("spec_buf", torch.zeros(1, 1, self.df_order, self.freq_bins, 2), persistent=False)
         self.forward = forward_methods[method]
 
-    def forward_real_loop(
-        self, spec: Tensor, coefs: Tensor, alpha: Optional[Tensor] = None
-    ) -> Tensor:
+    def forward_real_loop(self, spec: Tensor, coefs: Tensor, alpha: Optional[Tensor] = None) -> Tensor:
         # Version 0: Manual loop over df_order, maybe best for onnx export?
         b, _, t, _, _ = spec.shape
         f = self.df_bins
-        padded = spec_pad(
-            spec[..., : self.df_bins, :].squeeze(1), self.df_order, self.df_lookahead, dim=-3
-        )
+        padded = spec_pad(spec[..., : self.df_bins, :].squeeze(1), self.df_order, self.df_lookahead, dim=-3)
 
         spec_f = torch.zeros((b, t, f, 2), device=spec.device)
         for i in range(self.df_order):
@@ -389,16 +375,12 @@ class DfOp(nn.Module):
             spec_f[..., 1] += padded[:, i : i + t, ..., 0] * coefs[:, :, i, :, 1]
         return assign_df(spec, spec_f.unsqueeze(1), self.df_bins, alpha)
 
-    def forward_real_strided(
-        self, spec: Tensor, coefs: Tensor, alpha: Optional[Tensor] = None
-    ) -> Tensor:
+    def forward_real_strided(self, spec: Tensor, coefs: Tensor, alpha: Optional[Tensor] = None) -> Tensor:
         # Version1: Use as_strided instead of unfold
         # spec (real) [B, 1, T, F, 2], O: df_order
         # coefs (real) [B, T, O, F, 2]
         # alpha (real) [B, T, 1]
-        padded = as_strided(
-            spec[..., : self.df_bins, :].squeeze(1), self.df_order, self.df_lookahead, dim=-3
-        )
+        padded = as_strided(spec[..., : self.df_bins, :].squeeze(1), self.df_order, self.df_lookahead, dim=-3)
         # Complex numbers are not supported by onnx
         re = padded[..., 0] * coefs[..., 0]
         re -= padded[..., 1] * coefs[..., 1]
@@ -407,16 +389,12 @@ class DfOp(nn.Module):
         spec_f = torch.stack((re, im), -1).sum(2)
         return assign_df(spec, spec_f.unsqueeze(1), self.df_bins, alpha)
 
-    def forward_real_unfold(
-        self, spec: Tensor, coefs: Tensor, alpha: Optional[Tensor] = None
-    ) -> Tensor:
+    def forward_real_unfold(self, spec: Tensor, coefs: Tensor, alpha: Optional[Tensor] = None) -> Tensor:
         # Version2: Unfold
         # spec (real) [B, 1, T, F, 2], O: df_order
         # coefs (real) [B, T, O, F, 2]
         # alpha (real) [B, T, 1]
-        padded = spec_pad(
-            spec[..., : self.df_bins, :].squeeze(1), self.df_order, self.df_lookahead, dim=-3
-        )
+        padded = spec_pad(spec[..., : self.df_bins, :].squeeze(1), self.df_order, self.df_lookahead, dim=-3)
         padded = padded.unfold(dimension=1, size=self.df_order, step=1)  # [B, T, F, 2, O]
         padded = padded.permute(0, 1, 4, 2, 3)
         spec_f = torch.empty_like(padded)
@@ -427,23 +405,17 @@ class DfOp(nn.Module):
         spec_f = spec_f.sum(dim=2)
         return assign_df(spec, spec_f.unsqueeze(1), self.df_bins, alpha)
 
-    def forward_complex_strided(
-        self, spec: Tensor, coefs: Tensor, alpha: Optional[Tensor] = None
-    ) -> Tensor:
+    def forward_complex_strided(self, spec: Tensor, coefs: Tensor, alpha: Optional[Tensor] = None) -> Tensor:
         # Version3: Complex strided; definatly nicest, no permute, no indexing, but complex gradient
         # spec (real) [B, 1, T, F, 2], O: df_order
         # coefs (real) [B, T, O, F, 2]
         # alpha (real) [B, T, 1]
-        padded = as_strided(
-            spec[..., : self.df_bins, :].squeeze(1), self.df_order, self.df_lookahead, dim=-3
-        )
+        padded = as_strided(spec[..., : self.df_bins, :].squeeze(1), self.df_order, self.df_lookahead, dim=-3)
         spec_f = torch.sum(torch.view_as_complex(padded) * torch.view_as_complex(coefs), dim=2)
         spec_f = torch.view_as_real(spec_f)
         return assign_df(spec, spec_f.unsqueeze(1), self.df_bins, alpha)
 
-    def forward_real_no_pad_one_step(
-        self, spec: Tensor, coefs: Tensor, alpha: Optional[Tensor] = None
-    ) -> Tensor:
+    def forward_real_no_pad_one_step(self, spec: Tensor, coefs: Tensor, alpha: Optional[Tensor] = None) -> Tensor:
         # Version4: Only viable for onnx handling. `spec` needs external (ring-)buffer handling.
         # Thus, time steps `t` must be equal to `df_order`.
 
@@ -558,9 +530,7 @@ class GroupedGRULayer(nn.Module):
         self.groups = groups
         self.batch_first = batch_first
         assert (self.hidden_size % groups) == 0, "Hidden size must be divisible by groups"
-        self.layers = nn.ModuleList(
-            (nn.GRU(self.input_size, self.hidden_size, **kwargs) for _ in range(groups))
-        )
+        self.layers = nn.ModuleList((nn.GRU(self.input_size, self.hidden_size, **kwargs) for _ in range(groups)))
 
     def flatten_parameters(self):
         for layer in self.layers:
@@ -662,18 +632,14 @@ class GroupedGRU(nn.Module):
         b = dim0 if self.batch_first else dim1
         if state is None:
             state = self.get_h0(b, input.device)
-        output = torch.zeros(
-            dim0, dim1, self.hidden_size * self.num_directions * self.groups, device=input.device
-        )
+        output = torch.zeros(dim0, dim1, self.hidden_size * self.num_directions * self.groups, device=input.device)
         outstates = []
         h = self.groups * self.num_directions
         for i, gru in enumerate(self.grus):
             input, s = gru(input, state[i * h : (i + 1) * h])
             outstates.append(s)
             if self.shuffle and i < self.num_layers - 1:
-                input = (
-                    input.view(dim0, dim1, -1, self.groups).transpose(2, 3).reshape(dim0, dim1, -1)
-                )
+                input = input.view(dim0, dim1, -1, self.groups).transpose(2, 3).reshape(dim0, dim1, -1)
             if self.add_outputs:
                 output += input
             else:
@@ -700,9 +666,7 @@ class SqueezedGRU(nn.Module):
         super().__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
-        self.linear_in = nn.Sequential(
-            GroupedLinearEinsum(input_size, hidden_size, linear_groups), linear_act_layer()
-        )
+        self.linear_in = nn.Sequential(GroupedLinearEinsum(input_size, hidden_size, linear_groups), linear_act_layer())
         self.gru = nn.GRU(hidden_size, hidden_size, num_layers=num_layers, batch_first=batch_first)
         self.gru_skip = gru_skip_op() if gru_skip_op is not None else None
         if output_size is not None:
@@ -739,9 +703,7 @@ class SqueezedGRU_S(nn.Module):
         super().__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
-        self.linear_in = nn.Sequential(
-            GroupedLinearEinsum(input_size, hidden_size, linear_groups), linear_act_layer()
-        )
+        self.linear_in = nn.Sequential(GroupedLinearEinsum(input_size, hidden_size, linear_groups), linear_act_layer())
         self.gru = nn.GRU(hidden_size, hidden_size, num_layers=num_layers, batch_first=batch_first)
         self.gru_skip = gru_skip_op() if gru_skip_op is not None else None
         if output_size is not None:
@@ -776,9 +738,7 @@ class GroupedLinearEinsum(nn.Module):
         self.ws = input_size // groups
         self.register_parameter(
             "weight",
-            Parameter(
-                torch.zeros(groups, input_size // groups, hidden_size // groups), requires_grad=True
-            ),
+            Parameter(torch.zeros(groups, input_size // groups, hidden_size // groups), requires_grad=True),
         )
         self.reset_parameters()
 
@@ -818,9 +778,7 @@ class GroupedLinear(nn.Module):
         if groups == 1:
             shuffle = False
         self.shuffle = shuffle
-        self.layers = nn.ModuleList(
-            nn.Linear(self.input_size, self.hidden_size) for _ in range(groups)
-        )
+        self.layers = nn.ModuleList(nn.Linear(self.input_size, self.hidden_size) for _ in range(groups))
 
     def forward(self, x: Tensor) -> Tensor:
         outputs: List[Tensor] = []
@@ -829,16 +787,12 @@ class GroupedLinear(nn.Module):
         output = torch.cat(outputs, dim=-1)
         if self.shuffle:
             orig_shape = output.shape
-            output = (
-                output.view(-1, self.hidden_size, self.groups).transpose(-1, -2).reshape(orig_shape)
-            )
+            output = output.view(-1, self.hidden_size, self.groups).transpose(-1, -2).reshape(orig_shape)
         return output
 
 
 class LocalSnrTarget(nn.Module):
-    def __init__(
-        self, ws: int = 20, db: bool = True, ws_ns: Optional[int] = None, target_snr_range=None
-    ):
+    def __init__(self, ws: int = 20, db: bool = True, ws_ns: Optional[int] = None, target_snr_range=None):
         super().__init__()
         self.ws = self.calc_ws(ws)
         self.ws_ns = self.ws * 2 if ws_ns is None else self.calc_ws(ws_ns)
@@ -858,9 +812,7 @@ class LocalSnrTarget(nn.Module):
         if max_bin is not None:
             clean = as_complex(clean[..., :max_bin])
             noise = as_complex(noise[..., :max_bin])
-        lsnr = local_snr(clean, noise, window_size=self.ws, db=self.db, window_size_ns=self.ws_ns)[
-            0
-        ]
+        lsnr = local_snr(clean, noise, window_size=self.ws, db=self.db, window_size_ns=self.ws_ns)[0]
         if self.range is not None:
             lsnr = lsnr.clamp(self.range[0], self.range[1])
         return lsnr.squeeze(1)
@@ -1021,9 +973,7 @@ def test_dfop():
     spec_padded = spec_pad(spec, o, d, dim=-3)
     out5 = torch.zeros_like(out1)
     for i in range(t):
-        out5[:, :, i] = dfop(
-            spec_padded[:, :, i : i + o], coefs[:, i].unsqueeze(1), alpha[:, i].unsqueeze(1)
-        )
+        out5[:, :, i] = dfop(spec_padded[:, :, i : i + o], coefs[:, i].unsqueeze(1), alpha[:, i].unsqueeze(1))
     torch.testing.assert_allclose(out1, out5)
     # Forward method that does the padding/lookahead handling using an internal hidden state.
     dfop.freq_bins = F

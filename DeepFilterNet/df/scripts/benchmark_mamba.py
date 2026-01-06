@@ -96,8 +96,7 @@ def benchmark_model(
 
     return {
         "latency_ms": mean_latency,
-        "latency_std_ms": (sum((lat - mean_latency) ** 2 for lat in latencies) / len(latencies))
-        ** 0.5,
+        "latency_std_ms": (sum((lat - mean_latency) ** 2 for lat in latencies) / len(latencies)) ** 0.5,
         "throughput_samples_per_sec": throughput,
         "peak_memory_mb": peak_memory_mb,
     }

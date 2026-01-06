@@ -100,42 +100,22 @@ class ModelParams4(DfParams):
     def __init__(self):
         super().__init__()
         # Standard conv params (compatible with DFNet3)
-        self.conv_lookahead: int = config(
-            "CONV_LOOKAHEAD", cast=int, default=0, section=self.section
-        )
+        self.conv_lookahead: int = config("CONV_LOOKAHEAD", cast=int, default=0, section=self.section)
         self.conv_ch: int = config("CONV_CH", cast=int, default=16, section=self.section)
-        self.conv_depthwise: bool = config(
-            "CONV_DEPTHWISE", cast=bool, default=True, section=self.section
-        )
-        self.convt_depthwise: bool = config(
-            "CONVT_DEPTHWISE", cast=bool, default=True, section=self.section
-        )
-        self.conv_kernel: List[int] = config(
-            "CONV_KERNEL", cast=Csv(int), default=(1, 3), section=self.section
-        )
-        self.convt_kernel: List[int] = config(
-            "CONVT_KERNEL", cast=Csv(int), default=(1, 3), section=self.section
-        )
-        self.conv_kernel_inp: List[int] = config(
-            "CONV_KERNEL_INP", cast=Csv(int), default=(3, 3), section=self.section
-        )
+        self.conv_depthwise: bool = config("CONV_DEPTHWISE", cast=bool, default=True, section=self.section)
+        self.convt_depthwise: bool = config("CONVT_DEPTHWISE", cast=bool, default=True, section=self.section)
+        self.conv_kernel: List[int] = config("CONV_KERNEL", cast=Csv(int), default=(1, 3), section=self.section)
+        self.convt_kernel: List[int] = config("CONVT_KERNEL", cast=Csv(int), default=(1, 3), section=self.section)
+        self.conv_kernel_inp: List[int] = config("CONV_KERNEL_INP", cast=Csv(int), default=(3, 3), section=self.section)
 
         # Embedding params
-        self.emb_hidden_dim: int = config(
-            "EMB_HIDDEN_DIM", cast=int, default=256, section=self.section
-        )
-        self.emb_num_layers: int = config(
-            "EMB_NUM_LAYERS", cast=int, default=2, section=self.section
-        )
-        self.emb_gru_skip_enc: str = config(
-            "EMB_GRU_SKIP_ENC", default="none", section=self.section
-        )
+        self.emb_hidden_dim: int = config("EMB_HIDDEN_DIM", cast=int, default=256, section=self.section)
+        self.emb_num_layers: int = config("EMB_NUM_LAYERS", cast=int, default=2, section=self.section)
+        self.emb_gru_skip_enc: str = config("EMB_GRU_SKIP_ENC", default="none", section=self.section)
         self.emb_gru_skip: str = config("EMB_GRU_SKIP", default="none", section=self.section)
 
         # DF params
-        self.df_hidden_dim: int = config(
-            "DF_HIDDEN_DIM", cast=int, default=256, section=self.section
-        )
+        self.df_hidden_dim: int = config("DF_HIDDEN_DIM", cast=int, default=256, section=self.section)
         self.df_gru_skip: str = config("DF_GRU_SKIP", default="none", section=self.section)
         self.df_pathway_kernel_size_t: int = config(
             "DF_PATHWAY_KERNEL_SIZE_T", cast=int, default=1, section=self.section
@@ -144,60 +124,40 @@ class ModelParams4(DfParams):
         self.df_num_layers: int = config("DF_NUM_LAYERS", cast=int, default=3, section=self.section)
         self.df_n_iter: int = config("DF_N_ITER", cast=int, default=1, section=self.section)
         self.lin_groups: int = config("LINEAR_GROUPS", cast=int, default=1, section=self.section)
-        self.enc_lin_groups: int = config(
-            "ENC_LINEAR_GROUPS", cast=int, default=16, section=self.section
-        )
+        self.enc_lin_groups: int = config("ENC_LINEAR_GROUPS", cast=int, default=16, section=self.section)
         self.mask_pf: bool = config("MASK_PF", cast=bool, default=False, section=self.section)
         self.pf_beta: float = config("PF_BETA", cast=float, default=0.02, section=self.section)
-        self.lsnr_dropout: bool = config(
-            "LSNR_DROPOUT", cast=bool, default=False, section=self.section
-        )
+        self.lsnr_dropout: bool = config("LSNR_DROPOUT", cast=bool, default=False, section=self.section)
         self.df_order: int = config("DF_ORDER", cast=int, default=5, section=self.section)
 
         # === DFNet4 specific params ===
 
         # Backbone selection
-        self.backbone: str = config(
-            "BACKBONE", default="mamba", section=self.section
-        )  # "mamba" or "gru"
+        self.backbone: str = config("BACKBONE", default="mamba", section=self.section)  # "mamba" or "gru"
 
         # Mamba params
-        self.mamba_d_state: int = config(
-            "MAMBA_D_STATE", cast=int, default=16, section=self.section
-        )
+        self.mamba_d_state: int = config("MAMBA_D_STATE", cast=int, default=16, section=self.section)
         self.mamba_d_conv: int = config("MAMBA_D_CONV", cast=int, default=4, section=self.section)
         self.mamba_expand: int = config("MAMBA_EXPAND", cast=int, default=2, section=self.section)
 
         # Hybrid encoder params
-        self.use_time_branch: bool = config(
-            "USE_TIME_BRANCH", cast=bool, default=False, section=self.section
-        )
-        self.use_phase_branch: bool = config(
-            "USE_PHASE_BRANCH", cast=bool, default=True, section=self.section
-        )
-        self.fusion_type: str = config(
-            "FUSION_TYPE", default="simple", section=self.section
-        )  # "attention" or "simple"
+        self.use_time_branch: bool = config("USE_TIME_BRANCH", cast=bool, default=False, section=self.section)
+        self.use_phase_branch: bool = config("USE_PHASE_BRANCH", cast=bool, default=True, section=self.section)
+        self.fusion_type: str = config("FUSION_TYPE", default="simple", section=self.section)  # "attention" or "simple"
 
         # Multi-resolution DF params
-        self.use_multi_res_df: bool = config(
-            "USE_MULTI_RES_DF", cast=bool, default=True, section=self.section
-        )
+        self.use_multi_res_df: bool = config("USE_MULTI_RES_DF", cast=bool, default=True, section=self.section)
         self.df_resolutions: str = config(
             "DF_RESOLUTIONS", default="96,5;48,3;24,2", section=self.section
         )  # num_freqs,frame_size pairs
 
         # Adaptive order params
-        self.adaptive_order: bool = config(
-            "ADAPTIVE_ORDER", cast=bool, default=False, section=self.section
-        )
+        self.adaptive_order: bool = config("ADAPTIVE_ORDER", cast=bool, default=False, section=self.section)
         self.max_df_order: int = config("MAX_DF_ORDER", cast=int, default=7, section=self.section)
         self.min_df_order: int = config("MIN_DF_ORDER", cast=int, default=2, section=self.section)
 
         # Model variant
-        self.model_variant: str = config(
-            "MODEL_VARIANT", default="full", section=self.section
-        )  # "full" or "lite"
+        self.model_variant: str = config("MODEL_VARIANT", default="full", section=self.section)  # "full" or "lite"
 
     def get_df_resolutions(self) -> List[Tuple[int, int]]:
         """Parse DF_RESOLUTIONS config string into list of (num_freqs, frame_size) tuples."""
@@ -384,9 +344,7 @@ class MultiResDfDecoder(nn.Module):
 
         # Generate coefficients for each resolution
         coefs_list = []
-        for head, reshape, (num_freqs, frame_size) in zip(
-            self.output_heads, self.reshape_ops, self.resolutions
-        ):
+        for head, reshape, (num_freqs, frame_size) in zip(self.output_heads, self.reshape_ops, self.resolutions):
             # Generate raw coefficients
             raw_coefs = head(hidden)  # [B, T, num_freqs * frame_size * 2]
 
@@ -797,9 +755,7 @@ class Encoder4(nn.Module):
         assert nb_erb % 4 == 0, "nb_erb should be divisible by 4"
 
         # ERB pathway
-        self.erb_conv0 = Conv2dNormAct(
-            1, conv_ch, kernel_size=conv_kernel_inp, bias=False, separable=True
-        )
+        self.erb_conv0 = Conv2dNormAct(1, conv_ch, kernel_size=conv_kernel_inp, bias=False, separable=True)
         conv_layer = partial(
             Conv2dNormAct,
             in_ch=conv_ch,
@@ -813,9 +769,7 @@ class Encoder4(nn.Module):
         self.erb_conv3 = conv_layer(fstride=1)
 
         # DF pathway
-        self.df_conv0 = Conv2dNormAct(
-            2, conv_ch, kernel_size=conv_kernel_inp, bias=False, separable=True
-        )
+        self.df_conv0 = Conv2dNormAct(2, conv_ch, kernel_size=conv_kernel_inp, bias=False, separable=True)
         self.df_conv1 = conv_layer(fstride=2)
 
         # Embedding dimensions
@@ -825,9 +779,7 @@ class Encoder4(nn.Module):
         self.emb_out_dim = conv_ch * nb_erb // 4
 
         # DF to embedding projection
-        df_fc_emb = GroupedLinearEinsum(
-            conv_ch * nb_df // 2, self.emb_in_dim, groups=enc_lin_groups
-        )
+        df_fc_emb = GroupedLinearEinsum(conv_ch * nb_df // 2, self.emb_in_dim, groups=enc_lin_groups)
         self.df_fc_emb = nn.Sequential(df_fc_emb, nn.ReLU(inplace=True))
 
         # Combine ERB and DF embeddings
@@ -1169,8 +1121,7 @@ class DfNet4(nn.Module):
                 if self.lsnr_dropout and self.training and idcs is not None:
                     # Handle LSNR dropout for multi-res
                     df_coefs_full = [
-                        torch.zeros(b, c.shape[1], t, c.shape[3], 2, device=spec.device)
-                        for c in coefs_list
+                        torch.zeros(b, c.shape[1], t, c.shape[3], 2, device=spec.device) for c in coefs_list
                     ]
                     for i, (c_full, c_active) in enumerate(zip(df_coefs_full, coefs_list)):
                         c_full[:, :, idcs] = c_active
@@ -1181,18 +1132,14 @@ class DfNet4(nn.Module):
             elif self.adaptive_order:
                 df_coefs, order_weights, predicted_order = self.df_dec(emb_active, c0_active)
                 if self.lsnr_dropout and self.training and idcs is not None:
-                    df_coefs_full = torch.zeros(
-                        b, self.df_order, t, self.nb_df, 2, device=spec.device
-                    )
+                    df_coefs_full = torch.zeros(b, self.df_order, t, self.nb_df, 2, device=spec.device)
                     df_coefs_full[:, :, idcs] = df_coefs
                     df_coefs = df_coefs_full
                 spec_e = self.df_op(spec.clone(), df_coefs)
             else:
                 df_coefs = self.df_dec(emb_active, c0_active)
                 if self.lsnr_dropout and self.training and idcs is not None:
-                    df_coefs_full = torch.zeros(
-                        b, self.df_order, t, self.nb_df, 2, device=spec.device
-                    )
+                    df_coefs_full = torch.zeros(b, self.df_order, t, self.nb_df, 2, device=spec.device)
                     df_coefs_full[:, :, idcs] = df_coefs
                     df_coefs = df_coefs_full
                 spec_e = self.df_op(spec.clone(), df_coefs)
@@ -1442,9 +1389,7 @@ class Encoder4Lite(nn.Module):
         assert nb_erb % 4 == 0, "nb_erb should be divisible by 4"
 
         # ERB pathway
-        self.erb_conv0 = Conv2dNormAct(
-            1, conv_ch, kernel_size=conv_kernel_inp, bias=False, separable=True
-        )
+        self.erb_conv0 = Conv2dNormAct(1, conv_ch, kernel_size=conv_kernel_inp, bias=False, separable=True)
         conv_layer = partial(
             Conv2dNormAct,
             in_ch=conv_ch,
@@ -1458,9 +1403,7 @@ class Encoder4Lite(nn.Module):
         self.erb_conv3 = conv_layer(fstride=1)
 
         # DF pathway
-        self.df_conv0 = Conv2dNormAct(
-            2, conv_ch, kernel_size=conv_kernel_inp, bias=False, separable=True
-        )
+        self.df_conv0 = Conv2dNormAct(2, conv_ch, kernel_size=conv_kernel_inp, bias=False, separable=True)
         self.df_conv1 = conv_layer(fstride=2)
 
         # Embedding dimensions
@@ -1470,9 +1413,7 @@ class Encoder4Lite(nn.Module):
         self.emb_out_dim = conv_ch * nb_erb // 4
 
         # DF to embedding projection
-        df_fc_emb = GroupedLinearEinsum(
-            conv_ch * nb_df // 2, self.emb_in_dim, groups=enc_lin_groups
-        )
+        df_fc_emb = GroupedLinearEinsum(conv_ch * nb_df // 2, self.emb_in_dim, groups=enc_lin_groups)
         self.df_fc_emb = nn.Sequential(df_fc_emb, nn.ReLU(inplace=True))
 
         # Combine ERB and DF embeddings

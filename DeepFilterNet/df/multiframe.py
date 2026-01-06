@@ -96,9 +96,7 @@ class MultiFrameModule(nn.Module):
 
     @staticmethod
     def solve(Rxx, rss, diag_eps: float = 1e-8, eps: float = 1e-7) -> Tensor:
-        return torch.einsum(
-            "...nm,...m->...n", torch.inverse(_tik_reg(Rxx, diag_eps, eps)), rss
-        )  # [T, F, N]
+        return torch.einsum("...nm,...m->...n", torch.inverse(_tik_reg(Rxx, diag_eps, eps)), rss)  # [T, F, N]
 
     @staticmethod
     def apply_coefs(spec: Tensor, coefs: Tensor) -> Tensor:
@@ -259,9 +257,7 @@ class MultiResolutionDF(nn.Module):
         if learnable_weights:
             self.resolution_weights = nn.Parameter(torch.ones(len(resolutions)) / len(resolutions))
         else:
-            self.register_buffer(
-                "resolution_weights", torch.ones(len(resolutions)) / len(resolutions)
-            )
+            self.register_buffer("resolution_weights", torch.ones(len(resolutions)) / len(resolutions))
 
     def forward(
         self,
@@ -282,9 +278,7 @@ class MultiResolutionDF(nn.Module):
             Enhanced spectrum [B, C, T, F, 2] with the same shape as input.
         """
         if len(coefs_list) != len(self.resolutions):
-            raise ValueError(
-                f"Expected {len(self.resolutions)} coefficient tensors, " f"got {len(coefs_list)}"
-            )
+            raise ValueError(f"Expected {len(self.resolutions)} coefficient tensors, " f"got {len(coefs_list)}")
 
         # Softmax over resolution weights for proper weighting
         weights = F.softmax(self.resolution_weights, dim=0)
@@ -632,9 +626,7 @@ def _compute_mat_trace(input: torch.Tensor, dim1: int = -2, dim2: int = -1) -> t
         Tensor: trace of the input Tensor
     """
     assert input.ndim >= 2, "The dimension of the tensor must be at least 2."
-    assert (
-        input.shape[dim1] == input.shape[dim2]
-    ), "The size of ``dim1`` and ``dim2`` must be the same."
+    assert input.shape[dim1] == input.shape[dim2], "The size of ``dim1`` and ``dim2`` must be the same."
     input = torch.diagonal(input, 0, dim1=dim1, dim2=dim2)
     return input.sum(dim=-1)
 
@@ -664,9 +656,7 @@ def compute_corr(X: Tensor, N: int):
     return Rxx
 
 
-def compute_ideal_wf(
-    rxx_via_rssrnn=True, cholesky_decomp=False, inverse=True, enforce_constraints=True, manual=False
-):
+def compute_ideal_wf(rxx_via_rssrnn=True, cholesky_decomp=False, inverse=True, enforce_constraints=True, manual=False):
     from icecream import ic, install
 
     import libdf
@@ -694,12 +684,8 @@ def compute_ideal_wf(
     n_freqs = p.fft_size // 2 + 1
 
     df = libdf.DF(sr=p.sr, fft_size=p.fft_size, hop_size=p.hop_size, nb_bands=p.nb_erb)
-    s = load_audio("assets/clean_freesound_33711.wav", p.sr, num_frames=5 * p.sr)[0].mean(
-        0, keepdim=True
-    )
-    n = load_audio("assets/noise_freesound_2530.wav", p.sr, num_frames=5 * p.sr)[0].mean(
-        0, keepdim=True
-    )
+    s = load_audio("assets/clean_freesound_33711.wav", p.sr, num_frames=5 * p.sr)[0].mean(0, keepdim=True)
+    n = load_audio("assets/noise_freesound_2530.wav", p.sr, num_frames=5 * p.sr)[0].mean(0, keepdim=True)
     x = s + n
     save_audio("out/noisy.wav", x, p.sr)
 
@@ -773,12 +759,8 @@ def compute_ideal_mvdr(cholesky_decomp=False, inverse=True, enforce_constraints=
     n_freqs = p.fft_size // 2 + 1
 
     df = libdf.DF(sr=p.sr, fft_size=p.fft_size, hop_size=p.hop_size, nb_bands=p.nb_erb)
-    s = load_audio("assets/clean_freesound_33711.wav", p.sr, num_frames=5 * p.sr)[0].mean(
-        0, keepdim=True
-    )
-    n = load_audio("assets/noise_freesound_2530.wav", p.sr, num_frames=5 * p.sr)[0].mean(
-        0, keepdim=True
-    )
+    s = load_audio("assets/clean_freesound_33711.wav", p.sr, num_frames=5 * p.sr)[0].mean(0, keepdim=True)
+    n = load_audio("assets/noise_freesound_2530.wav", p.sr, num_frames=5 * p.sr)[0].mean(0, keepdim=True)
     x = s + n
     save_audio("out/noisy.wav", x, p.sr)
 

@@ -45,18 +45,14 @@ from df.logger import init_logger
 from libdf import DF
 
 
-def shapes_dict(
-    tensors: Tuple[Tensor, ...], names: Union[Tuple[str, ...], List[str]]
-) -> Dict[str, Tuple[int, ...]]:
+def shapes_dict(tensors: Tuple[Tensor, ...], names: Union[Tuple[str, ...], List[str]]) -> Dict[str, Tuple[int, ...]]:
     """Create dictionary mapping tensor names to shapes."""
     if len(tensors) != len(names):
         logger.warning(f"Number of tensors ({len(tensors)}) does not match names: {names}")
     return {k: tuple(v.shape) for (k, v) in zip(names, tensors)}
 
 
-def onnx_simplify(
-    path: str, input_data: Dict[str, Tensor], input_shapes: Dict[str, Iterable[int]]
-) -> str:
+def onnx_simplify(path: str, input_data: Dict[str, Tensor], input_shapes: Dict[str, Iterable[int]]) -> str:
     """Simplify ONNX model using onnxsim."""
     try:
         import onnxsim  # type: ignore[possibly-undefined]

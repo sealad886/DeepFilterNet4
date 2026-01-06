@@ -45,9 +45,7 @@ try:
     # from torch.ao.quantization.quantize_fx import prepare_qat_fx, convert_fx
 except ImportError:
     QUANTIZATION_AVAILABLE = False
-    logger.warning(
-        "PyTorch quantization not available. Install torch>=2.0 for quantization support."
-    )
+    logger.warning("PyTorch quantization not available. Install torch>=2.0 for quantization support.")
 except AttributeError as e:
     # Handle Python 3.14 compatibility issues with quantize_fx
     QUANTIZATION_AVAILABLE = False
@@ -447,9 +445,7 @@ def compare_model_sizes(
         "original_mb": original_size,
         "quantized_mb": quantized_size,
         "compression_ratio": compression_ratio,
-        "size_reduction_pct": (
-            (1 - quantized_size / original_size) * 100 if original_size > 0 else 0
-        ),
+        "size_reduction_pct": ((1 - quantized_size / original_size) * 100 if original_size > 0 else 0),
     }
 
 

@@ -36,9 +36,7 @@ def load_model():
     elif BACKEND.backend_name == "mlx":
         print("Running with MLX (Apple Silicon optimized)")
 
-    WHISPER_OPT = BACKEND.create_decoding_options(
-        task="transcribe", language="en", beam_size=20, fp16=use_fp16
-    )
+    WHISPER_OPT = BACKEND.create_decoding_options(task="transcribe", language="en", beam_size=20, fp16=use_fp16)
 
 
 def normalize(input: str) -> List[str]:
@@ -48,9 +46,7 @@ def normalize(input: str) -> List[str]:
 def eval_wacc(args):
     load_model()
     audio_clips_list = glob.glob(os.path.join(args.testset_dir, "*.wav"))
-    transcriptions_df = pd.read_csv(
-        args.transcription_file, sep="\t", names=["filename", "transcription"]
-    )
+    transcriptions_df = pd.read_csv(args.transcription_file, sep="\t", names=["filename", "transcription"])
     scores = []
     n_edits = 0
     n = 0
@@ -113,13 +109,9 @@ if __name__ == "__main__":
     mn_parser = subparsers.add_parser("mean", aliases=["m"])
     mn_parser.add_argument("csv_file", type=str)
     eval_parser = subparsers.add_parser("eval", aliases=["e"])
-    eval_parser.add_argument(
-        "testset_dir", help="Path to the dir containing audio clips to be evaluated"
-    )
+    eval_parser.add_argument("testset_dir", help="Path to the dir containing audio clips to be evaluated")
     eval_parser.add_argument("transcription_file", help="Path to transcription tsv file")
-    eval_parser.add_argument(
-        "-o", "--csv-file", help="If you want the scores in a CSV file provide the full path"
-    )
+    eval_parser.add_argument("-o", "--csv-file", help="If you want the scores in a CSV file provide the full path")
 
     args = parser.parse_args()
     if args.subparser_name is None:

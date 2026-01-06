@@ -27,16 +27,10 @@ class ModelParams(DfParams):
 
     def __init__(self):
         super().__init__()
-        self.conv_lookahead: int = config(
-            "CONV_LOOKAHEAD", cast=int, default=0, section=self.section
-        )
+        self.conv_lookahead: int = config("CONV_LOOKAHEAD", cast=int, default=0, section=self.section)
         self.conv_ch: int = config("CONV_CH", cast=int, default=16, section=self.section)
-        self.conv_depthwise: bool = config(
-            "CONV_DEPTHWISE", cast=bool, default=True, section=self.section
-        )
-        self.convt_depthwise: bool = config(
-            "CONVT_DEPTHWISE", cast=bool, default=True, section=self.section
-        )
+        self.conv_depthwise: bool = config("CONV_DEPTHWISE", cast=bool, default=True, section=self.section)
+        self.convt_depthwise: bool = config("CONVT_DEPTHWISE", cast=bool, default=True, section=self.section)
         self.conv_kernel: List[int] = config(
             "CONV_KERNEL", cast=Csv(int), default=(1, 3), section=self.section  # type: ignore
         )
@@ -46,19 +40,11 @@ class ModelParams(DfParams):
         self.conv_kernel_inp: List[int] = config(
             "CONV_KERNEL_INP", cast=Csv(int), default=(3, 3), section=self.section  # type: ignore
         )
-        self.emb_hidden_dim: int = config(
-            "EMB_HIDDEN_DIM", cast=int, default=256, section=self.section
-        )
-        self.emb_num_layers: int = config(
-            "EMB_NUM_LAYERS", cast=int, default=2, section=self.section
-        )
-        self.emb_gru_skip_enc: str = config(
-            "EMB_GRU_SKIP_ENC", default="none", section=self.section
-        )
+        self.emb_hidden_dim: int = config("EMB_HIDDEN_DIM", cast=int, default=256, section=self.section)
+        self.emb_num_layers: int = config("EMB_NUM_LAYERS", cast=int, default=2, section=self.section)
+        self.emb_gru_skip_enc: str = config("EMB_GRU_SKIP_ENC", default="none", section=self.section)
         self.emb_gru_skip: str = config("EMB_GRU_SKIP", default="none", section=self.section)
-        self.df_hidden_dim: int = config(
-            "DF_HIDDEN_DIM", cast=int, default=256, section=self.section
-        )
+        self.df_hidden_dim: int = config("DF_HIDDEN_DIM", cast=int, default=256, section=self.section)
         self.df_gru_skip: str = config("DF_GRU_SKIP", default="none", section=self.section)
         self.df_pathway_kernel_size_t: int = config(
             "DF_PATHWAY_KERNEL_SIZE_T", cast=int, default=1, section=self.section
@@ -67,14 +53,10 @@ class ModelParams(DfParams):
         self.df_num_layers: int = config("DF_NUM_LAYERS", cast=int, default=3, section=self.section)
         self.df_n_iter: int = config("DF_N_ITER", cast=int, default=1, section=self.section)
         self.lin_groups: int = config("LINEAR_GROUPS", cast=int, default=1, section=self.section)
-        self.enc_lin_groups: int = config(
-            "ENC_LINEAR_GROUPS", cast=int, default=16, section=self.section
-        )
+        self.enc_lin_groups: int = config("ENC_LINEAR_GROUPS", cast=int, default=16, section=self.section)
         self.mask_pf: bool = config("MASK_PF", cast=bool, default=False, section=self.section)
         self.pf_beta: float = config("PF_BETA", cast=float, default=0.02, section=self.section)
-        self.lsnr_dropout: bool = config(
-            "LSNR_DROPOUT", cast=bool, default=False, section=self.section
-        )
+        self.lsnr_dropout: bool = config("LSNR_DROPOUT", cast=bool, default=False, section=self.section)
 
 
 def init_model(df_state: Optional[DF] = None, run_df: bool = True, train_mask: bool = True):
@@ -103,9 +85,7 @@ class Encoder(nn.Module):
         p = ModelParams()
         assert p.nb_erb % 4 == 0, "erb_bins should be divisible by 4"
 
-        self.erb_conv0 = Conv2dNormAct(
-            1, p.conv_ch, kernel_size=p.conv_kernel_inp, bias=False, separable=True
-        )
+        self.erb_conv0 = Conv2dNormAct(1, p.conv_ch, kernel_size=p.conv_kernel_inp, bias=False, separable=True)
         conv_layer = partial(
             Conv2dNormAct,
             in_ch=p.conv_ch,
@@ -117,17 +97,13 @@ class Encoder(nn.Module):
         self.erb_conv1 = conv_layer(fstride=2)
         self.erb_conv2 = conv_layer(fstride=2)
         self.erb_conv3 = conv_layer(fstride=1)
-        self.df_conv0 = Conv2dNormAct(
-            2, p.conv_ch, kernel_size=p.conv_kernel_inp, bias=False, separable=True
-        )
+        self.df_conv0 = Conv2dNormAct(2, p.conv_ch, kernel_size=p.conv_kernel_inp, bias=False, separable=True)
         self.df_conv1 = conv_layer(fstride=2)
         self.erb_bins = p.nb_erb
         self.emb_in_dim = p.conv_ch * p.nb_erb // 4
         self.emb_dim = p.emb_hidden_dim
         self.emb_out_dim = p.conv_ch * p.nb_erb // 4
-        df_fc_emb = GroupedLinearEinsum(
-            p.conv_ch * p.nb_df // 2, self.emb_in_dim, groups=p.enc_lin_groups
-        )
+        df_fc_emb = GroupedLinearEinsum(p.conv_ch * p.nb_df // 2, self.emb_in_dim, groups=p.enc_lin_groups)
         self.df_fc_emb = nn.Sequential(df_fc_emb, nn.ReLU(inplace=True))
         if p.enc_concat:
             self.emb_in_dim *= 2
@@ -238,9 +214,7 @@ class ErbDecoder(nn.Module):
         self.conv1p = conv_layer(p.conv_ch, p.conv_ch, kernel_size=1)
         self.convt1 = tconv_layer(p.conv_ch, p.conv_ch, fstride=2)
         self.conv0p = conv_layer(p.conv_ch, p.conv_ch, kernel_size=1)
-        self.conv0_out = conv_layer(
-            p.conv_ch, 1, kernel_size=p.conv_kernel, activation_layer=nn.Sigmoid
-        )
+        self.conv0_out = conv_layer(p.conv_ch, 1, kernel_size=p.conv_kernel, activation_layer=nn.Sigmoid)
 
     def forward(self, emb: Tensor, e3: Tensor, e2: Tensor, e1: Tensor, e0: Tensor) -> Tensor:
         # Estimates erb mask

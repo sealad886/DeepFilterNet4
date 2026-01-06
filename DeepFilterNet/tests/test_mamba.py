@@ -52,9 +52,7 @@ class TestMambaBlock:
         y2 = mamba_block(x2)
 
         # First 25 timesteps should be identical
-        assert torch.allclose(
-            y1[:, :25], y2[:, :25], atol=1e-5
-        ), "Causality violated: output depends on future inputs"
+        assert torch.allclose(y1[:, :25], y2[:, :25], atol=1e-5), "Causality violated: output depends on future inputs"
 
     def test_batch_independence(self, mamba_block):
         """Verify batches are processed independently."""
@@ -126,9 +124,7 @@ class TestMamba:
         y = mamba_layer(x)
 
         # Output should not be identical to input (transformation applied)
-        assert not torch.allclose(
-            x, y, atol=1e-3
-        ), "Output identical to input - residual might be all zeros"
+        assert not torch.allclose(x, y, atol=1e-3), "Output identical to input - residual might be all zeros"
 
     def test_stacking(self):
         """Test stacking multiple Mamba layers."""

@@ -51,9 +51,7 @@ class Config:
         self.modified = False
         self.allow_defaults = True
 
-    def load(
-        self, path: Optional[str], config_must_exist=False, allow_defaults=True, allow_reload=False
-    ):
+    def load(self, path: Optional[str], config_must_exist=False, allow_defaults=True, allow_reload=False):
         self.allow_defaults = allow_defaults
         if self.parser is not None and not allow_reload:
             raise ValueError("Config already loaded")
@@ -128,8 +126,7 @@ class Config:
             value = self.parser.get(section.lower(), option)
         elif self.parser.has_option(self.DEFAULT_SECTION, option):
             logger.warning(
-                f"Couldn't find option {option} in section {section}. "
-                "Falling back to default settings section."
+                f"Couldn't find option {option} in section {section}. " "Falling back to default settings section."
             )
             value = self.parser.get(self.DEFAULT_SECTION, option)
         elif default is None:
@@ -290,9 +287,7 @@ class Csv(object):
     Produces a csv parser that return a list of transformed elements. From python-decouple.
     """
 
-    def __init__(
-        self, cast: Type[T] = str, delimiter=",", strip=string.whitespace, post_process=list
-    ):
+    def __init__(self, cast: Type[T] = str, delimiter=",", strip=string.whitespace, post_process=list):
         """
         Parameters:
         cast -- callable that transforms the item just before it's added to the list.

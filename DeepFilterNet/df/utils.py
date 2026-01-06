@@ -175,9 +175,7 @@ def make_np(x: Union[Tensor, np.ndarray, Number]) -> np.ndarray:
         return np.array([x])
     if isinstance(x, Tensor):
         return x.detach().cpu().numpy()
-    raise NotImplementedError(
-        "Got {}, but numpy array, scalar, or torch tensor are expected.".format(type(x))
-    )
+    raise NotImplementedError("Got {}, but numpy array, scalar, or torch tensor are expected.".format(type(x)))
 
 
 def get_norm_alpha(log: bool = True) -> float:
@@ -312,6 +310,4 @@ def get_cache_dir():
         if sys.platform == "linux":
             return os.path.expanduser("~/.cache/DeepFilterNet/")
         else:
-            raise ValueError(
-                "Could not get cache dir. Please install `appdirs` via `pip install appdirs`"
-            )
+            raise ValueError("Could not get cache dir. Please install `appdirs` via `pip install appdirs`")

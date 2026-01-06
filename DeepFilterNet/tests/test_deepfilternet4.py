@@ -406,9 +406,7 @@ MODEL_VARIANT = lite
 
         # Lite should be at least 30% smaller
         assert lite_params < full_params * 0.7
-        print(
-            f"Full: {full_params:,}, Lite: {lite_params:,}, Reduction: {(1 - lite_params / full_params) * 100:.1f}%"
-        )
+        print(f"Full: {full_params:,}, Lite: {lite_params:,}, Reduction: {(1 - lite_params / full_params) * 100:.1f}%")
 
 
 class TestDfNet4GRUBackbone:
@@ -458,9 +456,7 @@ class TestDfNet4GradientFlow:
         # Check at least some model parameters have gradients (not all may be in the active path)
         params_with_grad = sum(1 for _, p in model.named_parameters() if p.grad is not None)
         total_params = sum(1 for _ in model.parameters())
-        assert (
-            params_with_grad > total_params // 2
-        ), f"Too few params with gradients: {params_with_grad}/{total_params}"
+        assert params_with_grad > total_params // 2, f"Too few params with gradients: {params_with_grad}/{total_params}"
 
     def test_gradient_flow_hybrid(self, hybrid_config):
         """Test gradient flow with hybrid encoder."""
@@ -912,9 +908,7 @@ class TestDfNet4Integration:
         # Count parameters with gradients
         grad_count = sum(1 for p in model.parameters() if p.grad is not None)
         param_count = sum(1 for _ in model.parameters())
-        assert (
-            grad_count > param_count // 2
-        ), f"Too few params with grads: {grad_count}/{param_count}"
+        assert grad_count > param_count // 2, f"Too few params with grads: {grad_count}/{param_count}"
 
     def test_training_step_optimizer(self, standard_config):
         """Test a complete training step with optimizer."""
@@ -927,9 +921,7 @@ class TestDfNet4Integration:
         num_frames = 50
 
         # Record initial weights
-        initial_weights = {
-            name: param.clone() for name, param in model.named_parameters() if param.requires_grad
-        }
+        initial_weights = {name: param.clone() for name, param in model.named_parameters() if param.requires_grad}
 
         # Forward pass
         spec = torch.randn(batch_size, 1, num_frames, 481, 2)
@@ -1389,9 +1381,7 @@ class TestQuantization:
         # Still not active since epoch < start_epoch
         # (depends on quantization availability)
 
-    @pytest.mark.skipif(
-        not torch.cuda.is_available(), reason="Quantization tests require specific backend support"
-    )
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="Quantization tests require specific backend support")
     def test_dynamic_quantization(self):
         """Test dynamic quantization (if available)."""
         from df.quantization import check_quantization_available, quantize_dynamic

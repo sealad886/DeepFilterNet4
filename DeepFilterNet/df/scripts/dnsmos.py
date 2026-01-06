@@ -146,9 +146,7 @@ def download_onnx_models():
     return sig, bak_ovr
 
 
-def dnsmos_local(
-    audio: Tensor, sig: str, bak_ovr: str
-) -> Tuple[List[float], List[float], List[float]]:
+def dnsmos_local(audio: Tensor, sig: str, bak_ovr: str) -> Tuple[List[float], List[float], List[float]]:
     session_sig = get_ort_session(sig)
     session_bak_ovr = get_ort_session(bak_ovr)
 
@@ -163,9 +161,7 @@ def dnsmos_local(
 
     for idx in range(num_hops):
         audio_seg = audio[int(idx * hop_len_samples) : int((idx + INPUT_LENGTH) * hop_len_samples)]
-        input_features = np.array(audio_logpowspec(audio=audio_seg)).astype("float32")[
-            np.newaxis, :, :
-        ]
+        input_features = np.array(audio_logpowspec(audio=audio_seg)).astype("float32")[np.newaxis, :, :]
 
         onnx_inputs_sig = {inp.name: input_features for inp in session_sig.get_inputs()}
         mos_sig = poly.polyval(session_sig.run(None, onnx_inputs_sig), COEFS_SIG)
