@@ -48,7 +48,6 @@ deep-filter-py = "df.enhance:run"
 
 [tool.poetry]
 # Poetry 2.x: package metadata lives in `[project]`; keep only Poetry-specific config here.
-requires-poetry = ">=2.0"
 packages = [{ include = "df" }]
 include = [
   { path = "pretrained_models/DeepFilterNet/config.ini" },

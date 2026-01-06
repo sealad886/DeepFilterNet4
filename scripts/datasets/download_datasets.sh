@@ -274,6 +274,9 @@ download_file() {
       aria2_split=1
     fi
     # Build aria2c auth header for GitHub URLs
+    # NOTE: Token is passed via command line, which is visible via `ps` on multi-user systems.
+    # For shared environments, consider setting GH_TOKEN via a secrets manager or using
+    # `gh release download` directly for GitHub releases.
     local aria2_auth_header=""
     local gh_token
     if is_github_url "${url}" && gh_token=$(get_gh_token); then
@@ -281,6 +284,7 @@ download_file() {
       echo "[info] using GitHub authentication for: ${url}" >&2
     fi
     if [[ "${aria2_continue}" == "1" ]]; then
+      # shellcheck disable=SC2086  # Intentionally unquoted to allow empty expansion
       aria2c -x "${aria2_conn}" -s "${aria2_split}" -k "${ARIA2_MIN_SPLIT}" -c \
         --check-integrity=true \
         --file-allocation="${aria2_file_alloc}" \
@@ -288,6 +292,7 @@ download_file() {
         ${aria2_auth_header} \
         -d "$(dirname "${out}")" -o "$(basename "${out}")" "${url}"
     else
+      # shellcheck disable=SC2086  # Intentionally unquoted to allow empty expansion
       aria2c -x "${aria2_conn}" -s "${aria2_split}" -k "${ARIA2_MIN_SPLIT}" \
       --check-integrity=true \
       --file-allocation="${aria2_file_alloc}" \
@@ -307,6 +312,8 @@ download_file() {
     fi
   fi
   if [[ "${USE_ARIA2}" != "1" ]]; then
+    # NOTE: Token is passed via command line, which is visible via `ps` on multi-user systems.
+    # For shared environments, consider using `gh release download` directly for GitHub releases.
     local auth_header=""
     local gh_token
     if is_github_url "${url}" && gh_token=$(get_gh_token); then
@@ -495,6 +502,8 @@ queue_download() {
 
   mkdir -p "${out_dir}"
   # Get GitHub auth token if applicable
+  # NOTE: Token is written to aria2 input file. Ensure this file is not world-readable
+  # on shared systems. The file is created in DOWNLOAD_DIR with default permissions.
   local gh_token
   local use_gh_auth=""
   if is_github_url "${url}" && gh_token=$(get_gh_token); then

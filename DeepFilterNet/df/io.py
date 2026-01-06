@@ -29,7 +29,7 @@ try:
 
     HAS_SOUNDFILE = True
 except ImportError:
-    pass
+    pass  # soundfile is optional; if unavailable, operations fall back to torchaudio-based methods
 
 # Handle AudioMetaData import across TorchAudio versions
 try:

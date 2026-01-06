@@ -66,6 +66,50 @@ jobs:
         uses: styfle/cancel-workflow-action@0.12.1
         with:
           access_token: ${{ github.token }}
+      - name: Cleanup runner disk (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          echo "Disk usage before cleanup:"
+          df -h .
+          echo "Removing runner caches and old build artifacts"
+          rm -rf ~/.cache/pip ~/.cache/pypoetry ~/.cache/torch ~/.cache/torch_extensions ~/.cache/DeepFilterNet || true
+          rm -rf ~/.cargo/registry ~/.cargo/git || true
+          rm -rf target DeepFilterNet/target || true
+          rm -rf .venv DeepFilterNet/.venv || true
+          if [[ "${RUNNER_ENVIRONMENT:-}" == "github-hosted" ]]; then
+            echo "Removing preinstalled toolchains"
+            sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost || true
+          fi
+          echo "Disk usage after cleanup:"
+          df -h .
+      - name: Cleanup runner disk (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Write-Host "Disk usage before cleanup:"
+          Get-PSDrive -PSProvider FileSystem
+          $paths = @(
+            "$env:LOCALAPPDATA\pip\Cache",
+            "$env:LOCALAPPDATA\pypoetry\Cache",
+            "$env:LOCALAPPDATA\torch",
+            "$env:USERPROFILE\.cache\torch",
+            "$env:USERPROFILE\.cargo\registry",
+            "$env:USERPROFILE\.cargo\git",
+            "$env:TEMP\*",
+            "target",
+            "DeepFilterNet\target",
+            ".venv",
+            "DeepFilterNet\.venv"
+          )
+          foreach ($p in $paths) {
+            if (Test-Path $p) {
+              Write-Host "Removing $p"
+              Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue
+            }
+          }
+          Write-Host "Disk usage after cleanup:"
+          Get-PSDrive -PSProvider FileSystem
       # Soundfile backend for torchaudio
       - name: Set Extra Dependency Windows
         if: matrix.os == 'windows-latest'
