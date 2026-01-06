@@ -7,14 +7,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from df.enhance import (
-    ModelParams,
-    df_features,
-    enhance,
-    get_model_basedir,
-    init_df,
-    setup_df_argument_parser,
-)
+from df.enhance import ModelParams, df_features, enhance, get_model_basedir, init_df, setup_df_argument_parser
 from df.io import get_test_sample, save_audio
 from df.scripts.export_onnx import export_impl
 from libdf import DF

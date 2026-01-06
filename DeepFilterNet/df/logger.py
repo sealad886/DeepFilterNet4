@@ -19,7 +19,7 @@ DEPRECATED_NO = logger.level("WARNING").no + 2
 
 
 def init_logger(file: Optional[str] = None, level: str = "INFO", model: Optional[str] = None):
-    global _logger_initialized, _duplicate_filter
+    global _logger_initialized
     if _logger_initialized:
         logger.debug("Logger already initialized.")
     else:

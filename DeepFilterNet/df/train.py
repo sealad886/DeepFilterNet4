@@ -50,11 +50,7 @@ def setup_discriminator() -> Optional[nn.Module]:
     if not gan_enabled:
         return None
 
-    from df.discriminator import (
-        CombinedDiscriminator,
-        MultiPeriodDiscriminator,
-        MultiScaleDiscriminator,
-    )
+    from df.discriminator import CombinedDiscriminator, MultiPeriodDiscriminator, MultiScaleDiscriminator
 
     disc_type = config("DISCRIMINATOR_TYPE", "combined", str, section="train").lower()
     use_spectral_norm = config("DISCRIMINATOR_SPECTRAL_NORM", False, bool, section="train")
@@ -80,7 +76,7 @@ def setup_discriminator() -> Optional[nn.Module]:
 
 @logger.catch
 def main():
-    global should_stop, debug, state, log_timings
+    global debug, state, log_timings
 
     parser = argparse.ArgumentParser()
     parser.add_argument("data_config_file", type=str, help="Path to a dataset config file.")
@@ -515,8 +511,6 @@ def run_epoch(
     disc_lr_values: Optional[np.ndarray] = None,
     gan_start_epoch: int = 0,
 ) -> float:
-    global debug, discriminator
-
     log_freq = config("LOG_FREQ", cast=int, default=100, section="train")
     bs = loader.get_batch_size(split)
     logger.info("Start {} epoch {} with batch size {}".format(split, epoch, bs))
@@ -689,7 +683,7 @@ def run_epoch(
 
 
 def setup_losses() -> Loss:
-    global state, istft, discriminator
+    global istft, discriminator
     assert state is not None
 
     p = ModelParams()
@@ -843,7 +837,6 @@ def summary_write(
     prefix="train",
     idx: Optional[int] = None,
 ):
-    global state
     assert state is not None
 
     p = ModelParams()

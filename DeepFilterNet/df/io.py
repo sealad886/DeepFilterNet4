@@ -30,9 +30,7 @@ try:
     TA_RESAMPLE_KAISER = "sinc_interp_kaiser"
 except ImportError:
     try:
-        from torchaudio.backend.common import (  # type: ignore[import-unresolved]  # noqa: F401
-            AudioMetaData,
-        )
+        from torchaudio.backend.common import AudioMetaData  # type: ignore[import-unresolved]  # noqa: F401
 
         TA_RESAMPLE_SINC = "sinc_interpolation"
         TA_RESAMPLE_KAISER = "kaiser_window"

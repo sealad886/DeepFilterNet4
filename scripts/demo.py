@@ -256,14 +256,13 @@ canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
 
 def init():
-    global device_id_non_df, device_id_df
     init_non_df_pa_stream()
     init_df_pa_stream()
     return (im_non_df, im_df)
 
 
 def animate(i):
-    global spec_df, spec_non_df, im_df, im_non_df
+    global spec_df, spec_non_df
 
     spec_non_df = np.roll(spec_non_df, -N_FRAMES, 1)
     X = np.concatenate([np.asarray(spec_q_non_df.get()) for _ in range(N_FRAMES)], 1)

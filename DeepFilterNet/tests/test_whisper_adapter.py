@@ -8,12 +8,7 @@ import numpy as np
 import pytest
 import torch
 
-from df.whisper_adapter import (
-    WhisperDecodingResult,
-    get_whisper_backend,
-    is_apple_silicon,
-    to_numpy,
-)
+from df.whisper_adapter import WhisperDecodingResult, get_whisper_backend, is_apple_silicon, to_numpy
 
 # =============================================================================
 # Platform Detection Tests

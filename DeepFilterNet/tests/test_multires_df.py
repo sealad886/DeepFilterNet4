@@ -7,13 +7,7 @@ components introduced in DeepFilterNet4 Phase 3.
 import pytest
 import torch
 
-from df.deepfilternet4 import (
-    AdaptiveDfDecoder,
-    DfOutputReshape,
-    ModelParams4,
-    MultiResDfDecoder,
-    SingleResDfDecoder,
-)
+from df.deepfilternet4 import AdaptiveDfDecoder, DfOutputReshape, ModelParams4, MultiResDfDecoder, SingleResDfDecoder
 from df.multiframe import DF, AdaptiveOrderPredictor, DFreal, MultiResolutionDF
 
 # ============================================================================

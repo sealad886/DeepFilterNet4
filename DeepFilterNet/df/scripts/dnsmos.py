@@ -52,7 +52,7 @@ __r_tol = 1e-4
 
 
 def get_ort_session(onnx: str, providers="gpu"):
-    global ORT_SESS
+    global ORT_SESS  # noqa: F824 - used for dict mutation
 
     import onnxruntime as ort
 
