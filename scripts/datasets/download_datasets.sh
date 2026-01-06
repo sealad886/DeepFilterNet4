@@ -62,8 +62,9 @@ VCTK_DIR="${VCTK_DIR:-${EXTRACT_DIR}/VCTK-Corpus-0.92}"
 LIBRISPEECH_DIR="${LIBRISPEECH_DIR:-${EXTRACT_DIR}/LibriSpeech}"
 MUSAN_DIR="${MUSAN_DIR:-${EXTRACT_DIR}/musan}"
 FSD50K_DIR="${FSD50K_DIR:-${EXTRACT_DIR}/FSD50K}"
-AIR_RIR_DIR="${AIR_RIR_DIR:-${EXTRACT_DIR}/AIR}"
-OPENAIR_DIR="${OPENAIR_DIR:-${EXTRACT_DIR}/OpenAIR}"
+# AIR/OpenAIR via audb: AIR goes to data/, OpenAIR goes to wav/
+AIR_RIR_DIR="${AIR_RIR_DIR:-${AUDB_DIR}/data}"
+OPENAIR_DIR="${OPENAIR_DIR:-${AUDB_DIR}/wav}"
 ACOUSTICROOMS_DIR="${ACOUSTICROOMS_DIR:-${EXTRACT_DIR}/AcousticRooms}"
 
 ARIA2_PARALLEL_ACTIVE=0
@@ -372,7 +373,7 @@ extract_archive() {
       tar -xzf "${archive}" -C "${dest}"
       ;;
     *.zip)
-      unzip -q "${archive}" -d "${dest}"
+      unzip -n -q "${archive}" -d "${dest}"
       ;;
     *)
       echo "Unknown archive format: ${archive}" >&2
@@ -392,6 +393,17 @@ verify_archive() {
   case "${archive}" in
     *.zip)
       command -v unzip >/dev/null 2>&1 || return 0
+      # Check if this is a split zip (has .z01 sibling) - skip verification
+      # since the parts are verified individually and the main .zip alone
+      # cannot be verified without the parts present
+      local base="${archive%.zip}"
+      if [[ -f "${base}.z01" ]]; then
+        # Split zip: trust that parts are valid, cache based on size only
+        if [[ "${VERIFY_CACHE}" == "1" ]]; then
+          cache_store "${archive}"
+        fi
+        return 0
+      fi
       unzip -tqq "${archive}" >/dev/null 2>&1
       status=$?
       if [[ ${status} -eq 0 && "${VERIFY_CACHE}" == "1" ]]; then
@@ -612,7 +624,7 @@ fsd50k_merge_and_unzip() {
   local zip_base="$1"
   local out_dir="$2"
   (cd "${DOWNLOAD_DIR}" && zip -s 0 "${zip_base}" --out "${zip_base}.merged.zip")
-  unzip -q "${DOWNLOAD_DIR}/${zip_base}.merged.zip" -d "${out_dir}"
+  unzip -n -q "${DOWNLOAD_DIR}/${zip_base}.merged.zip" -d "${out_dir}"
   if [[ "${KEEP_ARCHIVES}" == "0" ]]; then
     rm -f "${DOWNLOAD_DIR:?}/${zip_base}.merged.zip"
   fi
@@ -706,10 +718,11 @@ if [[ "${DOWNLOAD}" == "1" ]]; then
     esac
   fi
 
-  # VCTK
+  # VCTK (zip has no top-level dir, so extract into dedicated subdirectory)
   if should_download "${DOWNLOAD_VCTK}"; then
     VCTK_URL="${VCTK_URL:-https://datashare.is.ed.ac.uk/bitstream/handle/10283/3443/VCTK-Corpus-0.92.zip}"
-    download_and_extract "${VCTK_URL}" "${EXTRACT_DIR}"
+    mkdir -p "${EXTRACT_DIR}/VCTK-Corpus-0.92"
+    download_and_extract "${VCTK_URL}" "${EXTRACT_DIR}/VCTK-Corpus-0.92"
   fi
 
   # LibriSpeech
@@ -746,16 +759,15 @@ if [[ "${DOWNLOAD}" == "1" ]]; then
   fi
 
   # AIR/OpenAIR via audb (optional)
+  # audb downloads AIR to data/ and OpenAIR to wav/ within AUDB_DIR
   if [[ "${USE_AUDB}" == "1" ]]; then
     if maybe_install_audb; then
       mkdir -p "${AUDB_DIR}"
       if should_download "${DOWNLOAD_AIR}"; then
         AUDB_NAME="air" AUDB_VERSION="${AIR_VERSION:-1.4.2}" AUDB_ROOT="${AUDB_DIR}" download_with_audb
-        AIR_RIR_DIR="${AUDB_DIR}/air"
       fi
       if should_download "${DOWNLOAD_OPENAIR}"; then
         AUDB_NAME="openair" AUDB_VERSION="${OPENAIR_VERSION:-1.0.0}" AUDB_ROOT="${AUDB_DIR}" download_with_audb
-        OPENAIR_DIR="${AUDB_DIR}/openair"
       fi
     else
       echo "[skip] audb not installed; set INSTALL_AUDB=1 to auto-install." >&2
@@ -767,6 +779,15 @@ if [[ "${DOWNLOAD}" == "1" ]]; then
     mkdir -p "${ACOUSTICROOMS_DIR}"
     download_and_extract "https://github.com/facebookresearch/AcousticRooms/raw/clean-main/single_channel_ir.zip" "${ACOUSTICROOMS_DIR}"
     download_and_extract "https://github.com/facebookresearch/AcousticRooms/raw/clean-main/metadata.zip" "${ACOUSTICROOMS_DIR}"
+    # AcousticRooms has nested zips inside single_channel_ir that need extraction
+    if [[ -d "${ACOUSTICROOMS_DIR}/single_channel_ir_1" ]]; then
+      echo "[info] extracting nested AcousticRooms zips..."
+      for nested_zip in "${ACOUSTICROOMS_DIR}/single_channel_ir_1"/*.zip; do
+        if [[ -f "${nested_zip}" ]]; then
+          unzip -o -q "${nested_zip}" -d "${ACOUSTICROOMS_DIR}/single_channel_ir_1/"
+        fi
+      done
+    fi
   fi
 
   if [[ "${ARIA2_PARALLEL_ACTIVE}" == "1" ]]; then
@@ -778,11 +799,17 @@ fi
 
 # Ensure extracted datasets if archives already exist
 if [[ ! -d "${VCTK_DIR}" ]]; then
-  extract_if_present "VCTK" "${DOWNLOAD_DIR}/VCTK-Corpus-0.92.zip" "${EXTRACT_DIR}"
-  if [[ -d "${EXTRACT_DIR}/VCTK-Corpus-0.92" ]]; then
-    VCTK_DIR="${EXTRACT_DIR}/VCTK-Corpus-0.92"
-  elif [[ -d "${EXTRACT_DIR}/VCTK-Corpus" ]]; then
-    VCTK_DIR="${EXTRACT_DIR}/VCTK-Corpus"
+  # Check if VCTK was extracted flat into EXTRACT_DIR (no subdirectory)
+  if [[ -d "${EXTRACT_DIR}/wav48_silence_trimmed" && -f "${EXTRACT_DIR}/speaker-info.txt" ]]; then
+    VCTK_DIR="${EXTRACT_DIR}"
+  else
+    mkdir -p "${EXTRACT_DIR}/VCTK-Corpus-0.92"
+    extract_if_present "VCTK" "${DOWNLOAD_DIR}/VCTK-Corpus-0.92.zip" "${EXTRACT_DIR}/VCTK-Corpus-0.92"
+    if [[ -d "${EXTRACT_DIR}/VCTK-Corpus-0.92/wav48_silence_trimmed" ]]; then
+      VCTK_DIR="${EXTRACT_DIR}/VCTK-Corpus-0.92"
+    elif [[ -d "${EXTRACT_DIR}/VCTK-Corpus" ]]; then
+      VCTK_DIR="${EXTRACT_DIR}/VCTK-Corpus"
+    fi
   fi
 fi
 
@@ -803,14 +830,16 @@ if [[ ! -d "${LIBRISPEECH_DIR}" ]]; then
 fi
 
 if [[ -d "${FSD50K_DIR}" ]]; then
-  if [[ ! -f "${FSD50K_DIR}/FSD50K.metadata/FSD50K.metadata.csv" ]]; then
+  # Check for JSON metadata files (the actual format FSD50K uses)
+  if [[ ! -f "${FSD50K_DIR}/FSD50K.metadata/dev_clips_info_FSD50K.json" ]]; then
     extract_if_present "FSD50K metadata" "${DOWNLOAD_DIR}/FSD50K.metadata.zip" "${FSD50K_DIR}"
   fi
 fi
 
 # Clean speech lists
 if require_dir "VCTK" "${VCTK_DIR}"; then
-  write_list "${VCTK_DIR}" "${LIST_DIR}/vctk_clean.txt" "*.wav"
+  # VCTK 0.92 uses FLAC format in wav48_silence_trimmed
+  write_list "${VCTK_DIR}" "${LIST_DIR}/vctk_clean.txt" "*.flac"
 fi
 if require_dir "LibriSpeech" "${LIBRISPEECH_DIR}"; then
   write_list "${LIBRISPEECH_DIR}" "${LIST_DIR}/librispeech_clean.txt" "*.flac"

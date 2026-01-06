@@ -66,11 +66,11 @@ def call_load(name: str, root: str | None, version: str | None):
     if root is not None:
         cleanup_tmp(root)
         try:
-            return load(name, version=version, root=root)
+            return load(root, name, version=version or "")
         except RuntimeError as e:
             if "temporary directory" in str(e) or "audb~" in str(e):
                 cleanup_tmp(root)
-                return load(name, version=version, root=root)
+                return load(root, name, version=version or "")
             raise
 
     if version:

@@ -1,22 +1,40 @@
 #!/usr/bin/env python3
+"""Filter FSD50K audio files by license (CC0/CC-BY only by default).
+
+Reads license info from the JSON metadata files (dev_clips_info_FSD50K.json
+and eval_clips_info_FSD50K.json) provided by FSD50K.
+"""
 import argparse
-import csv
+import json
 import os
+import re
 from pathlib import Path
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Filter FSD50K clips by license type")
     parser.add_argument("--fsd50k-dir", default=os.environ.get("FSD50K_DIR"))
     parser.add_argument("--list-dir", default=os.environ.get("LIST_DIR"))
-    parser.add_argument("--id-col", default=os.environ.get("FSD50K_ID_COL", "fname"))
-    parser.add_argument("--license-col", default=os.environ.get("FSD50K_LICENSE_COL", "license"))
     parser.add_argument(
-        "--allowed",
+        "--allowed-patterns",
         nargs="*",
-        default=["CC0", "CC-BY", "CC BY", "CC-BY-4.0", "CC BY 4.0"],
+        default=[
+            r"creativecommons\.org/publicdomain/zero",  # CC0
+            r"creativecommons\.org/licenses/by/",  # CC-BY (any version)
+        ],
+        help="Regex patterns to match allowed license URLs",
     )
     return parser.parse_args()
+
+
+def license_allowed(license_url: str, patterns: list[str]) -> bool:
+    """Check if a license URL matches any of the allowed patterns."""
+    if not license_url:
+        return False
+    for pattern in patterns:
+        if re.search(pattern, license_url, re.IGNORECASE):
+            return True
+    return False
 
 
 def main() -> int:
@@ -28,27 +46,32 @@ def main() -> int:
 
     root = Path(args.fsd50k_dir)
     meta_dir = root / "FSD50K.metadata"
-    csv_path = meta_dir / "FSD50K.metadata.csv"
-    if not csv_path.exists():
-        raise SystemExit(f"Missing metadata CSV at {csv_path}")
 
-    allowed = set(args.allowed)
+    # Load license info from JSON metadata files
+    allowed_ids: set[str] = set()
+    for json_file in ["dev_clips_info_FSD50K.json", "eval_clips_info_FSD50K.json"]:
+        json_path = meta_dir / json_file
+        if not json_path.exists():
+            print(f"[warn] metadata file not found: {json_path}")
+            continue
+        with json_path.open() as f:
+            data = json.load(f)
+        for clip_id, info in data.items():
+            license_url = info.get("license", "")
+            if license_allowed(license_url, args.allowed_patterns):
+                allowed_ids.add(clip_id)
 
-    allowed_ids = []
-    with csv_path.open() as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            lic = (row.get(args.license_col) or "").strip()
-            if lic in allowed:
-                allowed_ids.append(row[args.id_col])
+    if not allowed_ids:
+        raise SystemExit("No clips matched the allowed license patterns")
 
+    # Find audio files
     candidates = []
     for sub in [root / "FSD50K.dev_audio", root / "FSD50K.eval_audio"]:
         if sub.exists():
             candidates.extend(sub.rglob("*.wav"))
 
-    id_set = set(allowed_ids)
-    filtered = [p for p in candidates if p.name in id_set]
+    # Filter by allowed IDs (filename without extension)
+    filtered = [p for p in candidates if p.stem in allowed_ids]
 
     out = Path(args.list_dir) / "fsd50k_filtered.txt"
     out.parent.mkdir(parents=True, exist_ok=True)
