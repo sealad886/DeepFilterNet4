@@ -282,6 +282,42 @@ maturin develop --release -m pyDF-data/Cargo.toml
 maturin develop --release --features hdf5-static -m pyDF-data/Cargo.toml
 ```
 
+### Development Setup
+
+#### Pre-commit Hooks
+
+This repository uses [pre-commit](https://pre-commit.com) to run code quality checks before commits. The hooks match our CI workflow, catching issues locally before push.
+
+**Installation:**
+
+```bash
+# Install pre-commit
+pip install pre-commit
+
+# Install git hooks
+pre-commit install
+
+# Run against all files (first-time setup)
+pre-commit run --all-files
+```
+
+**Requirements:**
+
+- Python 3.10+
+- Rust toolchain with nightly (`rustup toolchain install nightly`)
+
+**Hooks included:**
+
+- **Utility hooks**: trailing whitespace, end-of-file, YAML/TOML/JSON validation
+- **Python**: black (formatting), isort (import sorting), flake8 (linting)
+- **Rust**: cargo fmt (formatting), cargo clippy (linting)
+
+**Skipping hooks** (not recommended):
+
+```bash
+git commit --no-verify -m "message"
+```
+
 ### Use DeepFilterNet from command line
 
 To enhance noisy audio files using DeepFilterNet run
@@ -360,7 +396,7 @@ of non-stationary noises by oversampling. In most cases you want to set this fac
 <details>
   <summary>Dataset config example:</summary>
 <p>
-  
+
 `dataset.cfg`
 
 ```json
@@ -484,7 +520,7 @@ To reproduce any metrics, we recomend to use the python implementation via `pip 
 If you use this framework, please cite: *DeepFilterNet: A Low Complexity Speech Enhancement Framework for Full-Band Audio based on Deep Filtering*
 ```bibtex
 @inproceedings{schroeter2022deepfilternet,
-  title={{DeepFilterNet}: A Low Complexity Speech Enhancement Framework for Full-Band Audio based on Deep Filtering}, 
+  title={{DeepFilterNet}: A Low Complexity Speech Enhancement Framework for Full-Band Audio based on Deep Filtering},
   author = {Schröter, Hendrik and Escalante-B., Alberto N. and Rosenkranz, Tobias and Maier, Andreas},
   booktitle={ICASSP 2022 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP)},
   year={2022},
