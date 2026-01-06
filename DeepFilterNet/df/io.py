@@ -165,7 +165,15 @@ def save_audio(
         audio = (audio * (1 << 15)).to(torch.int16)
     if dtype == torch.float32 and audio.dtype != torch.float32:
         audio = audio.to(torch.float32) / (1 << 15)
-    ta.save(outpath, audio, sr)
+    # TorchAudio 2.9+ requires TorchCodec for ta.save(); use soundfile as fallback
+    if USE_TORCHCODEC and not HAS_TORCHCODEC and HAS_SOUNDFILE:
+        # soundfile expects shape (samples, channels) and float32/int16 numpy array
+        audio_np = audio.numpy()
+        if audio_np.ndim == 2:
+            audio_np = audio_np.T  # (channels, samples) -> (samples, channels)
+        sf.write(outpath, audio_np, sr)  # type: ignore[possibly-undefined]
+    else:
+        ta.save(outpath, audio, sr)
 
 
 try:
