@@ -2890,4 +2890,4 @@ train = ["deepfilterdataloader", "icecream"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.15"
-content-hash = "39c6f52cd1be36bcf50d31a7d6c78cf768a51745c77e3947660121426c591759"
+content-hash = "5b971fd157d16f9a04dc9a5aab96d2b59f286674d49b5a301fd2f7db552cc566"
