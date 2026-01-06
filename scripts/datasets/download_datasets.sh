@@ -873,9 +873,74 @@ if require_dir "AcousticRooms" "${ACOUSTICROOMS_DIR}"; then
   write_list "${ACOUSTICROOMS_DIR}" "${LIST_DIR}/acousticrooms_rir.txt" "*.wav"
 fi
 
+# Combine lists for build_hdf5.sh based on profile
+echo "[info] combining lists for profile=${PROFILE}..."
+
+# Clean speech: VCTK (always) + LibriSpeech (production/apple with DOWNLOAD_LIBRISPEECH=1)
+{
+  if [[ -f "${LIST_DIR}/vctk_clean.txt" ]]; then
+    cat "${LIST_DIR}/vctk_clean.txt"
+  fi
+  if [[ -f "${LIST_DIR}/librispeech_clean.txt" ]]; then
+    cat "${LIST_DIR}/librispeech_clean.txt"
+  fi
+} > "${LIST_DIR}/clean_all.txt"
+echo "[ok] wrote $(wc -l < "${LIST_DIR}/clean_all.txt") entries -> ${LIST_DIR}/clean_all.txt"
+
+# Noise + music: MUSAN noise/music + FSD50K filtered
+{
+  if [[ -f "${LIST_DIR}/musan_noise.txt" ]]; then
+    cat "${LIST_DIR}/musan_noise.txt"
+  fi
+  if [[ -f "${LIST_DIR}/musan_music.txt" ]]; then
+    cat "${LIST_DIR}/musan_music.txt"
+  fi
+  if [[ -f "${LIST_DIR}/fsd50k_filtered.txt" ]]; then
+    cat "${LIST_DIR}/fsd50k_filtered.txt"
+  fi
+} > "${LIST_DIR}/noise_music.txt"
+echo "[ok] wrote $(wc -l < "${LIST_DIR}/noise_music.txt") entries -> ${LIST_DIR}/noise_music.txt"
+
+# RIR: AIR + OpenAIR + AcousticRooms (production/apple with DOWNLOAD_ACOUSTICROOMS=1)
+{
+  if [[ -f "${LIST_DIR}/air_rir.txt" ]]; then
+    cat "${LIST_DIR}/air_rir.txt"
+  fi
+  if [[ -f "${LIST_DIR}/openair_rir.txt" ]]; then
+    cat "${LIST_DIR}/openair_rir.txt"
+  fi
+  if [[ -f "${LIST_DIR}/acousticrooms_rir.txt" ]]; then
+    cat "${LIST_DIR}/acousticrooms_rir.txt"
+  fi
+} > "${LIST_DIR}/rir_all.txt"
+echo "[ok] wrote $(wc -l < "${LIST_DIR}/rir_all.txt") entries -> ${LIST_DIR}/rir_all.txt"
+
+# Sanity checks for build_hdf5.sh
+errors=0
+if [[ ! -s "${LIST_DIR}/clean_all.txt" ]]; then
+  echo "[error] clean_all.txt is empty - need at least VCTK" >&2
+  errors=1
+fi
+if [[ ! -s "${LIST_DIR}/noise_music.txt" ]]; then
+  echo "[error] noise_music.txt is empty - need MUSAN and/or FSD50K" >&2
+  errors=1
+fi
+if [[ ! -s "${LIST_DIR}/rir_all.txt" ]]; then
+  echo "[error] rir_all.txt is empty - need AIR, OpenAIR, or AcousticRooms" >&2
+  errors=1
+fi
+if [[ "${errors}" -eq 1 ]]; then
+  echo "[error] one or more combined lists are empty; build_hdf5.sh will fail" >&2
+  exit 1
+fi
+
 cat <<'MSG'
 Done.
-Next steps:
-- Combine lists for your target config (prototype vs production).
-- Run df.scripts.prepare_data to build speech_clean.hdf5, noise_music.hdf5, rir.hdf5.
+Combined lists ready for build_hdf5.sh:
+  - clean_all.txt (speech)
+  - noise_music.txt (noise + music)
+  - rir_all.txt (room impulse responses)
+
+Next step:
+  DATA_DIR=/path/to/data PROFILE=<profile> bash scripts/datasets/build_hdf5.sh
 MSG
