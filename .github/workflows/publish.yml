@@ -363,7 +363,7 @@ jobs:
           echo "DF_BIN_NAME=deep-filter-${{ env.DF_VERSION }}-${{ matrix.target }}${{ matrix.ext }}" >> $GITHUB_ENV
 
       - name: Build release binary
-        run: | 
+        run: |
           ${{ env.CARGO }} build --verbose --profile=release \
             --features ${{ env.FEATURES }} \
             -p ${{ env.PACKAGE }} \
