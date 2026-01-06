@@ -22,6 +22,15 @@ if USE_TORCHCODEC:
     except ImportError:
         pass
 
+# Try to import soundfile as fallback for audio metadata
+HAS_SOUNDFILE = False
+try:
+    import soundfile as sf
+
+    HAS_SOUNDFILE = True
+except ImportError:
+    pass
+
 # Handle AudioMetaData import across TorchAudio versions
 try:
     from torchaudio import AudioMetaData
@@ -74,13 +83,22 @@ def get_audio_metadata(file: str) -> AudioMetaData:
             bits_per_sample=getattr(metadata, "bits_per_sample", 0),
             encoding=getattr(metadata, "codec", ""),
         )
+    elif USE_TORCHCODEC and HAS_SOUNDFILE:
+        # TorchAudio 2.9+ without TorchCodec: use soundfile as fallback
+        info = sf.info(file)  # type: ignore[possibly-undefined]
+        return AudioMetaData(
+            sample_rate=info.samplerate,
+            num_frames=info.frames,
+            num_channels=info.channels,
+            bits_per_sample=0,
+            encoding=info.subtype or "",
+        )
     else:
-        return ta.info(file)
+        # Older TorchAudio versions with torchaudio.info()
+        return ta.info(file)  # type: ignore[attr-defined]
 
 
-def load_audio(
-    file: str, sr: Optional[int] = None, verbose=True, **kwargs
-) -> Tuple[Tensor, AudioMetaData]:
+def load_audio(file: str, sr: Optional[int] = None, verbose=True, **kwargs) -> Tuple[Tensor, AudioMetaData]:
     """Loads an audio file using torchaudio.
 
     Args:
@@ -105,10 +123,7 @@ def load_audio(
     audio, orig_sr = ta.load(file, **kwargs)
     if sr is not None and orig_sr != sr:
         if verbose:
-            warn_once(
-                f"Audio sampling rate does not match model sampling rate ({orig_sr}, {sr}). "
-                "Resampling..."
-            )
+            warn_once(f"Audio sampling rate does not match model sampling rate ({orig_sr}, {sr}). " "Resampling...")
         audio = resample(audio, orig_sr, sr, **rkwargs)
     return audio.contiguous(), info
 

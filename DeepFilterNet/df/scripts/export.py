@@ -147,9 +147,7 @@ def export(
     np.savez_compressed(os.path.join(export_dir, "erb_dec_output.npz"), m=m[0].numpy())
 
     # Export df decoder
-    np.savez_compressed(
-        os.path.join(export_dir, "df_dec_input.npz"), emb=emb.numpy(), c0=c0.numpy()
-    )
+    np.savez_compressed(os.path.join(export_dir, "df_dec_input.npz"), emb=emb.numpy(), c0=c0.numpy())
     inputs = (emb.clone(), c0)
     input_names = ["emb", "c0"]
     output_names = ["coefs"]

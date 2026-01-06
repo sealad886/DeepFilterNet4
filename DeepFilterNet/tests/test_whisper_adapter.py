@@ -301,9 +301,7 @@ class TestPyTorchBackendFunctionality:
 
     def test_create_decoding_options(self, pytorch_backend):
         """Test decoding options creation."""
-        options = pytorch_backend.create_decoding_options(
-            language="en", task="transcribe", beam_size=5, fp16=False
-        )
+        options = pytorch_backend.create_decoding_options(language="en", task="transcribe", beam_size=5, fp16=False)
         assert options is not None
         assert options.language == "en"
         assert options.task == "transcribe"

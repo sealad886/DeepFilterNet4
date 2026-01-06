@@ -1,5 +1,11 @@
 # Repository Guidelines
 
+## ⚠️ CRITICAL: Repository Identity
+- **This is sealad886/DeepFilterNet4** — a standalone fork
+- **There is NO upstream repository relationship**
+- **NEVER create PRs to or reference Rikorose/DeepFilterNet**
+- All work stays within this repository only
+
 ## Project Structure & Module Organization
 - `DeepFilterNet/` is the main Python package (training, inference, configs, scripts). Core code lives in `DeepFilterNet/df/`.
 - `DeepFilterNet/tests/` contains Python tests (pytest).

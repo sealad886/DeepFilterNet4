@@ -103,9 +103,7 @@ class TestMultiResolutionDF:
         coefs_list = []
         for num_freqs, frame_size in default_resolutions:
             # [B, O, T, F, 2] where O is frame_size
-            coefs = torch.randn(
-                spec_tensor.shape[0], frame_size, spec_tensor.shape[2], num_freqs, 2
-            )
+            coefs = torch.randn(spec_tensor.shape[0], frame_size, spec_tensor.shape[2], num_freqs, 2)
             coefs_list.append(coefs)
 
         output = mr_df(spec_tensor, coefs_list)
@@ -515,9 +513,7 @@ class TestModelParams4:
 class TestIntegration:
     """Integration tests for multi-resolution DF components."""
 
-    def test_multires_df_with_decoder(
-        self, spec_tensor, embedding_tensor, c0_tensor, default_resolutions
-    ):
+    def test_multires_df_with_decoder(self, spec_tensor, embedding_tensor, c0_tensor, default_resolutions):
         """Test MultiResolutionDF with MultiResDfDecoder."""
         decoder = MultiResDfDecoder(resolutions=default_resolutions)
         mr_df = MultiResolutionDF(resolutions=default_resolutions)
@@ -560,9 +556,7 @@ class TestDevices:
         coefs_list = []
         for num_freqs, frame_size in default_resolutions:
             # [B, O, T, F, 2] format
-            coefs = torch.randn(
-                spec.shape[0], frame_size, spec.shape[2], num_freqs, 2, device="cuda"
-            )
+            coefs = torch.randn(spec.shape[0], frame_size, spec.shape[2], num_freqs, 2, device="cuda")
             coefs_list.append(coefs)
 
         output = mr_df(spec, coefs_list)
@@ -581,9 +575,7 @@ class TestDevices:
         coefs_list = []
         for num_freqs, frame_size in default_resolutions:
             # [B, O, T, F, 2] format
-            coefs = torch.randn(
-                spec.shape[0], frame_size, spec.shape[2], num_freqs, 2, device="mps"
-            )
+            coefs = torch.randn(spec.shape[0], frame_size, spec.shape[2], num_freqs, 2, device="mps")
             coefs_list.append(coefs)
 
         output = mr_df(spec, coefs_list)

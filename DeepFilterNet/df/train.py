@@ -80,12 +80,8 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("data_config_file", type=str, help="Path to a dataset config file.")
-    parser.add_argument(
-        "data_dir", type=str, help="Path to the dataset directory containing .hdf5 files."
-    )
-    parser.add_argument(
-        "base_dir", type=str, help="Directory to store logs, summaries, checkpoints, etc."
-    )
+    parser.add_argument("data_dir", type=str, help="Path to the dataset directory containing .hdf5 files.")
+    parser.add_argument("base_dir", type=str, help="Directory to store logs, summaries, checkpoints, etc.")
     parser.add_argument(
         "--host-batchsize-config",
         "-b",
@@ -145,9 +141,7 @@ def main():
     # Maybe update batch size
     if args.host_batchsize_config is not None:
         try:
-            sys.path.append(
-                os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            )
+            sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
             from scripts.set_batch_size import main as set_batch_size  # type: ignore
 
             key = get_host() + "_" + config.get("model", section="train")
@@ -226,9 +220,7 @@ def main():
     scheduling_bs = bs
     prev_scheduling_bs = bs
     if len(batch_size_scheduling) > 0:
-        batch_size_scheduling = [
-            (int(bs[0]), int(bs[1])) for bs in (bs.split("/") for bs in batch_size_scheduling)
-        ]
+        batch_size_scheduling = [(int(bs[0]), int(bs[1])) for bs in (bs.split("/") for bs in batch_size_scheduling)]
         assert batch_size_scheduling[0][0] == 0  # First epoch must be 0
         logger.info("Running with learning rate scheduling")
 
@@ -262,9 +254,7 @@ def main():
                     freeze_bn_epoch=max_epochs - 2 if max_epochs > 2 else None,
                     backend=args.qat_backend,
                 )
-                logger.info(
-                    f"QAT enabled with backend={args.qat_backend}, start_epoch={args.qat_start_epoch}"
-                )
+                logger.info(f"QAT enabled with backend={args.qat_backend}, start_epoch={args.qat_start_epoch}")
             else:
                 logger.warning("QAT requested but quantization not available (requires torch>=2.0)")
         except ImportError as e:
@@ -306,9 +296,7 @@ def main():
             summary_dir=summary_dir,
         )
         metrics = {"loss": val_loss}
-        metrics.update(
-            {n: torch.mean(torch.stack(vals)).item() for n, vals in losses.get_summaries()}
-        )
+        metrics.update({n: torch.mean(torch.stack(vals)).item() for n, vals in losses.get_summaries()})
         log_metrics(f"[{epoch - 1}] [valid]", metrics)
     losses.reset_summaries()
     # Save default values to disk
@@ -353,9 +341,7 @@ def main():
         except AttributeError:
             pass
         if debug:
-            metrics.update(
-                {n: torch.mean(torch.stack(vals)).item() for n, vals in losses.get_summaries()}
-            )
+            metrics.update({n: torch.mean(torch.stack(vals)).item() for n, vals in losses.get_summaries()})
         log_metrics(f"[{epoch}] [train]", metrics)
         write_cp(model, "model", checkpoint_dir, epoch + 1)
         write_cp(opt, "opt", checkpoint_dir, epoch + 1)
@@ -374,13 +360,9 @@ def main():
             summary_dir=summary_dir,
         )
         metrics = {"loss": val_loss}
-        metrics.update(
-            {n: torch.mean(torch.stack(vals)).item() for n, vals in losses.get_summaries()}
-        )
+        metrics.update({n: torch.mean(torch.stack(vals)).item() for n, vals in losses.get_summaries()})
         val_criteria = metrics[val_criteria_type]
-        write_cp(
-            model, "model", checkpoint_dir, epoch + 1, metric=val_criteria, cmp=val_criteria_rule
-        )
+        write_cp(model, "model", checkpoint_dir, epoch + 1, metric=val_criteria, cmp=val_criteria_rule)
         log_metrics(f"[{epoch}] [valid]", metrics)
         if not check_patience(
             checkpoint_dir,
@@ -533,12 +515,8 @@ def run_epoch(
     start_steps = epoch * loader.len(split)
 
     # GAN training settings
-    gan_active = (
-        is_train and discriminator is not None and opt_disc is not None and epoch >= gan_start_epoch
-    )
-    disc_update_freq = (
-        config("DISCRIMINATOR_UPDATE_FREQ", 1, int, section="train") if gan_active else 1
-    )
+    gan_active = is_train and discriminator is not None and opt_disc is not None and epoch >= gan_start_epoch
+    disc_update_freq = config("DISCRIMINATOR_UPDATE_FREQ", 1, int, section="train") if gan_active else 1
 
     for i, batch in enumerate(loader.iter_epoch(split, seed)):
         opt.zero_grad()
@@ -599,9 +577,7 @@ def run_epoch(
 
                 # Discriminator update (every disc_update_freq steps)
                 if i % disc_update_freq == 0:
-                    gan_d_loss = train_discriminator_step(
-                        discriminator, opt_disc, losses, clean_wav, enh_wav.detach()
-                    )
+                    gan_d_loss = train_discriminator_step(discriminator, opt_disc, losses, clean_wav, enh_wav.detach())
                     l_gan_d_mem.append(gan_d_loss.detach())
 
                 # Generator GAN loss using new wrapper method
@@ -658,12 +634,7 @@ def run_epoch(
                 l_dict["t_sample"] = batch.timings[:-1].sum()
                 l_dict["t_batch"] = batch.timings[-1].mean()  # last is for whole batch
             if debug:
-                l_dict.update(
-                    {
-                        n: torch.mean(torch.stack(vals[-bs:])).item()
-                        for n, vals in losses.get_summaries()
-                    }
-                )
+                l_dict.update({n: torch.mean(torch.stack(vals[-bs:])).item() for n, vals in losses.get_summaries()})
             step = str(i).rjust(len(str(max_steps)))
             log_metrics(f"[{epoch}] [{step}/{max_steps}]", l_dict)
             summary_write(
@@ -688,9 +659,7 @@ def setup_losses() -> Loss:
 
     p = ModelParams()
 
-    istft = Istft(p.fft_size, p.hop_size, torch.as_tensor(state.fft_window().copy())).to(
-        get_device()
-    )
+    istft = Istft(p.fft_size, p.hop_size, torch.as_tensor(state.fft_window().copy())).to(get_device())
 
     # Initialize discriminator if GAN training is enabled
     discriminator = setup_discriminator()
@@ -733,9 +702,7 @@ def load_opt(
     momentum = config("momentum", 0, float, section="optim")  # For sgd, rmsprop
     decay = config("weight_decay", 0.05, float, section="optim")
     optimizer = config("optimizer", "adamw", str, section="optim").lower()
-    betas: Tuple[int, int] = config(
-        "opt_betas", [0.9, 0.999], Csv(float), section="optim", save=False  # type: ignore
-    )
+    betas: Tuple[int, int] = config("opt_betas", [0.9, 0.999], Csv(float), section="optim", save=False)  # type: ignore
     if mask_only:
         params = []
         for n, p in model.named_parameters():
@@ -752,9 +719,7 @@ def load_opt(
         "rmsprop": lambda p: optim.RMSprop(p, lr=lr, momentum=momentum, weight_decay=decay),
     }
     if optimizer not in supported:
-        raise ValueError(
-            f"Unsupported optimizer: {optimizer}. Must be one of {list(supported.keys())}"
-        )
+        raise ValueError(f"Unsupported optimizer: {optimizer}. Must be one of {list(supported.keys())}")
     opt = supported[optimizer](params)
     logger.debug(f"Training with optimizer {opt}")
     if cp_dir is not None:
@@ -820,9 +785,7 @@ def setup_wds(steps_per_epoch: int) -> Optional[np.ndarray]:
         logger.warning(f"Setting initial weight decay to {decay}.")
         config.overwrite("optim", "weight_decay", decay)
     num_epochs = config.get("max_epochs", int, "train")
-    decay_values = cosine_scheduler(
-        decay, decay_end, niter_per_ep=steps_per_epoch, epochs=num_epochs
-    )
+    decay_values = cosine_scheduler(decay, decay_end, niter_per_ep=steps_per_epoch, epochs=num_epochs)
     return decay_values
 
 
@@ -848,15 +811,9 @@ def summary_write(
     def synthesis(x: Tensor) -> Tensor:
         return torch.as_tensor(state.synthesis(make_np(as_complex(x.detach()))))
 
-    torchaudio.save(
-        os.path.join(summary_dir, f"{prefix}_clean_snr{snr}.wav"), synthesis(clean[idx]), p.sr
-    )
-    torchaudio.save(
-        os.path.join(summary_dir, f"{prefix}_noisy_snr{snr}.wav"), synthesis(noisy[idx]), p.sr
-    )
-    torchaudio.save(
-        os.path.join(summary_dir, f"{prefix}_enh_snr{snr}.wav"), synthesis(enh[idx]), p.sr
-    )
+    torchaudio.save(os.path.join(summary_dir, f"{prefix}_clean_snr{snr}.wav"), synthesis(clean[idx]), p.sr)
+    torchaudio.save(os.path.join(summary_dir, f"{prefix}_noisy_snr{snr}.wav"), synthesis(noisy[idx]), p.sr)
+    torchaudio.save(os.path.join(summary_dir, f"{prefix}_enh_snr{snr}.wav"), synthesis(enh[idx]), p.sr)
     np.savetxt(
         os.path.join(summary_dir, f"{prefix}_lsnr_snr{snr}.txt"),
         lsnr[idx].detach().cpu().numpy(),
