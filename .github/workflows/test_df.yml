@@ -30,7 +30,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # Free up disk space on ubuntu for PyTorch installation
       - name: Free disk space
         if: runner.os == 'Linux'
@@ -132,14 +132,14 @@ jobs:
 
       # Python and poetry install
       - name: Install Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           cache: 'pip'
           cache-dependency-path: '**/pyproject.toml'
           python-version: "3.10"
       - name: Load cached Poetry installation
         if: matrix.os != 'windows-latest'
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.local
           key: poetry-${{ runner.os }}-${{ matrix.python }}-1
@@ -158,7 +158,7 @@ jobs:
       - name: Configure poetry
         run: poetry config virtualenvs.in-project true
       - name: Set venv up cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         id: cache
         with:
           path: |
@@ -214,7 +214,7 @@ jobs:
           cd DeepFilterNet
           poetry run python df/scripts/dnsmos_dns5.py eval-sample ../out_DeepFilterNet3/noisy_snr0.wav -t 3.385834652850639 4.130096419832765 3.153399733642353 3.594115
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: enhanced-${{ runner.os }}
           path: out/*wav

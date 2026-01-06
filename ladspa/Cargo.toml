@@ -20,7 +20,7 @@ deep_filter = { path = "../libDF", default-features = false, features = [
   "default-model",
 ] }
 ladspa = "0.3.4"
-ndarray = "^0.15"
+ndarray = "^0.17"
 env_logger = "0.10"
 uuid = { version = "1.2.1", features = ["v4", "fast-rng"] }
 log = { version = "0.4", features = ["std"] }
