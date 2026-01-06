@@ -23,4 +23,4 @@ pyo3 = { version = "0.22", default-features = true, features = [
 numpy = "0.22"
 log = { version = "0.4", features = ["std"] }
 crossbeam-channel = "^0.5"
-ndarray = "^0.15"
+ndarray = "^0.17"
