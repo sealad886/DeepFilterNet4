@@ -1,10 +1,10 @@
-torch >=2.0, <3.0
-torchaudio >=2.0, <3.0
+torch >=2.9.1, <3.0
+torchaudio >=2.9.1, <3.0
 deepfilterlib
 icecream>=2
 loguru>=0.5
 numpy>=1.20
-ptflops==0.7.2.2
+ptflops==0.7.5
 requests
 packaging
 pystoi

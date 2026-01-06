@@ -282,6 +282,42 @@ maturin develop --release -m pyDF-data/Cargo.toml
 maturin develop --release --features hdf5-static -m pyDF-data/Cargo.toml
 ```
 
+### Development Setup
+
+#### Pre-commit Hooks
+
+This repository uses [pre-commit](https://pre-commit.com) to run code quality checks before commits. The hooks match our CI workflow, catching issues locally before push.
+
+**Installation:**
+
+```bash
+# Install pre-commit
+pip install pre-commit
+
+# Install git hooks
+pre-commit install
+
+# Run against all files (first-time setup)
+pre-commit run --all-files
+```
+
+**Requirements:**
+
+- Python 3.10+
+- Rust toolchain with nightly (`rustup toolchain install nightly`)
+
+**Hooks included:**
+
+- **Utility hooks**: trailing whitespace, end-of-file, YAML/TOML/JSON validation
+- **Python**: black (formatting), isort (import sorting), flake8 (linting)
+- **Rust**: cargo fmt (formatting), cargo clippy (linting)
+
+**Skipping hooks** (not recommended):
+
+```bash
+git commit --no-verify -m "message"
+```
+
 ### Use DeepFilterNet from command line
 
 To enhance noisy audio files using DeepFilterNet run
@@ -360,7 +396,7 @@ of non-stationary noises by oversampling. In most cases you want to set this fac
 <details>
   <summary>Dataset config example:</summary>
 <p>
-  
+
 `dataset.cfg`
 
 ```json
@@ -423,6 +459,60 @@ for a config file.
 python df/train.py path/to/dataset.cfg path/to/data_dir/ path/to/base_dir/
 ```
 
+## Apple Silicon Optimization
+
+DeepFilterNet supports optimized whisper inference on Apple Silicon Macs (M1/M2/M3/M4) using the [MLX framework](https://github.com/ml-explore/mlx). This can provide **5-10x speedup** for ASR-based loss computation during training.
+
+### Installation
+
+```bash
+# Install with MLX support (Apple Silicon only)
+pip install deepfilternet[asr-mlx]
+
+# Or install MLX dependencies separately
+pip install mlx mlx-whisper
+```
+
+### Usage
+
+The whisper backend is automatically selected based on your platform:
+- **Apple Silicon**: Uses mlx-whisper (if installed) for optimal performance
+- **CUDA/CPU**: Uses openai-whisper (PyTorch)
+
+You can also explicitly select a backend:
+
+```python
+from df.whisper_adapter import get_whisper_backend
+
+# Auto-detect (recommended)
+backend = get_whisper_backend("base")
+
+# Force PyTorch backend
+backend = get_whisper_backend("base", backend="pytorch")
+
+# Force MLX backend (Apple Silicon only)
+backend = get_whisper_backend("base", backend="mlx")
+```
+
+For ASRLoss in training:
+
+```python
+from df.loss import ASRLoss
+
+# Auto-detect optimal backend
+loss_fn = ASRLoss(model="base", backend="auto")
+
+# Explicit MLX for Apple Silicon
+loss_fn = ASRLoss(model="base", backend="mlx")
+```
+
+### Requirements
+
+- macOS 13.3+ with Apple Silicon (M1/M2/M3/M4)
+- Python 3.9+
+- mlx >= 0.0.6
+- mlx-whisper >= 0.4.0
+
 ## Contributing
 
 Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines on how to contribute to this project.
@@ -474,7 +564,6 @@ When reporting bugs or requesting features, please use the provided templates:
 ### Security
 
 For security vulnerabilities, please see our [Security Policy](SECURITY.md) and report issues privately through GitHub Security Advisories.
-
 ## Citation Guide
 
 To reproduce any metrics, we recomend to use the python implementation via `pip install deepfilternet`.
@@ -482,7 +571,7 @@ To reproduce any metrics, we recomend to use the python implementation via `pip 
 If you use this framework, please cite: *DeepFilterNet: A Low Complexity Speech Enhancement Framework for Full-Band Audio based on Deep Filtering*
 ```bibtex
 @inproceedings{schroeter2022deepfilternet,
-  title={{DeepFilterNet}: A Low Complexity Speech Enhancement Framework for Full-Band Audio based on Deep Filtering}, 
+  title={{DeepFilterNet}: A Low Complexity Speech Enhancement Framework for Full-Band Audio based on Deep Filtering},
   author = {Schröter, Hendrik and Escalante-B., Alberto N. and Rosenkranz, Tobias and Maier, Andreas},
   booktitle={ICASSP 2022 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP)},
   year={2022},

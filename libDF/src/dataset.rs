@@ -1,3 +1,6 @@
+// Unused assignment warnings are false positives from thiserror derive macro on ErrorDetail variants
+#![allow(unused_assignments)]
+
 use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::env;
 use std::ffi::OsStr;
@@ -38,6 +41,7 @@ use crate::{augmentations::*, transforms::*, util::*, *};
 type Result<T> = std::result::Result<T, DfDatasetError>;
 
 #[derive(Error, Debug)]
+#[allow(unused)] // Fields used by thiserror derive macro
 pub enum DfDatasetError {
     #[error("No Hdf5 datasets found: {0}")]
     NoDatasetFoundError(String),
@@ -401,10 +405,10 @@ where
     pub downsample_freq: Option<usize>,
 }
 impl Sample<f32> {
-    fn get_speech_view(&self) -> Result<ArrayView2<f32>> {
+    fn get_speech_view(&self) -> Result<ArrayView2<'_, f32>> {
         Ok(self.speech.view().into_dimensionality()?)
     }
-    fn get_noisy_view(&self) -> Result<ArrayView2<f32>> {
+    fn get_noisy_view(&self) -> Result<ArrayView2<'_, f32>> {
         Ok(self.noisy.view().into_dimensionality()?)
     }
     fn dim(&self) -> usize {
@@ -412,10 +416,10 @@ impl Sample<f32> {
     }
 }
 impl Sample<Complex32> {
-    fn get_speech_view(&self) -> Result<ArrayView3<Complex32>> {
+    fn get_speech_view(&self) -> Result<ArrayView3<'_, Complex32>> {
         Ok(self.speech.view().into_dimensionality()?)
     }
-    fn get_noisy_view(&self) -> Result<ArrayView3<Complex32>> {
+    fn get_noisy_view(&self) -> Result<ArrayView3<'_, Complex32>> {
         Ok(self.noisy.view().into_dimensionality()?)
     }
     fn dim(&self) -> usize {
@@ -1462,8 +1466,9 @@ impl fmt::Display for DsType {
         write!(f, "{self:?}")
     }
 }
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Default)]
 pub enum Codec {
+    #[default]
     PCM = 0,
     Vorbis = 1,
     FLAC = 2,
@@ -1471,11 +1476,6 @@ pub enum Codec {
 impl Default for &Codec {
     fn default() -> Self {
         &Codec::PCM
-    }
-}
-impl Default for Codec {
-    fn default() -> Self {
-        Codec::PCM
     }
 }
 #[derive(Debug)]
@@ -2028,16 +2028,16 @@ fn combine_noises(
 ///
 /// * `clean` - A clean speech signal of shape `[C, N]`.
 /// * `clean_distorted` - An optional distorted speech signal of shape `[C, N]`. If provided, this signal
-///                  will be used for creating the noisy mixture. `clean` may be used as a training
-///                  target and usually contains no or less distortions. This can be used to learn
-///                  some dereverberation or declipping.
+///   will be used for creating the noisy mixture. `clean` may be used as a training
+///   target and usually contains no or less distortions. This can be used to learn
+///   some dereverberation or declipping.
 /// * `noise` - A noise signal of shape `[C, N]`. Will be modified in place.
 /// * `snr_db` - Signal to noise ratio in decibel used for mixing.
 /// * `gain_db` - Gain to apply to the clean signal in decibel before mixing.
 /// * `noise_resample`: Optional resample parameters which will be used to apply a low-pass via
-///                     resampling to the noise signal. This may be used to make sure a speech
-///                     signal with a lower sampling rate will also be mixed with noise having the
-///                     same sampling rate.
+///   resampling to the noise signal. This may be used to make sure a speech
+///   signal with a lower sampling rate will also be mixed with noise having the
+///   same sampling rate.
 ///
 /// Returns
 ///

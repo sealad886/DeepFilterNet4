@@ -2,7 +2,8 @@ import os
 import string
 from configparser import ConfigParser
 from shlex import shlex
-from typing import Any, List, Optional, Tuple, Type, TypeVar, Union, cast as typing_cast
+from typing import Any, List, Optional, Tuple, Type, TypeVar, Union
+from typing import cast as typing_cast
 
 from loguru import logger
 
@@ -50,9 +51,7 @@ class Config:
         self.modified = False
         self.allow_defaults = True
 
-    def load(
-        self, path: Optional[str], config_must_exist=False, allow_defaults=True, allow_reload=False
-    ):
+    def load(self, path: Optional[str], config_must_exist=False, allow_defaults=True, allow_reload=False):
         self.allow_defaults = allow_defaults
         if self.parser is not None and not allow_reload:
             raise ValueError("Config already loaded")
@@ -127,8 +126,7 @@ class Config:
             value = self.parser.get(section.lower(), option)
         elif self.parser.has_option(self.DEFAULT_SECTION, option):
             logger.warning(
-                f"Couldn't find option {option} in section {section}. "
-                "Falling back to default settings section."
+                f"Couldn't find option {option} in section {section}. " "Falling back to default settings section."
             )
             value = self.parser.get(self.DEFAULT_SECTION, option)
         elif default is None:
@@ -208,26 +206,26 @@ class Config:
 
     def _fix_dfnet4(self):
         """Ensure backward compatibility for DFNet4 configs.
-        
+
         Handles migration from DFNet3 configs and ensures default values
         are set correctly for new DFNet4 parameters.
         """
         # If deepfilternet4 section exists, ensure backward compatibility
         if self.parser.has_section("deepfilternet4"):
             sec_df4 = self.parser["deepfilternet4"]
-            
+
             # Migrate DF_ORDER from df section if not present in deepfilternet4
             if "df_order" not in sec_df4 and self.parser.has_section("df"):
                 sec_df = self.parser["df"]
                 if "df_order" in sec_df:
                     sec_df4["df_order"] = sec_df["df_order"]
-                    
+
             # Migrate DF_LOOKAHEAD from df section if not present
             if "df_lookahead" not in sec_df4 and self.parser.has_section("df"):
                 sec_df = self.parser["df"]
                 if "df_lookahead" in sec_df:
                     sec_df4["df_lookahead"] = sec_df["df_lookahead"]
-                    
+
         # Auto-create deepfilternet4 section if train.model specifies it
         if (
             self.parser.has_section("train")
@@ -236,22 +234,38 @@ class Config:
         ):
             if not self.parser.has_section("deepfilternet4"):
                 self.parser.add_section("deepfilternet4")
-                
+
             # Copy compatible params from deepfilternet3 if available
             if self.parser.has_section("deepfilternet3"):
                 sec_df3 = self.parser["deepfilternet3"]
                 sec_df4 = self.parser["deepfilternet4"]
-                
+
                 # List of params that are compatible between DFNet3 and DFNet4
                 compatible_params = [
-                    "conv_lookahead", "conv_ch", "conv_depthwise", "convt_depthwise",
-                    "conv_kernel", "convt_kernel", "conv_kernel_inp",
-                    "emb_hidden_dim", "emb_num_layers", "emb_gru_skip_enc", "emb_gru_skip",
-                    "df_hidden_dim", "df_gru_skip", "df_pathway_kernel_size_t",
-                    "enc_concat", "df_num_layers", "df_n_iter", "linear_groups",
-                    "enc_linear_groups", "mask_pf", "pf_beta", "lsnr_dropout",
+                    "conv_lookahead",
+                    "conv_ch",
+                    "conv_depthwise",
+                    "convt_depthwise",
+                    "conv_kernel",
+                    "convt_kernel",
+                    "conv_kernel_inp",
+                    "emb_hidden_dim",
+                    "emb_num_layers",
+                    "emb_gru_skip_enc",
+                    "emb_gru_skip",
+                    "df_hidden_dim",
+                    "df_gru_skip",
+                    "df_pathway_kernel_size_t",
+                    "enc_concat",
+                    "df_num_layers",
+                    "df_n_iter",
+                    "linear_groups",
+                    "enc_linear_groups",
+                    "mask_pf",
+                    "pf_beta",
+                    "lsnr_dropout",
                 ]
-                
+
                 for param in compatible_params:
                     if param in sec_df3 and param not in sec_df4:
                         sec_df4[param] = sec_df3[param]
@@ -273,9 +287,7 @@ class Csv(object):
     Produces a csv parser that return a list of transformed elements. From python-decouple.
     """
 
-    def __init__(
-        self, cast: Type[T] = str, delimiter=",", strip=string.whitespace, post_process=list
-    ):
+    def __init__(self, cast: Type[T] = str, delimiter=",", strip=string.whitespace, post_process=list):
         """
         Parameters:
         cast -- callable that transforms the item just before it's added to the list.

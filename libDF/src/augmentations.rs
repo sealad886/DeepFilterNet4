@@ -921,7 +921,7 @@ impl RandReverbSim {
     /// # Returns
     ///
     /// * `speech_rev` - An optional reverberant speech sample for mixing. This will contain a
-    ///                  more reverberation then the in place modified `speech` signal.
+    ///   more reverberation then the in place modified `speech` signal.
     pub fn transform<F>(
         &self,
         speech: &mut Array2<f32>,

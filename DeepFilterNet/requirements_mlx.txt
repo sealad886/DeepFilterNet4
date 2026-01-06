@@ -1,0 +1,16 @@
+# requirements_mlx.txt
+# Apple Silicon (M1/M2/M3/M4) optimizations for DeepFilterNet
+#
+# Install with: pip install -r requirements_mlx.txt
+# Only works on macOS with Apple Silicon
+#
+# These packages provide 5-10x speedup for whisper-based operations
+# (ASRLoss and WAcc_whisper.py) on Apple Silicon Macs.
+#
+# NOTE: On non-Apple Silicon systems, these packages will not install
+# or will have no effect. The code will automatically fall back to
+# PyTorch-based whisper.
+
+# - Apple Silicon MLX optimization (M1/M2/M3/M4 only)
+mlx>=0.0.6; sys_platform == "darwin" and platform_machine == "arm64"
+mlx-whisper>=0.4.0; sys_platform == "darwin" and platform_machine == "arm64"

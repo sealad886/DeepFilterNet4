@@ -29,9 +29,7 @@ def main(args):
         os.makedirs(args.output_dir, exist_ok=True)
 
         def save_audio_callback(cleanfn: str, enh):  # noqa: F811
-            save_audio(
-                os.path.basename(cleanfn), enh, sr, output_dir=args.output_dir, suffix=suffix
-            )
+            save_audio(os.path.basename(cleanfn), enh, sr, output_dir=args.output_dir, suffix=suffix)
 
     for ds_dir in datasets:
         logger.info(f"Evaluating dataset {os.path.basename(ds_dir)}")
@@ -41,9 +39,7 @@ def main(args):
         assert os.path.isdir(noisy_dir) and os.path.isdir(clean_dir)
         expr = re.compile(r"clnsp.*_fileid")
         noisy_files = glob.glob(noisy_dir + "/*.wav")
-        clean_files = [
-            re.sub(expr, "clean_fileid", f.replace("noisy", "clean")) for f in noisy_files
-        ]
+        clean_files = [re.sub(expr, "clean_fileid", f.replace("noisy", "clean")) for f in noisy_files]
         assert len(clean_files) == 150
 
         metrics = evaluation_loop(
@@ -73,8 +69,6 @@ if __name__ == "__main__":
         default=4,
         help="Number of worker processes for metric calculation.",
     )
-    parser.add_argument(
-        "--with-reverb", action="store_true", help="Also test on the reverb dataset", dest="reverb"
-    )
+    parser.add_argument("--with-reverb", action="store_true", help="Also test on the reverb dataset", dest="reverb")
     args = parser.parse_args()
     main(args)

@@ -80,7 +80,6 @@ stream.start_stream()
 
 
 def animate(i):
-    global im
     global spec
     N = 4
 

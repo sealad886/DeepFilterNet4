@@ -32,7 +32,7 @@ HAS_OCTAVE = True
 RESAMPLE_METHOD = "sinc_fast"
 
 try:
-    import semetrics
+    import semetrics  # type: ignore[import]
 except (OSError, ImportError, ModuleNotFoundError):
     HAS_OCTAVE = False
     semetrics = None
@@ -69,9 +69,7 @@ def enhance(model, df_state: DF, noisy: Tensor, f_hp_cutoff: Optional[int] = Non
     spec = model(spec, erb_feat, spec_feat)[0].squeeze(0)  # [C, T, F, 2]
     audio = df_state.synthesis(as_complex(spec).cpu().numpy())
     if f_hp_cutoff is not None:
-        audio = highpass_biquad(
-            torch.from_numpy(audio), df_state.sr(), cutoff_freq=f_hp_cutoff
-        ).numpy()
+        audio = highpass_biquad(torch.from_numpy(audio), df_state.sr(), cutoff_freq=f_hp_cutoff).numpy()
     return audio
 
 
@@ -110,9 +108,7 @@ def evaluation_loop(
     metrics_dict = get_metrics(sr)
     with pool_fn(processes=max(1, n_workers)) as pool:
         metrics: List[Metric] = [metrics_dict[m.lower()](pool=pool) for m in metrics]
-        for noisyfn, cleanfn in log_progress(
-            zip(noisy_files, clean_files), len(noisy_files), log_percent
-        ):
+        for noisyfn, cleanfn in log_progress(zip(noisy_files, clean_files), len(noisy_files), log_percent):
             noisy, _ = load_audio(noisyfn, sr, method=RESAMPLE_METHOD)
             clean, _ = load_audio(cleanfn, sr, method=RESAMPLE_METHOD)
             logger.debug(f"Processing {os.path.basename(noisyfn)}, {os.path.basename(cleanfn)}")
@@ -231,9 +227,7 @@ def evaluation_loop_dns(
             enh = enhance(model, df_state, noisy)[0]
             noisy = df_state.synthesis(df_state.analysis(noisy.numpy()))[0]
             for m in metrics:
-                m.add(
-                    enhanced=enh, noisy=noisy if eval_noisy else None, fn=os.path.basename(noisyfn)
-                )
+                m.add(enhanced=enh, noisy=noisy if eval_noisy else None, fn=os.path.basename(noisyfn))
             if save_audio_callback is not None:
                 enh = torch.as_tensor(enh).to(torch.float32).view(1, -1)
                 save_audio_callback(noisyfn, enh)
@@ -377,9 +371,7 @@ class MPMetric(Metric):
             self.compute_metric,
             (clean, enhanced),
             callback=lambda x: self._add_values_enh(x, fn),
-            error_callback=lambda e: logger.error(
-                f"Error computing {self.name} metric for enhanced sample {fn}: {e}"
-            ),
+            error_callback=lambda e: logger.error(f"Error computing {self.name} metric for enhanced sample {fn}: {e}"),
         )
         self.worker_results.append(h)
         if noisy is not None:
@@ -388,9 +380,7 @@ class MPMetric(Metric):
                 self.compute_metric,
                 (clean, noisy),
                 callback=lambda x: self._add_values_noisy(x, fn),
-                error_callback=lambda e: logger.error(
-                    f"Error computing {self.name} metric for noisy sample {fn}: {e}"
-                ),
+                error_callback=lambda e: logger.error(f"Error computing {self.name} metric for noisy sample {fn}: {e}"),
             )
             self.worker_results.append(h)
 
@@ -510,9 +500,7 @@ class DnsMos5Metric(NoisyMetric):
         assert self.sr is not None
         with NamedTemporaryFile(suffix=".wav") as nf:
             save_audio(nf.name, degraded, self.sr, dtype=torch.float32)
-            scores = dnsmos5.eval_sample_dnsmos(
-                nf.name, log=False, compute_score=self.compute_score
-            )
+            scores = dnsmos5.eval_sample_dnsmos(nf.name, log=False, compute_score=self.compute_score)
             return np.asarray([scores[n] for n in self.name])
 
 
@@ -530,9 +518,7 @@ class DnsMosP808ApiMetric(NoisyMetric):
 
 class DnsMosP835ApiMetric(NoisyMetric):
     def __init__(self, sr: int, pool: Pool):
-        super().__init__(
-            name=["SIGMOS", "BAKMOS", "OVLMOS"], pool=pool, source_sr=sr, target_sr=16000
-        )
+        super().__init__(name=["SIGMOS", "BAKMOS", "OVLMOS"], pool=pool, source_sr=sr, target_sr=16000)
         self.url = "https://dnsmos.azurewebsites.net/v1/dnsmosp835/score"
         self.key = os.environ["DNS_AUTH_KEY"]
 
@@ -544,9 +530,7 @@ class DnsMosP835ApiMetric(NoisyMetric):
 
 class DnsMosP835LocalMetric(NoisyMetric):
     def __init__(self, sr: int, pool: Pool):
-        super().__init__(
-            name=["SIGMOS", "BAKMOS", "OVLMOS"], pool=pool, source_sr=sr, target_sr=16000
-        )
+        super().__init__(name=["SIGMOS", "BAKMOS", "OVLMOS"], pool=pool, source_sr=sr, target_sr=16000)
         self.sig, self.bak_ovr = download_onnx_models()
 
     def compute_metric(self, degraded) -> Union[float, np.ndarray]:
@@ -564,9 +548,7 @@ def stoi(clean, degraded, sr, extended=False):
     return stoi
 
 
-def pesq_(
-    clean: Union[np.ndarray, Tensor], degraded: Union[np.ndarray, Tensor], sr: int
-) -> np.ndarray:
+def pesq_(clean: Union[np.ndarray, Tensor], degraded: Union[np.ndarray, Tensor], sr: int) -> np.ndarray:
     if sr != 16000:
         clean = resample(torch.as_tensor(clean), sr, 16000, method=RESAMPLE_METHOD).numpy()
         degraded = resample(torch.as_tensor(degraded), sr, 16000, method=RESAMPLE_METHOD).numpy()

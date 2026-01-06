@@ -30,7 +30,21 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+      # Free up disk space on ubuntu for PyTorch installation
+      - name: Free disk space
+        if: runner.os == 'Linux'
+        run: |
+          echo "Disk space before cleanup:"
+          df -h /
+          # Remove large unnecessary packages
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force || true
+          echo "Disk space after cleanup:"
+          df -h /
       - name: Echo git tag
         run: |
           echo "git tag: ${{github.event.head_commit.message}}"
@@ -52,9 +66,57 @@ jobs:
         uses: styfle/cancel-workflow-action@0.12.1
         with:
           access_token: ${{ github.token }}
+      - name: Cleanup runner disk (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          echo "Disk usage before cleanup:"
+          df -h .
+          echo "Removing runner caches and old build artifacts"
+          rm -rf ~/.cache/pip ~/.cache/pypoetry ~/.cache/torch ~/.cache/torch_extensions ~/.cache/DeepFilterNet || true
+          rm -rf ~/.cargo/registry ~/.cargo/git || true
+          rm -rf target DeepFilterNet/target || true
+          rm -rf .venv DeepFilterNet/.venv || true
+          if [[ "${RUNNER_ENVIRONMENT:-}" == "github-hosted" ]]; then
+            echo "Removing preinstalled toolchains"
+            sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost || true
+          fi
+          echo "Disk usage after cleanup:"
+          df -h .
+      - name: Cleanup runner disk (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Write-Host "Disk usage before cleanup:"
+          Get-PSDrive -PSProvider FileSystem
+          $paths = @(
+            "$env:LOCALAPPDATA\pip\Cache",
+            "$env:LOCALAPPDATA\pypoetry\Cache",
+            "$env:LOCALAPPDATA\torch",
+            "$env:USERPROFILE\.cache\torch",
+            "$env:USERPROFILE\.cargo\registry",
+            "$env:USERPROFILE\.cargo\git",
+            "$env:TEMP\*",
+            "target",
+            "DeepFilterNet\target",
+            ".venv",
+            "DeepFilterNet\.venv"
+          )
+          foreach ($p in $paths) {
+            if (Test-Path $p) {
+              Write-Host "Removing $p"
+              Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue
+            }
+          }
+          Write-Host "Disk usage after cleanup:"
+          Get-PSDrive -PSProvider FileSystem
       # Soundfile backend for torchaudio
       - name: Set Extra Dependency Windows
         if: matrix.os == 'windows-latest'
+        run: |
+          echo "EXTRA=-E soundfile" >> $GITHUB_ENV
+      - name: Set Extra Dependency non-Windows
+        if: matrix.os != 'windows-latest'
         run: |
           echo "EXTRA=-E soundfile" >> $GITHUB_ENV
 
@@ -70,14 +132,14 @@ jobs:
 
       # Python and poetry install
       - name: Install Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           cache: 'pip'
           cache-dependency-path: '**/pyproject.toml'
           python-version: "3.10"
       - name: Load cached Poetry installation
         if: matrix.os != 'windows-latest'
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.local
           key: poetry-${{ runner.os }}-${{ matrix.python }}-1
@@ -96,7 +158,7 @@ jobs:
       - name: Configure poetry
         run: poetry config virtualenvs.in-project true
       - name: Set venv up cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         id: cache
         with:
           path: |
@@ -152,7 +214,7 @@ jobs:
           cd DeepFilterNet
           poetry run python df/scripts/dnsmos_dns5.py eval-sample ../out_DeepFilterNet3/noisy_snr0.wav -t 3.385834652850639 4.130096419832765 3.153399733642353 3.594115
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: enhanced-${{ runner.os }}
           path: out/*wav

@@ -9,15 +9,15 @@ import pandas as pd
 import requests
 import soundfile as sf
 
-WACC_SERVICE_URL = "https://wacc.azurewebsites.net/api/TriggerEvaluation?code=K2XN7ouruRN/2k1HNyS79ET39rEMZ9jOOCnFtodPDj42WJFjG9LWXg=="
+WACC_SERVICE_URL = (
+    "https://wacc.azurewebsites.net/api/TriggerEvaluation?code=K2XN7ouruRN/2k1HNyS79ET39rEMZ9jOOCnFtodPDj42WJFjG9LWXg=="
+)
 SUPPORTED_SAMPLING_RATE = 16000
 
 
 def main(args):
     audio_clips_list = glob.glob(os.path.join(args.testset_dir, "*.wav"))
-    transcriptions_df = pd.read_csv(
-        args.transcription_file, sep="\t", names=["filename", "transcription"]
-    )
+    transcriptions_df = pd.read_csv(args.transcription_file, sep="\t", names=["filename", "transcription"])
     scores = []
     for fpath in audio_clips_list:
         if os.path.basename(fpath) not in transcriptions_df["filename"].unique():
@@ -54,9 +54,7 @@ if __name__ == "__main__":
         help="Path to the dir containing audio clips to be evaluated",
     )
     parser.add_argument("--transcription_file")
-    parser.add_argument(
-        "--score_file", help="If you want the scores in a CSV file provide the full path"
-    )
+    parser.add_argument("--score_file", help="If you want the scores in a CSV file provide the full path")
 
     args = parser.parse_args()
     main(args)

@@ -9,6 +9,7 @@ export/
 assets/valid_cache*
 DeepFilterNet/poetry.lock
 .vscode
+data/
 
 ### Rust gitignore ###
 
@@ -146,3 +147,6 @@ dmypy.json
 
 # IDE
 .idea
+
+# Pre-commit
+.pre-commit-cache/
