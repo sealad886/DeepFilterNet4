@@ -99,7 +99,7 @@ def get_audio_metadata(file: str) -> AudioMetaData:
 
 
 def load_audio(file: str, sr: Optional[int] = None, verbose=True, **kwargs) -> Tuple[Tensor, AudioMetaData]:
-    """Loads an audio file using torchaudio.
+    """Loads an audio file using torchaudio or soundfile fallback.
 
     Args:
         file (str): Path to an audio file.
@@ -120,7 +120,20 @@ def load_audio(file: str, sr: Optional[int] = None, verbose=True, **kwargs) -> T
     info: AudioMetaData = get_audio_metadata(file)
     if "num_frames" in kwargs and sr is not None:
         kwargs["num_frames"] *= info.sample_rate // sr
-    audio, orig_sr = ta.load(file, **kwargs)
+
+    # TorchAudio 2.9+ requires TorchCodec; use soundfile as fallback
+    if USE_TORCHCODEC and not HAS_TORCHCODEC and HAS_SOUNDFILE:
+        # Use soundfile for loading when TorchCodec is not available
+        result = sf.read(file, dtype="float32")  # type: ignore[possibly-undefined]
+        data, orig_sr = result[0], result[1]
+        # soundfile returns (frames, channels) for multi-channel, convert to (channels, frames)
+        if data.ndim == 1:
+            audio = torch.from_numpy(data).unsqueeze(0)
+        else:
+            audio = torch.from_numpy(data.T)
+    else:
+        audio, orig_sr = ta.load(file, **kwargs)
+
     if sr is not None and orig_sr != sr:
         if verbose:
             warn_once(f"Audio sampling rate does not match model sampling rate ({orig_sr}, {sr}). " "Resampling...")
