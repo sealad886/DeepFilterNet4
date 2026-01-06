@@ -14,6 +14,7 @@ from df.io import resample
 from df.scripts.hdf5_utils import load_encoded
 from df.scripts.prepare_data import encode
 
+
 def to_f32(audio: Tensor) -> Tensor:
     if audio.dtype != torch.float32:
         audio = audio.to(torch.float32) / (1 << 15)

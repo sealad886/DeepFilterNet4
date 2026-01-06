@@ -3,7 +3,7 @@ import os
 import random
 import signal
 import sys
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -49,12 +49,16 @@ def setup_discriminator() -> Optional[nn.Module]:
     gan_enabled = config("GAN_ENABLED", False, bool, section="train")
     if not gan_enabled:
         return None
-    
-    from df.discriminator import CombinedDiscriminator, MultiPeriodDiscriminator, MultiScaleDiscriminator
-    
+
+    from df.discriminator import (
+        CombinedDiscriminator,
+        MultiPeriodDiscriminator,
+        MultiScaleDiscriminator,
+    )
+
     disc_type = config("DISCRIMINATOR_TYPE", "combined", str, section="train").lower()
     use_spectral_norm = config("DISCRIMINATOR_SPECTRAL_NORM", False, bool, section="train")
-    
+
     if disc_type == "mpd":
         periods = config("MPD_PERIODS", [2, 3, 5, 7, 11], Csv(int), section="train")
         disc = MultiPeriodDiscriminator(periods=periods, use_spectral_norm=use_spectral_norm)
@@ -69,7 +73,7 @@ def setup_discriminator() -> Optional[nn.Module]:
             num_scales=num_scales,
             use_spectral_norm=use_spectral_norm,
         )
-    
+
     logger.info(f"Initialized {disc_type.upper()} discriminator for GAN training")
     return disc.to(get_device())
 
@@ -248,12 +252,13 @@ def main():
         log_model_summary(model, verbose=args.debug)
     except Exception as e:
         logger.warning(f"Failed to print model summary: {e}")
-    
+
     # Quantization-aware training (QAT) setup
     qat_callback = None
     if args.qat:
         try:
             from df.quantization import QATCallback, check_quantization_available
+
             if check_quantization_available():
                 qat_callback = QATCallback(
                     model,
@@ -261,12 +266,14 @@ def main():
                     freeze_bn_epoch=max_epochs - 2 if max_epochs > 2 else None,
                     backend=args.qat_backend,
                 )
-                logger.info(f"QAT enabled with backend={args.qat_backend}, start_epoch={args.qat_start_epoch}")
+                logger.info(
+                    f"QAT enabled with backend={args.qat_backend}, start_epoch={args.qat_start_epoch}"
+                )
             else:
                 logger.warning("QAT requested but quantization not available (requires torch>=2.0)")
         except ImportError as e:
             logger.warning(f"Could not import quantization module: {e}")
-    
+
     if jit:
         # Load as jit after log_model_summary
         model = torch.jit.script(model)
@@ -279,7 +286,7 @@ def main():
     patience = config("EARLY_STOPPING_PATIENCE", 5, int, section="train")
 
     losses = setup_losses()
-    
+
     # GAN training setup
     gan_enabled = config("GAN_ENABLED", False, bool, section="train")
     opt_disc = None
@@ -314,7 +321,7 @@ def main():
         # QAT epoch start callback
         if qat_callback is not None:
             qat_callback.on_epoch_start(epoch)
-        
+
         if len(batch_size_scheduling) > 0:
             # Get current batch size
             for e, b in batch_size_scheduling:
@@ -391,15 +398,16 @@ def main():
             logger.info("Stopping training due to timeout")
             exit(0)
         losses.reset_summaries()
-        
+
         # QAT epoch end callback
         if qat_callback is not None:
             qat_callback.on_epoch_end(epoch)
-    
+
     # Export quantized model if QAT was enabled
     if qat_callback is not None and qat_callback.qat_active:
         try:
             from df.quantization import convert_qat_model, export_quantized_model
+
             logger.info("Converting QAT model to quantized model...")
             quantized_model = convert_qat_model(model)
             qat_export_path = os.path.join(checkpoint_dir, "model_quantized.pt")
@@ -407,7 +415,7 @@ def main():
             logger.info(f"Quantized model exported to {qat_export_path}")
         except Exception as e:
             logger.warning(f"Failed to export quantized model: {e}")
-    
+
     model, epoch = load_model(
         checkpoint_dir,
         state,
@@ -433,31 +441,31 @@ def main():
 
 def synthesize_waveform(spec: Tensor, df_state: DF) -> Tensor:
     """Synthesize waveform from complex spectrogram using DF state.
-    
+
     Args:
         spec: Complex spectrogram [B, 1, T, F, 2] or [B, T, F, 2]
         df_state: DF state for ISTFT
-        
+
     Returns:
         Waveform tensor [B, T_samples]
     """
     global istft
     if istft is None:
         raise RuntimeError("ISTFT not initialized. Call setup_losses() first.")
-    
+
     # Handle different input shapes
     if spec.dim() == 5:
         spec = spec.squeeze(1)  # [B, T, F, 2]
-    
+
     # Convert to complex
     spec_complex = as_complex(spec)  # [B, T, F]
-    
+
     # Transpose for ISTFT: [B, F, T]
     spec_complex = spec_complex.transpose(1, 2)
-    
+
     # Synthesize using ISTFT
     waveform = istft(spec_complex)  # [B, T_samples]
-    
+
     return waveform
 
 
@@ -469,27 +477,27 @@ def train_discriminator_step(
     fake_wav: Tensor,
 ) -> Tensor:
     """Perform one discriminator training step.
-    
+
     Args:
         disc: Discriminator module
         opt_disc: Discriminator optimizer
         losses: Loss module with compute_d_loss_with_disc method
         real_wav: Real (clean) waveform [B, T]
         fake_wav: Fake (enhanced) waveform [B, T], should be detached
-        
+
     Returns:
         Discriminator loss value
     """
     opt_disc.zero_grad()
-    
+
     # Compute discriminator loss using new wrapper method
     d_loss = losses.compute_d_loss_with_disc(disc, real_wav, fake_wav)
-    
+
     # Backward and step
     d_loss.backward()
     clip_grad_norm_(disc.parameters(), 1.0, error_if_nonfinite=True)
     opt_disc.step()
-    
+
     return d_loss
 
 
@@ -529,22 +537,21 @@ def run_epoch(
     seed = epoch if is_train else 42
     n_nans = 0
     start_steps = epoch * loader.len(split)
-    
+
     # GAN training settings
     gan_active = (
-        is_train and 
-        discriminator is not None and 
-        opt_disc is not None and 
-        epoch >= gan_start_epoch
+        is_train and discriminator is not None and opt_disc is not None and epoch >= gan_start_epoch
     )
-    disc_update_freq = config("DISCRIMINATOR_UPDATE_FREQ", 1, int, section="train") if gan_active else 1
+    disc_update_freq = (
+        config("DISCRIMINATOR_UPDATE_FREQ", 1, int, section="train") if gan_active else 1
+    )
 
     for i, batch in enumerate(loader.iter_epoch(split, seed)):
         opt.zero_grad()
         if opt_disc is not None:
             opt_disc.zero_grad()
         it = start_steps + i  # global training iteration
-        
+
         # Update generator learning rate
         if lr_scheduler_values is not None or wd_scheduler_values is not None:
             for param_group in opt.param_groups:
@@ -552,12 +559,12 @@ def run_epoch(
                     param_group["lr"] = lr_scheduler_values[it] * param_group.get("lr_scale", 1)
                 if wd_scheduler_values is not None and param_group["weight_decay"] > 0:
                     param_group["weight_decay"] = wd_scheduler_values[it]
-        
+
         # Update discriminator learning rate
         if gan_active and disc_lr_values is not None and opt_disc is not None:
             for param_group in opt_disc.param_groups:
                 param_group["lr"] = disc_lr_values[it] * param_group.get("lr_scale", 1)
-        
+
         assert batch.feat_spec is not None
         assert batch.feat_erb is not None
         feat_erb = batch.feat_erb.to(dev, non_blocking=True)
@@ -586,30 +593,28 @@ def run_epoch(
                         raise e
                     continue
                 raise e
-            
+
             # GAN training
             gan_g_loss = torch.tensor(0.0, device=dev)
             gan_d_loss = torch.tensor(0.0, device=dev)
-            
+
             if gan_active:
                 # Synthesize waveforms for discriminator
                 clean_wav = synthesize_waveform(clean, state)
                 enh_wav = synthesize_waveform(enh, state)
-                
+
                 # Discriminator update (every disc_update_freq steps)
                 if i % disc_update_freq == 0:
                     gan_d_loss = train_discriminator_step(
                         discriminator, opt_disc, losses, clean_wav, enh_wav.detach()
                     )
                     l_gan_d_mem.append(gan_d_loss.detach())
-                
+
                 # Generator GAN loss using new wrapper method
-                gan_g_loss = losses.compute_g_loss_with_disc(
-                    discriminator, clean_wav, enh_wav
-                )
+                gan_g_loss = losses.compute_g_loss_with_disc(discriminator, clean_wav, enh_wav)
                 err = err + gan_g_loss
                 l_gan_g_mem.append(gan_g_loss.detach())
-            
+
             if is_train:
                 try:
                     err.backward()
@@ -692,17 +697,17 @@ def setup_losses() -> Loss:
     istft = Istft(p.fft_size, p.hop_size, torch.as_tensor(state.fft_window().copy())).to(
         get_device()
     )
-    
+
     # Initialize discriminator if GAN training is enabled
     discriminator = setup_discriminator()
-    
+
     loss = Loss(state, istft, discriminator=discriminator).to(get_device())
     # loss = torch.jit.script(loss)
     return loss
 
 
 def load_discriminator_opt(
-    cp_dir: Optional[str], 
+    cp_dir: Optional[str],
     disc: nn.Module,
 ) -> optim.Optimizer:
     """Load optimizer for discriminator."""
@@ -711,19 +716,19 @@ def load_discriminator_opt(
     betas: Tuple[float, float] = config(
         "DISCRIMINATOR_BETAS", [0.8, 0.99], Csv(float), section="optim", save=False  # type: ignore
     )
-    
+
     opt = optim.AdamW(disc.parameters(), lr=lr, weight_decay=decay, betas=betas)
     logger.debug(f"Training discriminator with optimizer {opt}")
-    
+
     if cp_dir is not None:
         try:
             read_cp(opt, "opt_disc", cp_dir, log=False)
         except (ValueError, FileNotFoundError) as e:
             logger.warning(f"Could not load discriminator optimizer state: {e}")
-    
+
     for group in opt.param_groups:
         group.setdefault("initial_lr", lr)
-    
+
     return opt
 
 
@@ -798,7 +803,7 @@ def setup_discriminator_lrs(steps_per_epoch: int) -> np.ndarray:
     num_epochs = config.get("max_epochs", int, "train")
     lr_min = config("DISCRIMINATOR_LR_MIN", 1e-6, float, section="optim")
     warmup_epochs = config("DISCRIMINATOR_WARMUP_EPOCHS", 0, int, section="optim")
-    
+
     lr_values = cosine_scheduler(
         lr,
         lr_min,

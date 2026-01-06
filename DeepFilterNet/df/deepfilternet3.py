@@ -410,13 +410,13 @@ class DfNet(nn.Module):
         feat_spec = self.pad_feat(feat_spec)
         e0, e1, e2, e3, emb, c0, lsnr = self.enc(feat_erb, feat_spec)
 
-        # Initialize variables that may be conditionally set  
+        # Initialize variables that may be conditionally set
         # Control flow guarantees initialization but pyright can't track it
         m: Tensor = torch.zeros((), device=spec.device)  # placeholder, will be overwritten
         df_coefs: Tensor = torch.zeros((), device=spec.device)  # placeholder, will be overwritten
         idcs: Optional[Tensor] = None
         spec_m = spec  # placeholder for spec_m
-        
+
         if self.lsnr_droput:
             idcs = lsnr.squeeze() > -10.0
             b, t = (spec.shape[0], spec.shape[2])

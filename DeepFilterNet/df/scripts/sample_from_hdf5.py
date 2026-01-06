@@ -10,6 +10,7 @@ import torchaudio as ta
 
 from df.scripts.hdf5_utils import load_encoded
 
+
 def save_sample(group, key: str, codec: str, out_dir: str, sr: int, n_channels: Optional[int]):
     ds = group[key]
     if codec == "pcm":

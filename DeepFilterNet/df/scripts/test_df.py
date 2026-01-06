@@ -37,7 +37,7 @@ def eval_metric(
     logger.info(prefix + f"Got      {m_e}")
     is_close = torch.isclose(m_e, m_t, atol=__a_tol, rtol=__r_tol).all()
     if not is_close:
-        logger.error(prefix + f"Diff     {m_t-m_e}")
+        logger.error(prefix + f"Diff     {m_t - m_e}")
     return is_close
 
 

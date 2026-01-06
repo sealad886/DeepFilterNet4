@@ -32,7 +32,7 @@ def get_macos_version() -> Optional[Tuple[int, int]]:
 
 def mps_supports_complex() -> bool:
     """Check if MPS backend supports complex tensor operations.
-    
+
     Complex operations require macOS 14 (Sonoma) or later.
     Returns True if on macOS 14+ or if not using MPS.
     """
@@ -46,14 +46,14 @@ def mps_supports_complex() -> bool:
 
 def get_device(device: Optional[str] = None):
     """Get the compute device for model inference.
-    
+
     Args:
-        device: Optional device specification. Can be 'cpu', 'cuda', 'cuda:0', 'mps', 
+        device: Optional device specification. Can be 'cpu', 'cuda', 'cuda:0', 'mps',
                 or None/empty for auto-detection.
-    
+
     Returns:
         torch.device: The selected compute device.
-    
+
     Note:
         MPS backend requires macOS 14+ for complex tensor operations.
         On older macOS, set PYTORCH_ENABLE_MPS_FALLBACK=1 to fall back
@@ -61,14 +61,14 @@ def get_device(device: Optional[str] = None):
     """
     if device is not None and device != "" and device.lower() != "auto":
         return torch.device(device)
-    
+
     try:
         s = config("DEVICE", default="", section="train")
         if s != "":
             return torch.device(s)
     except ValueError:
         pass
-    
+
     if torch.cuda.is_available():
         return torch.device("cuda:0")
     elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
@@ -84,15 +84,15 @@ def get_device(device: Optional[str] = None):
 
 def mps_safe_norm(x: Tensor, dim: int = -1, keepdim: bool = False) -> Tensor:
     """Compute tensor norm with MPS fallback for complex tensors.
-    
+
     On MPS backend, torch.norm on complex tensors is not supported (issue #146691).
     This function moves complex tensors to CPU for norm computation, then back to MPS.
-    
+
     Args:
         x: Input tensor (real or complex)
         dim: Dimension along which to compute norm
         keepdim: Whether to keep the reduced dimension
-    
+
     Returns:
         Tensor containing the norm values
     """

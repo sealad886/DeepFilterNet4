@@ -172,7 +172,7 @@ def copy_datasets(
     cur_b = du(target_dir)
     max_b = int(max_gb * 1024 * 1024 * 1024)
     ic(cur_b, max_b)
-    print(f"Current target dir size: {cur_b/1024**3} MB")
+    print(f"Current target dir size: {cur_b / 1024**3} MB")
     print(f"Copying max {max_gb} GB")
     # Start with train since it will be accessed most of the time
     for split in ("train", "valid", "test"):

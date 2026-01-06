@@ -4,6 +4,7 @@ from typing import Callable, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
+from loguru import logger
 from torch import Tensor, nn
 from torch.nn import functional as F
 from torch.nn import init
@@ -14,7 +15,6 @@ from df.config import config
 from df.model import ModelParams
 from df.utils import as_complex, as_real, get_device, get_norm_alpha, mps_supports_complex
 from libdf import unit_norm_init
-from loguru import logger
 
 
 class Conv2dNormAct(nn.Sequential):
@@ -325,7 +325,7 @@ class DfOp(nn.Module):
         self.df_bins = df_bins
         self.df_lookahead = df_lookahead
         self.freq_bins = freq_bins
-        
+
         # Check for config override (handle case when no config is loaded)
         try:
             use_complex_override = config(
@@ -333,7 +333,7 @@ class DfOp(nn.Module):
             )
         except ValueError:
             use_complex_override = None
-        
+
         if use_complex_override is not None:
             if use_complex_override:
                 method = "complex_strided"
@@ -344,7 +344,7 @@ class DfOp(nn.Module):
             # Auto-select real-valued forward for MPS compatibility on macOS < 14
             method = "real_unfold"
             logger.info("Using real-valued forward method for MPS compatibility")
-        
+
         self.set_forward(method)
 
     def set_forward(self, method: str):
@@ -858,7 +858,9 @@ class LocalSnrTarget(nn.Module):
         if max_bin is not None:
             clean = as_complex(clean[..., :max_bin])
             noise = as_complex(noise[..., :max_bin])
-        lsnr = local_snr(clean, noise, window_size=self.ws, db=self.db, window_size_ns=self.ws_ns)[0]
+        lsnr = local_snr(clean, noise, window_size=self.ws, db=self.db, window_size_ns=self.ws_ns)[
+            0
+        ]
         if self.range is not None:
             lsnr = lsnr.clamp(self.range[0], self.range[1])
         return lsnr.squeeze(1)

@@ -32,7 +32,7 @@ HAS_OCTAVE = True
 RESAMPLE_METHOD = "sinc_fast"
 
 try:
-    import semetrics    # type: ignore[import]
+    import semetrics  # type: ignore[import]
 except (OSError, ImportError, ModuleNotFoundError):
     HAS_OCTAVE = False
     semetrics = None

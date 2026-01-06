@@ -17,6 +17,7 @@ HAS_TORCHCODEC = False
 if USE_TORCHCODEC:
     try:
         from torchcodec.decoders import AudioDecoder
+
         HAS_TORCHCODEC = True
     except ImportError:
         pass
@@ -24,11 +25,15 @@ if USE_TORCHCODEC:
 # Handle AudioMetaData import across TorchAudio versions
 try:
     from torchaudio import AudioMetaData
+
     TA_RESAMPLE_SINC = "sinc_interp_hann"
     TA_RESAMPLE_KAISER = "sinc_interp_kaiser"
 except ImportError:
     try:
-        from torchaudio.backend.common import AudioMetaData  # type: ignore[import-unresolved]  # noqa: F401
+        from torchaudio.backend.common import (  # type: ignore[import-unresolved]  # noqa: F401
+            AudioMetaData,
+        )
+
         TA_RESAMPLE_SINC = "sinc_interpolation"
         TA_RESAMPLE_KAISER = "kaiser_window"
     except ImportError:
@@ -38,6 +43,7 @@ except ImportError:
         @dataclass
         class AudioMetaData:
             """Fallback AudioMetaData for TorchAudio 2.9+ when using TorchCodec."""
+
             sample_rate: int
             num_frames: int
             num_channels: int
@@ -47,16 +53,16 @@ except ImportError:
         TA_RESAMPLE_SINC = "sinc_interp_hann"
         TA_RESAMPLE_KAISER = "sinc_interp_kaiser"
 
-from df.logger import warn_once
-from df.utils import download_file, get_cache_dir, get_git_root
+from df.logger import warn_once  # noqa: E402
+from df.utils import download_file, get_cache_dir, get_git_root  # noqa: E402
 
 
 def get_audio_metadata(file: str) -> AudioMetaData:
     """Get audio metadata using TorchCodec for TorchAudio 2.9+ or torchaudio.info() for earlier versions.
-    
+
     Args:
         file: Path to an audio file.
-        
+
     Returns:
         AudioMetaData with sample_rate, num_frames, num_channels, etc.
     """
@@ -65,10 +71,10 @@ def get_audio_metadata(file: str) -> AudioMetaData:
         metadata = decoder.metadata
         return AudioMetaData(
             sample_rate=metadata.sample_rate,
-            num_frames=metadata.num_frames if hasattr(metadata, 'num_frames') else 0,
+            num_frames=metadata.num_frames if hasattr(metadata, "num_frames") else 0,
             num_channels=metadata.num_channels,
-            bits_per_sample=getattr(metadata, 'bits_per_sample', 0),
-            encoding=getattr(metadata, 'codec', ""),
+            bits_per_sample=getattr(metadata, "bits_per_sample", 0),
+            encoding=getattr(metadata, "codec", ""),
         )
     else:
         return ta.info(file)

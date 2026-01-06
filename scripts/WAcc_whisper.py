@@ -13,7 +13,7 @@ import torch
 
 # Add DeepFilterNet to path for whisper_adapter import
 sys.path.insert(0, str(Path(__file__).parent.parent / "DeepFilterNet"))
-from df.whisper_adapter import get_whisper_backend
+from df.whisper_adapter import get_whisper_backend  # noqa: E402
 
 BACKEND = None
 WHISPER_OPT = None

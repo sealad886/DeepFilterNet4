@@ -9,12 +9,11 @@ import pytest
 import torch
 
 from df.whisper_adapter import (
+    WhisperDecodingResult,
+    get_whisper_backend,
     is_apple_silicon,
     to_numpy,
-    get_whisper_backend,
-    WhisperDecodingResult,
 )
-
 
 # =============================================================================
 # Platform Detection Tests
@@ -98,7 +97,7 @@ class TestMLXConversion:
     def test_mx_to_torch(self):
         """Convert MLX array to PyTorch tensor."""
         pytest.importorskip("mlx")
-        from df.whisper_adapter import mx_to_torch, _ensure_mlx
+        from df.whisper_adapter import _ensure_mlx, mx_to_torch
 
         _ensure_mlx()
         import mlx.core as mx
@@ -111,7 +110,7 @@ class TestMLXConversion:
     def test_torch_to_mx(self):
         """Convert PyTorch tensor to MLX array."""
         pytest.importorskip("mlx")
-        from df.whisper_adapter import torch_to_mx, _ensure_mlx
+        from df.whisper_adapter import _ensure_mlx, torch_to_mx
 
         _ensure_mlx()
         import mlx.core as mx
@@ -124,7 +123,7 @@ class TestMLXConversion:
     def test_roundtrip_torch_mx_torch(self):
         """Verify roundtrip conversion preserves values."""
         pytest.importorskip("mlx")
-        from df.whisper_adapter import torch_to_mx, mx_to_torch, _ensure_mlx
+        from df.whisper_adapter import _ensure_mlx, mx_to_torch, torch_to_mx
 
         _ensure_mlx()
 
@@ -138,7 +137,7 @@ class TestMLXConversion:
     def test_mx_to_torch_with_dtype(self):
         """Convert MLX array to PyTorch tensor with specific dtype."""
         pytest.importorskip("mlx")
-        from df.whisper_adapter import mx_to_torch, _ensure_mlx
+        from df.whisper_adapter import _ensure_mlx, mx_to_torch
 
         _ensure_mlx()
         import mlx.core as mx
@@ -188,7 +187,7 @@ class TestBackendFactory:
     )
     def test_pytorch_backend_explicit(self):
         """Request PyTorch backend explicitly."""
-        whisper = pytest.importorskip("whisper")
+        pytest.importorskip("whisper")
         backend = get_whisper_backend("tiny", backend="pytorch")
         assert backend.backend_name == "pytorch"
 
@@ -198,7 +197,7 @@ class TestBackendFactory:
     )
     def test_pytorch_backend_properties(self):
         """Verify PyTorch backend properties."""
-        whisper = pytest.importorskip("whisper")
+        pytest.importorskip("whisper")
         backend = get_whisper_backend("tiny", backend="pytorch")
         assert backend.device in ("cpu", "cuda", "mps")
         assert hasattr(backend, "dims")
@@ -226,7 +225,7 @@ class TestBackendFactory:
     )
     def test_auto_backend_returns_valid_backend(self):
         """Auto backend should return a working backend."""
-        whisper = pytest.importorskip("whisper")
+        pytest.importorskip("whisper")
         backend = get_whisper_backend("tiny", backend="auto")
         assert backend.backend_name in ("pytorch", "mlx")
 
@@ -245,7 +244,7 @@ class TestPlatformFallback:
     )
     def test_auto_backend_always_works(self):
         """Auto backend should always return a working backend."""
-        whisper = pytest.importorskip("whisper")
+        pytest.importorskip("whisper")
         backend = get_whisper_backend("tiny", backend="auto")
         assert backend.backend_name in ("pytorch", "mlx")
 
@@ -262,7 +261,7 @@ class TestPlatformFallback:
     )
     def test_pytorch_backend_on_any_platform(self):
         """PyTorch backend should work on any platform."""
-        whisper = pytest.importorskip("whisper")
+        pytest.importorskip("whisper")
         backend = get_whisper_backend("tiny", backend="pytorch")
         assert backend.backend_name == "pytorch"
 
@@ -282,7 +281,7 @@ class TestPyTorchBackendFunctionality:
     @pytest.fixture
     def pytorch_backend(self):
         """Create a PyTorch backend for testing."""
-        whisper = pytest.importorskip("whisper")
+        pytest.importorskip("whisper")
         return get_whisper_backend("tiny", backend="pytorch")
 
     def test_embed_audio(self, pytorch_backend):
@@ -407,7 +406,7 @@ class TestASRLossIntegration:
     )
     def test_asrloss_pytorch_backend(self, sample_audio):
         """Test ASRLoss with PyTorch backend."""
-        whisper = pytest.importorskip("whisper")
+        pytest.importorskip("whisper")
         from df.loss import ASRLoss
 
         loss_fn = ASRLoss(sr=16000, model="tiny", backend="pytorch")
@@ -434,7 +433,7 @@ class TestASRLossIntegration:
     )
     def test_asrloss_auto_backend(self, sample_audio):
         """Test ASRLoss with auto backend selection."""
-        whisper = pytest.importorskip("whisper")
+        pytest.importorskip("whisper")
         from df.loss import ASRLoss
 
         loss_fn = ASRLoss(sr=16000, model="tiny", backend="auto")

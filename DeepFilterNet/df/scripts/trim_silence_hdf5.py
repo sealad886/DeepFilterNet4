@@ -7,8 +7,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from df.scripts.prepare_data import encode
 from df.scripts.hdf5_utils import load_encoded
+from df.scripts.prepare_data import encode
 
 
 def windowed_energy(x: Tensor, ws: int, hop) -> Tensor:
