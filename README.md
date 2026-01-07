@@ -513,6 +513,100 @@ loss_fn = ASRLoss(model="base", backend="mlx")
 - mlx >= 0.0.6
 - mlx-whisper >= 0.4.0
 
+## MLX DeepFilterNet4 (Native Apple Silicon)
+
+In addition to the whisper optimization, DeepFilterNet includes a **full native MLX implementation** of the DfNet4 model for Apple Silicon. This provides maximum performance for both training and inference on M1/M2/M3/M4 chips.
+
+### Features
+
+- **100% MLX native**: Full model implementation using MLX framework
+- **Feature parity**: All DfNet4 features including Mamba backbone, hybrid encoder, multi-resolution DF
+- **Streaming API**: Frame-by-frame processing for real-time applications
+- **Training support**: Full training loop with loss functions and checkpointing
+- **PyTorch compatibility**: Load weights from PyTorch checkpoints
+
+### Installation
+
+```bash
+# Install MLX dependencies
+pip install mlx mlx-lm soundfile h5py
+
+# Or use the requirements file
+pip install -r requirements_mlx.txt
+```
+
+### Examples
+
+See the `examples/` directory for complete usage examples:
+
+| Example | Description |
+|---------|-------------|
+| [mlx_inference.py](examples/mlx_inference.py) | Basic single-file audio enhancement |
+| [mlx_batch_enhance.py](examples/mlx_batch_enhance.py) | Process directory of audio files |
+| [mlx_training.py](examples/mlx_training.py) | Training from scratch with checkpointing |
+| [mlx_streaming.py](examples/mlx_streaming.py) | Real-time frame-by-frame processing |
+
+### Quick Start
+
+```python
+from df_mlx.model import enhance, init_model, load_checkpoint
+
+# Initialize model
+model = init_model()
+
+# Optionally load trained weights
+load_checkpoint(model, "path/to/checkpoint.safetensors")
+
+# Enhance audio (1D array of samples at 48kHz)
+enhanced = enhance(model, noisy_audio)
+```
+
+### Streaming Processing
+
+For real-time applications:
+
+```python
+from df_mlx.model import StreamingDfNet4, init_model
+
+model = init_model()
+streaming = StreamingDfNet4(model)
+state = streaming.init_state(batch_size=1)
+
+# Process frame by frame
+for chunk in audio_chunks:
+    enhanced_chunk, state = streaming.process_frame(chunk, state)
+    # Use enhanced_chunk immediately
+```
+
+### Training
+
+```python
+from df_mlx.train import Trainer
+from df_mlx.config import TrainConfig
+from df_mlx.model import init_model
+
+model = init_model()
+config = TrainConfig(
+    learning_rate=1e-4,
+    warmup_steps=500,
+    checkpoint_dir="./checkpoints",
+)
+trainer = Trainer(model, config)
+
+# Training loop
+for spec, feat_erb, feat_spec, target in data_loader:
+    loss = trainer.train_step(spec, feat_erb, feat_spec, target)
+```
+
+### Performance
+
+On Apple Silicon, the MLX implementation typically achieves:
+- **Inference**: 0.02-0.05x RTF (20-50x faster than real-time)
+- **Training**: Competitive with PyTorch on CUDA for small batches
+- **Memory**: Efficient unified memory usage
+
+See [benchmark_mlx_vs_pytorch.py](benchmark_mlx_vs_pytorch.py) for detailed benchmarks.
+
 ## Contributing
 
 Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines on how to contribute to this project.
