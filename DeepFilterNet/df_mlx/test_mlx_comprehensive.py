@@ -1595,6 +1595,304 @@ class TestLSNRConfig:
 
 
 # ============================================================================
+# Hybrid Encoder Tests
+# ============================================================================
+
+
+class TestWaveformEncoder:
+    """Tests for WaveformEncoder."""
+
+    def test_waveform_encoder_init(self):
+        """Test WaveformEncoder initialization."""
+        from df_mlx.model import WaveformEncoder
+
+        encoder = WaveformEncoder(out_dim=256)
+        assert encoder.out_dim == 256
+        assert encoder.in_channels == 1
+
+    def test_waveform_encoder_forward(self):
+        """Test WaveformEncoder forward pass."""
+        from df_mlx.model import WaveformEncoder
+
+        encoder = WaveformEncoder(out_dim=256)
+
+        batch, samples = 2, 48000  # 1 second at 48kHz
+        waveform = mx.random.normal(shape=(batch, samples))
+
+        features = encoder(waveform)
+        mx.eval(features)
+
+        assert features.ndim == 3
+        assert features.shape[0] == batch
+        assert features.shape[2] == 256
+
+    def test_waveform_encoder_3d_input(self):
+        """Test WaveformEncoder with 3D input."""
+        from df_mlx.model import WaveformEncoder
+
+        encoder = WaveformEncoder(out_dim=128)
+
+        batch, channels, samples = 2, 1, 24000
+        waveform = mx.random.normal(shape=(batch, channels, samples))
+
+        features = encoder(waveform)
+        mx.eval(features)
+
+        assert features.ndim == 3
+        assert features.shape[0] == batch
+
+    @pytest.mark.parametrize("num_layers", [2, 3, 4])
+    def test_waveform_encoder_layers(self, num_layers):
+        """Test WaveformEncoder with different layer counts."""
+        from df_mlx.model import WaveformEncoder
+
+        encoder = WaveformEncoder(num_layers=num_layers, out_dim=256)
+
+        waveform = mx.random.normal(shape=(2, 16000))
+        features = encoder(waveform)
+        mx.eval(features)
+
+        assert features.shape[2] == 256
+
+
+class TestPhaseEncoder:
+    """Tests for PhaseEncoder."""
+
+    def test_phase_encoder_init(self):
+        """Test PhaseEncoder initialization."""
+        from df_mlx.model import PhaseEncoder
+
+        encoder = PhaseEncoder(n_freqs=96, out_dim=256)
+        assert encoder.n_freqs == 96
+        assert encoder.out_dim == 256
+
+    def test_phase_encoder_forward_angle(self):
+        """Test PhaseEncoder with angle input."""
+        from df_mlx.model import PhaseEncoder
+
+        encoder = PhaseEncoder(n_freqs=96, out_dim=256)
+
+        batch, time, freqs = 2, 50, 96
+        phase_angle = mx.random.uniform(shape=(batch, time, freqs), low=-3.14159, high=3.14159)
+
+        features = encoder(phase_angle)
+        mx.eval(features)
+
+        assert features.shape == (batch, time, 256)
+
+    def test_phase_encoder_forward_complex(self):
+        """Test PhaseEncoder with complex input."""
+        from df_mlx.model import PhaseEncoder
+
+        encoder = PhaseEncoder(n_freqs=96, out_dim=256)
+
+        batch, time, freqs = 2, 50, 96
+        # Complex format (batch, time, freq, 2)
+        complex_spec = mx.random.normal(shape=(batch, time, freqs, 2))
+
+        features = encoder(complex_spec)
+        mx.eval(features)
+
+        assert features.shape == (batch, time, 256)
+
+    @pytest.mark.parametrize("n_freqs", [48, 96, 128])
+    def test_phase_encoder_various_freqs(self, n_freqs):
+        """Test PhaseEncoder with various frequency counts."""
+        from df_mlx.model import PhaseEncoder
+
+        encoder = PhaseEncoder(n_freqs=n_freqs, out_dim=128)
+
+        phase = mx.random.uniform(shape=(2, 50, n_freqs), low=-3.14159, high=3.14159)
+        features = encoder(phase)
+        mx.eval(features)
+
+        assert features.shape == (2, 50, 128)
+
+
+class TestCrossDomainAttention:
+    """Tests for CrossDomainAttention."""
+
+    def test_cross_domain_attention_init(self):
+        """Test CrossDomainAttention initialization."""
+        from df_mlx.model import CrossDomainAttention
+
+        attn = CrossDomainAttention(
+            time_dim=256,
+            mag_dim=256,
+            phase_dim=256,
+            out_dim=256,
+            num_heads=8,
+        )
+        assert attn.out_dim == 256
+
+    def test_cross_domain_attention_forward(self):
+        """Test CrossDomainAttention forward pass."""
+        from df_mlx.model import CrossDomainAttention
+
+        attn = CrossDomainAttention(
+            time_dim=256,
+            mag_dim=256,
+            phase_dim=256,
+            out_dim=256,
+        )
+
+        batch, time = 2, 50
+        time_feat = mx.random.normal(shape=(batch, time, 256))
+        mag_feat = mx.random.normal(shape=(batch, time, 256))
+        phase_feat = mx.random.normal(shape=(batch, time, 256))
+
+        fused = attn(time_feat, mag_feat, phase_feat)
+        mx.eval(fused)
+
+        assert fused.shape == (batch, time, 256)
+
+    def test_cross_domain_attention_different_dims(self):
+        """Test CrossDomainAttention with different input dimensions."""
+        from df_mlx.model import CrossDomainAttention
+
+        attn = CrossDomainAttention(
+            time_dim=128,
+            mag_dim=256,
+            phase_dim=192,
+            out_dim=256,
+        )
+
+        batch, time = 2, 50
+        time_feat = mx.random.normal(shape=(batch, time, 128))
+        mag_feat = mx.random.normal(shape=(batch, time, 256))
+        phase_feat = mx.random.normal(shape=(batch, time, 192))
+
+        fused = attn(time_feat, mag_feat, phase_feat)
+        mx.eval(fused)
+
+        assert fused.shape == (batch, time, 256)
+
+
+class TestHybridEncoder:
+    """Tests for HybridEncoder."""
+
+    def test_hybrid_encoder_init(self):
+        """Test HybridEncoder initialization."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import HybridEncoder
+
+        params = ModelParams4()
+        encoder = HybridEncoder(params)
+
+        assert encoder.use_time_branch is True
+        assert encoder.use_phase_branch is True
+
+    def test_hybrid_encoder_forward(self):
+        """Test HybridEncoder forward pass."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import HybridEncoder
+
+        params = ModelParams4()
+        encoder = HybridEncoder(params)
+
+        batch, time = 2, 50
+        feat_erb = mx.random.normal(shape=(batch, time, params.nb_erb))
+        feat_spec = mx.random.normal(shape=(batch, time, params.nb_df, 2))
+
+        emb, lsnr = encoder(feat_erb, feat_spec)
+        mx.eval(emb, lsnr)
+
+        assert emb.shape == (batch, time, params.emb_hidden_dim)
+        assert lsnr.shape == (batch, time, 1)
+
+    def test_hybrid_encoder_with_waveform(self):
+        """Test HybridEncoder with waveform input."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import HybridEncoder
+
+        params = ModelParams4()
+        encoder = HybridEncoder(params)
+
+        batch, time = 2, 50
+        feat_erb = mx.random.normal(shape=(batch, time, params.nb_erb))
+        feat_spec = mx.random.normal(shape=(batch, time, params.nb_df, 2))
+        waveform = mx.random.normal(shape=(batch, 48000))
+
+        emb, lsnr = encoder(feat_erb, feat_spec, waveform)
+        mx.eval(emb, lsnr)
+
+        assert emb.shape[0] == batch
+
+    def test_hybrid_encoder_no_time_branch(self):
+        """Test HybridEncoder without time branch."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import HybridEncoder
+
+        params = ModelParams4()
+        encoder = HybridEncoder(params, use_time_branch=False)
+
+        batch, time = 2, 50
+        feat_erb = mx.random.normal(shape=(batch, time, params.nb_erb))
+        feat_spec = mx.random.normal(shape=(batch, time, params.nb_df, 2))
+
+        emb, lsnr = encoder(feat_erb, feat_spec)
+        mx.eval(emb, lsnr)
+
+        assert emb.shape == (batch, time, params.emb_hidden_dim)
+
+    def test_hybrid_encoder_no_phase_branch(self):
+        """Test HybridEncoder without phase branch."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import HybridEncoder
+
+        params = ModelParams4()
+        encoder = HybridEncoder(params, use_phase_branch=False)
+
+        batch, time = 2, 50
+        feat_erb = mx.random.normal(shape=(batch, time, params.nb_erb))
+        feat_spec = mx.random.normal(shape=(batch, time, params.nb_df, 2))
+
+        emb, lsnr = encoder(feat_erb, feat_spec)
+        mx.eval(emb, lsnr)
+
+        assert emb.shape == (batch, time, params.emb_hidden_dim)
+
+    def test_hybrid_encoder_lsnr_range(self):
+        """Test HybridEncoder LSNR output range."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import HybridEncoder
+
+        params = ModelParams4()
+        encoder = HybridEncoder(params)
+
+        feat_erb = mx.random.normal(shape=(2, 50, params.nb_erb))
+        feat_spec = mx.random.normal(shape=(2, 50, params.nb_df, 2))
+
+        _, lsnr = encoder(feat_erb, feat_spec)
+        mx.eval(lsnr)
+
+        lsnr_min = params.lsnr.lsnr_min
+        lsnr_max = params.lsnr.lsnr_max
+        assert mx.all(lsnr >= lsnr_min - 1).item()
+        assert mx.all(lsnr <= lsnr_max + 1).item()
+
+    def test_hybrid_encoder_gradient_flow(self):
+        """Test gradient flow through HybridEncoder."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import HybridEncoder
+
+        params = ModelParams4()
+        encoder = HybridEncoder(params, use_time_branch=False)
+
+        feat_erb = mx.random.normal(shape=(2, 20, params.nb_erb))
+        feat_spec = mx.random.normal(shape=(2, 20, params.nb_df, 2))
+
+        def loss_fn(model):
+            emb, lsnr = model(feat_erb, feat_spec)
+            return mx.mean(emb) + mx.mean(lsnr)
+
+        loss, grads = nn.value_and_grad(encoder, loss_fn)(encoder)
+        mx.eval(loss)
+
+        assert not mx.isnan(loss)
+
+
+# ============================================================================
 # Run Tests
 # ============================================================================
 

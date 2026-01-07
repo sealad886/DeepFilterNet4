@@ -395,6 +395,413 @@ class AdaptiveOrderPredictor(nn.Module):
 
 
 # ============================================================================
+# Hybrid Encoder Components
+# ============================================================================
+
+
+class WaveformEncoder(nn.Module):
+    """Time-domain waveform encoder.
+
+    Processes raw audio waveform with strided convolutions to extract
+    time-domain features aligned with STFT frames.
+
+    Args:
+        in_channels: Input channels (1 for mono)
+        base_channels: Base channel count (doubled each layer)
+        num_layers: Number of conv layers
+        out_dim: Output feature dimension
+    """
+
+    def __init__(
+        self,
+        in_channels: int = 1,
+        base_channels: int = 32,
+        num_layers: int = 4,
+        out_dim: int = 256,
+    ):
+        super().__init__()
+
+        self.in_channels = in_channels
+        self.out_dim = out_dim
+        self.num_layers = num_layers
+
+        # Strided conv layers with channel growth
+        # Default strides: [4, 2, 2, 2] -> total_stride = 32
+        strides = [4, 2, 2, 2][:num_layers]
+        kernel_sizes = [7, 5, 5, 3][:num_layers]
+
+        self.conv_layers = []
+        self.norms = []
+        ch = in_channels
+        for i in range(num_layers):
+            out_ch = base_channels * (2**i)
+            self.conv_layers.append(
+                nn.Conv1d(ch, out_ch, kernel_sizes[i], stride=strides[i], padding=kernel_sizes[i] // 2)
+            )
+            self.norms.append(nn.BatchNorm(out_ch))
+            ch = out_ch
+
+        self.final_ch = ch
+        self.proj = nn.Linear(ch, out_dim)
+
+        # Total stride for alignment calculation
+        self.total_stride = 1
+        for s in strides:
+            self.total_stride *= s
+
+    def __call__(self, waveform: mx.array) -> mx.array:
+        """Encode waveform to features.
+
+        Args:
+            waveform: (batch, samples) or (batch, channels, samples)
+
+        Returns:
+            features: (batch, time_frames, out_dim)
+        """
+        # Handle input formats
+        if waveform.ndim == 2:
+            # (batch, samples) -> (batch, samples, 1)
+            x = mx.expand_dims(waveform, axis=-1)
+        elif waveform.ndim == 3 and waveform.shape[1] == 1:
+            # (batch, 1, samples) -> (batch, samples, 1) - PyTorch format
+            x = mx.transpose(waveform, axes=(0, 2, 1))
+        else:
+            # Assume already (batch, samples, channels)
+            x = waveform
+
+        # MLX Conv1d expects (batch, length, channels) format
+        for conv, norm in zip(self.conv_layers, self.norms):
+            x = conv(x)
+            x = norm(x)
+            x = nn.gelu(x)
+
+        # x is now (batch, time, channels), project to out_dim
+        return self.proj(x)
+
+
+class PhaseEncoder(nn.Module):
+    """Phase spectrum encoder.
+
+    Processes phase information using cos/sin representation.
+
+    Args:
+        n_freqs: Number of frequency bins
+        conv_ch: Convolutional channels
+        out_dim: Output feature dimension
+        num_layers: Number of conv layers
+    """
+
+    def __init__(
+        self,
+        n_freqs: int,
+        conv_ch: int = 32,
+        out_dim: int = 256,
+        num_layers: int = 3,
+    ):
+        super().__init__()
+        self.n_freqs = n_freqs
+        self.out_dim = out_dim
+
+        # Phase has 2 channels: cos(phase), sin(phase)
+        self.conv_layers = []
+        current_ch = 2  # cos/sin channels
+
+        for i in range(num_layers):
+            out_ch = conv_ch * min(2**i, 4)  # Cap channel growth
+            fstride = 2 if i < num_layers - 1 else 1  # Downsample frequency
+            self.conv_layers.append(
+                Conv2dNormAct(
+                    current_ch,
+                    out_ch,
+                    kernel_size=(1, 3),
+                    stride=(1, fstride),
+                    padding=(0, 1),
+                    norm="batch",
+                    activation="gelu",
+                )
+            )
+            current_ch = out_ch
+
+        self.final_ch = current_ch
+        # Calculate final frequency dimension after downsampling
+        self.final_freqs = n_freqs
+        for i in range(num_layers - 1):
+            self.final_freqs = (self.final_freqs + 1) // 2
+
+        self.out_proj = nn.Linear(current_ch * self.final_freqs, out_dim)
+
+    def __call__(self, phase: mx.array) -> mx.array:
+        """Encode phase to features.
+
+        Args:
+            phase: Phase angle (batch, time, freq) or complex spec (batch, time, freq, 2)
+
+        Returns:
+            features: (batch, time, out_dim)
+        """
+        # Handle different input formats
+        if phase.ndim == 4:
+            # Complex format (batch, time, freq, 2)
+            phase_angle = mx.arctan2(phase[..., 1], phase[..., 0])
+        else:
+            phase_angle = phase  # Already angle
+
+        # Convert to cos/sin representation: (batch, time, freq, 2)
+        phase_repr = mx.stack([mx.cos(phase_angle), mx.sin(phase_angle)], axis=-1)
+
+        # Apply conv layers (expecting NHWC format)
+        x = phase_repr  # (batch, time, freq, 2)
+        for conv in self.conv_layers:
+            x = conv(x)
+
+        # Flatten spatial dims: (batch, time, final_ch * final_freqs)
+        batch, time = x.shape[:2]
+        x = x.reshape(batch, time, -1)
+
+        return self.out_proj(x)
+
+
+class CrossDomainAttention(nn.Module):
+    """Cross-domain attention for feature fusion.
+
+    Fuses features from different domains (time, magnitude, phase) using
+    cross-attention and gating mechanisms.
+
+    Args:
+        time_dim: Time-domain feature dimension
+        mag_dim: Magnitude feature dimension
+        phase_dim: Phase feature dimension
+        out_dim: Output fused dimension
+        num_heads: Number of attention heads
+        dropout: Dropout rate
+    """
+
+    def __init__(
+        self,
+        time_dim: int,
+        mag_dim: int,
+        phase_dim: int,
+        out_dim: int,
+        num_heads: int = 8,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.out_dim = out_dim
+
+        # Project all domains to same dimension
+        self.time_proj = nn.Linear(time_dim, out_dim)
+        self.mag_proj = nn.Linear(mag_dim, out_dim)
+        self.phase_proj = nn.Linear(phase_dim, out_dim)
+
+        # Cross-attention using multi-head attention
+        self.head_dim = out_dim // num_heads
+        self.num_heads = num_heads
+        self.scale = self.head_dim**-0.5
+
+        # Attention projections for time-mag cross-attention
+        self.tm_q = nn.Linear(out_dim, out_dim)
+        self.tm_k = nn.Linear(out_dim, out_dim)
+        self.tm_v = nn.Linear(out_dim, out_dim)
+
+        # Attention projections for mag-phase cross-attention
+        self.mp_q = nn.Linear(out_dim, out_dim)
+        self.mp_k = nn.Linear(out_dim, out_dim)
+        self.mp_v = nn.Linear(out_dim, out_dim)
+
+        # Layer norms
+        self.norm_tm = nn.LayerNorm(out_dim)
+        self.norm_mp = nn.LayerNorm(out_dim)
+        self.norm_out = nn.LayerNorm(out_dim)
+
+        # Final fusion MLP
+        self.fusion = nn.Sequential(
+            nn.Linear(out_dim * 3, out_dim * 2),
+            nn.GELU(),
+            nn.Linear(out_dim * 2, out_dim),
+        )
+
+        self.dropout_rate = dropout
+
+    def _cross_attention(
+        self,
+        query: mx.array,
+        key: mx.array,
+        value: mx.array,
+        q_proj: nn.Linear,
+        k_proj: nn.Linear,
+        v_proj: nn.Linear,
+    ) -> mx.array:
+        """Compute cross-attention."""
+        batch, seq_len, _ = query.shape
+
+        q = q_proj(query).reshape(batch, seq_len, self.num_heads, self.head_dim)
+        k = k_proj(key).reshape(batch, seq_len, self.num_heads, self.head_dim)
+        v = v_proj(value).reshape(batch, seq_len, self.num_heads, self.head_dim)
+
+        # Transpose for attention: (batch, heads, seq, head_dim)
+        q = mx.transpose(q, axes=(0, 2, 1, 3))
+        k = mx.transpose(k, axes=(0, 2, 1, 3))
+        v = mx.transpose(v, axes=(0, 2, 1, 3))
+
+        # Scaled dot-product attention
+        scores = mx.matmul(q, mx.transpose(k, axes=(0, 1, 3, 2))) * self.scale
+        attn = mx.softmax(scores, axis=-1)
+        out = mx.matmul(attn, v)
+
+        # Transpose back: (batch, seq, heads, head_dim) -> (batch, seq, out_dim)
+        out = mx.transpose(out, axes=(0, 2, 1, 3)).reshape(batch, seq_len, -1)
+        return out
+
+    def __call__(
+        self,
+        time_feat: mx.array,
+        mag_feat: mx.array,
+        phase_feat: mx.array,
+    ) -> mx.array:
+        """Fuse features from multiple domains.
+
+        Args:
+            time_feat: Time-domain features (batch, time, time_dim)
+            mag_feat: Magnitude features (batch, time, mag_dim)
+            phase_feat: Phase features (batch, time, phase_dim)
+
+        Returns:
+            fused: Fused features (batch, time, out_dim)
+        """
+        # Project to common dimension
+        time_proj = self.time_proj(time_feat)
+        mag_proj = self.mag_proj(mag_feat)
+        phase_proj = self.phase_proj(phase_feat)
+
+        # Time-magnitude cross-attention (time attends to magnitude)
+        tm_attn = self._cross_attention(time_proj, mag_proj, mag_proj, self.tm_q, self.tm_k, self.tm_v)
+        tm_attn = self.norm_tm(time_proj + tm_attn)
+
+        # Magnitude-phase cross-attention (magnitude attends to phase)
+        mp_attn = self._cross_attention(mag_proj, phase_proj, phase_proj, self.mp_q, self.mp_k, self.mp_v)
+        mp_attn = self.norm_mp(mag_proj + mp_attn)
+
+        # Concatenate and fuse
+        combined = mx.concatenate([tm_attn, mp_attn, phase_proj], axis=-1)
+        fused = self.fusion(combined)
+        return self.norm_out(fused)
+
+
+class HybridEncoder(nn.Module):
+    """Hybrid time-frequency encoder for DFNet4.
+
+    Parallel processing of time-domain, magnitude, and phase information
+    with cross-domain attention fusion and Mamba sequence modeling.
+
+    Args:
+        p: Model parameters
+        use_time_branch: Whether to use time-domain branch
+        use_phase_branch: Whether to use phase branch
+    """
+
+    def __init__(
+        self,
+        p: ModelParams4,
+        use_time_branch: bool = True,
+        use_phase_branch: bool = True,
+    ):
+        super().__init__()
+        self.p = p
+        self.use_time_branch = use_time_branch
+        self.use_phase_branch = use_phase_branch
+
+        emb_hidden_dim = p.emb_hidden_dim
+
+        # Magnitude encoder (standard Encoder4 pathway)
+        self.magnitude_encoder = Encoder4(p)
+        mag_emb_dim = emb_hidden_dim
+
+        # Time-domain encoder (optional)
+        if use_time_branch:
+            self.time_encoder = WaveformEncoder(out_dim=emb_hidden_dim)
+        else:
+            self.time_encoder = None
+
+        # Phase encoder (optional)
+        if use_phase_branch:
+            self.phase_encoder = PhaseEncoder(n_freqs=p.nb_df, out_dim=emb_hidden_dim)
+        else:
+            self.phase_encoder = None
+
+        # Cross-domain fusion
+        time_dim = emb_hidden_dim if use_time_branch else mag_emb_dim
+        phase_dim = emb_hidden_dim if use_phase_branch else mag_emb_dim
+
+        self.fusion = CrossDomainAttention(
+            time_dim=time_dim,
+            mag_dim=mag_emb_dim,
+            phase_dim=phase_dim,
+            out_dim=emb_hidden_dim,
+        )
+
+        # Sequence modeling with Mamba
+        self.seq_layers = [SqueezedMamba(emb_hidden_dim, emb_hidden_dim, emb_hidden_dim) for _ in range(2)]
+
+        # LSNR estimation
+        lsnr_min = p.lsnr.lsnr_min if hasattr(p, "lsnr") else -15.0
+        lsnr_max = p.lsnr.lsnr_max if hasattr(p, "lsnr") else 40.0
+        self.lsnr_scale = (lsnr_max - lsnr_min) / 2
+        self.lsnr_offset = lsnr_min + self.lsnr_scale
+        self.lsnr_fc = nn.Linear(emb_hidden_dim, 1)
+
+    def __call__(
+        self,
+        feat_erb: mx.array,
+        feat_spec: mx.array,
+        waveform: Optional[mx.array] = None,
+    ) -> Tuple[mx.array, mx.array]:
+        """Encode features from multiple domains.
+
+        Args:
+            feat_erb: ERB features (batch, time, erb_bands)
+            feat_spec: Complex spectrogram (batch, time, df_bins, 2)
+            waveform: Raw audio (batch, samples) - optional
+
+        Returns:
+            emb: Final embedding (batch, time, emb_hidden_dim)
+            lsnr: Local SNR estimate (batch, time, 1)
+        """
+        # Magnitude pathway
+        mag_emb, _ = self.magnitude_encoder(feat_erb, feat_spec)
+
+        # Time-domain features
+        if self.time_encoder is not None and waveform is not None:
+            time_feat = self.time_encoder(waveform)
+            # Align time dimension with mag_emb if needed
+            if time_feat.shape[1] != mag_emb.shape[1]:
+                # Simple linear interpolation
+                batch, target_len, dim = mag_emb.shape
+                source_len = time_feat.shape[1]
+                indices = mx.linspace(0, source_len - 1, target_len).astype(mx.int32)
+                time_feat = time_feat[:, indices, :]
+        else:
+            time_feat = mag_emb  # Fallback to mag features
+
+        # Phase features
+        if self.phase_encoder is not None:
+            phase_feat = self.phase_encoder(feat_spec)
+        else:
+            phase_feat = mag_emb  # Fallback to mag features
+
+        # Cross-domain fusion
+        emb = self.fusion(time_feat, mag_emb, phase_feat)
+
+        # Sequence modeling
+        for layer in self.seq_layers:
+            emb, _ = layer(emb)
+
+        # LSNR estimation
+        lsnr = mx.tanh(self.lsnr_fc(emb)) * self.lsnr_scale + self.lsnr_offset
+
+        return emb, lsnr
+
+
+# ============================================================================
 # Main Model
 # ============================================================================
 

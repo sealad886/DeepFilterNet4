@@ -90,6 +90,10 @@ for batch in dataloader:
 | MultiResDfDecoder | ✅ Complete | Multi-resolution DF with shared Mamba backbone |
 | AdaptiveOrderPredictor | ✅ Complete | Predicts optimal filter order per frame |
 | LSNR loss | ✅ Complete | L1 loss for LSNR prediction |
+| WaveformEncoder | ✅ Complete | Time-domain waveform encoder with strided conv layers |
+| PhaseEncoder | ✅ Complete | Phase spectrum encoder using cos/sin representation |
+| CrossDomainAttention | ✅ Complete | Multi-head cross-attention for time-mag and mag-phase fusion |
+| HybridEncoder | ✅ Complete | Full multi-domain encoder with Mamba backbone |
 
 ### ⚠️ Partially Implemented
 
@@ -104,7 +108,6 @@ These features exist in the PyTorch `deepfilternet4.py` but are not in the MLX i
 
 | Feature | PyTorch Location | Description |
 |---------|-----------------|-------------|
-| HybridEncoder | Lines 1100-1200 | Separate time/phase processing branches |
 | Lookahead configurations | Model variants | Different lookahead settings for real-time variants |
 | Complex gain output | DfDecoder variants | Alternative to coefficient-based filtering |
 | Model statistics tracking | Training | Running mean/variance tracking for normalization |
@@ -113,9 +116,8 @@ These features exist in the PyTorch `deepfilternet4.py` but are not in the MLX i
 
 For most use cases (inference with pretrained models), the current implementation provides full feature coverage. The missing features are primarily:
 
-1. **Alternative architectures** (HybridEncoder) - for research/experimentation
-2. **Real-time variants** - for streaming applications with specific lookahead requirements
-3. **Alternative outputs** (Complex gain) - for different filtering strategies
+1. **Real-time variants** - for streaming applications with specific lookahead requirements
+2. **Alternative outputs** (Complex gain) - for different filtering strategies
 
 ## Testing
 
@@ -126,7 +128,7 @@ cd DeepFilterNet
 python -m pytest df_mlx/test_mlx_comprehensive.py -v
 ```
 
-This includes 122 tests covering:
+This includes 144 tests covering:
 - STFT/iSTFT operations (15 tests)
 - ERB filterbank (7 tests)
 - Complex operations (4 tests)
@@ -144,6 +146,10 @@ This includes 122 tests covering:
 - Multi-resolution decoder (7 tests)
 - Adaptive order predictor (12 tests)
 - LSNR config (3 tests)
+- WaveformEncoder (6 tests)
+- PhaseEncoder (6 tests)
+- CrossDomainAttention (3 tests)
+- HybridEncoder (7 tests)
 
 ## Known Limitations
 
