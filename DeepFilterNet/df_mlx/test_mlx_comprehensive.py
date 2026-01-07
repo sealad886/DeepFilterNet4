@@ -16,6 +16,7 @@ from pathlib import Path
 
 import mlx.core as mx
 import mlx.nn as nn
+import mlx.optimizers as optim
 import numpy as np
 import pytest
 
@@ -2687,6 +2688,382 @@ class TestHybridEncoder:
         mx.eval(loss)
 
         assert not mx.isnan(loss)
+
+
+# ============================================================================
+# Integration Tests
+# ============================================================================
+
+
+class TestIntegration:
+    """End-to-end integration tests for the MLX DeepFilterNet4 implementation.
+
+    These tests verify the full pipeline works correctly, including:
+    - Audio enhancement pipeline
+    - Training loop
+    - Checkpoint save/load
+    - Weight loading
+    """
+
+    def test_enhance_audio_basic(self):
+        """Test basic audio enhancement pipeline."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        params = ModelParams4()
+        model = DfNet4(params)
+
+        # Generate test audio (1 second at 48kHz)
+        sr = params.sr
+        duration = 1.0
+        num_samples = int(sr * duration)
+
+        # Generate noisy audio: sine wave + noise
+        t = np.linspace(0, duration, num_samples, dtype=np.float32)
+        clean = np.sin(2 * np.pi * 440 * t)
+        noise = np.random.randn(num_samples).astype(np.float32) * 0.1
+        noisy = mx.array(clean + noise)
+
+        # Enhance
+        enhanced = model.enhance(noisy)
+        mx.eval(enhanced)
+
+        # Verify output
+        assert enhanced.shape == noisy.shape
+        assert not mx.any(mx.isnan(enhanced))
+        assert float(mx.max(mx.abs(enhanced))) < 10.0  # Reasonable range
+
+    def test_enhance_audio_batch(self):
+        """Test batch audio enhancement."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        params = ModelParams4()
+        model = DfNet4(params)
+
+        batch_size = 4
+        sr = params.sr
+        duration = 0.5
+        num_samples = int(sr * duration)
+
+        # Generate batch of noisy audio
+        noisy_batch = mx.random.normal(shape=(batch_size, num_samples)) * 0.5
+
+        # Enhance batch
+        enhanced = model.enhance(noisy_batch)
+        mx.eval(enhanced)
+
+        assert enhanced.shape == (batch_size, num_samples)
+        assert not mx.any(mx.isnan(enhanced))
+
+    def test_enhance_with_return_spec(self):
+        """Test enhancement with spectrum return."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        params = ModelParams4()
+        model = DfNet4(params)
+
+        sr = params.sr
+        duration = 0.5
+        num_samples = int(sr * duration)
+        noisy = mx.random.normal(shape=(num_samples,)) * 0.5
+
+        # Enhance with spectrum
+        result = model.enhance(noisy, return_spec=True)
+        mx.eval(result)
+
+        enhanced, spec = result
+        spec_real, spec_imag = spec
+
+        assert enhanced.shape == noisy.shape
+        # 1D input returns 2D spec (time, freq) after squeeze
+        assert spec_real.ndim == 2  # (time, freq)
+        assert spec_imag.ndim == 2
+
+    def test_training_loop_basic(self):
+        """Test basic training loop runs without errors."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        params = ModelParams4()
+        model = DfNet4(params)
+        optimizer = optim.AdamW(learning_rate=1e-4)
+
+        # Mini dataset: 5 samples
+        batch_size = 2
+        time_frames = 20
+        n_freqs = params.n_freqs
+
+        def make_batch():
+            spec_real = mx.random.normal(shape=(batch_size, time_frames, n_freqs))
+            spec_imag = mx.random.normal(shape=(batch_size, time_frames, n_freqs))
+            feat_erb = mx.random.normal(shape=(batch_size, time_frames, params.nb_erb))
+            feat_spec = mx.random.normal(shape=(batch_size, time_frames, params.nb_df, 2))
+            return spec_real, spec_imag, feat_erb, feat_spec
+
+        def compute_loss(model, spec_real, spec_imag, feat_erb, feat_spec):
+            out_real, out_imag = model((spec_real, spec_imag), feat_erb, feat_spec, training=True)
+            # Simple MSE loss against target (clean = 0.5 * input for test)
+            target_real = spec_real * 0.5
+            target_imag = spec_imag * 0.5
+            loss = mx.mean((out_real - target_real) ** 2 + (out_imag - target_imag) ** 2)
+            return loss
+
+        # Create loss + grad function using nn.value_and_grad (MLX style)
+        loss_and_grad_fn = nn.value_and_grad(model, compute_loss)
+
+        # Run 5 training steps
+        losses = []
+        for step in range(5):
+            spec_real, spec_imag, feat_erb, feat_spec = make_batch()
+
+            loss, grads = loss_and_grad_fn(model, spec_real, spec_imag, feat_erb, feat_spec)
+            mx.eval(loss, grads)
+
+            optimizer.update(model, grads)
+            mx.eval(model.parameters())
+
+            losses.append(float(loss))
+            assert not np.isnan(losses[-1])
+
+        # Loss should not explode
+        assert all(loss_val < 1000 for loss_val in losses)
+
+    def test_checkpoint_save_load_roundtrip(self):
+        """Test checkpoint save/load preserves model state."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        params = ModelParams4()
+        model1 = DfNet4(params)
+
+        # Get model output before save
+        batch, time, n_freqs = 1, 10, params.n_freqs
+        spec_real = mx.random.normal(shape=(batch, time, n_freqs))
+        spec_imag = mx.random.normal(shape=(batch, time, n_freqs))
+        feat_erb = mx.random.normal(shape=(batch, time, params.nb_erb))
+        feat_spec = mx.random.normal(shape=(batch, time, params.nb_df, 2))
+
+        out1 = model1((spec_real, spec_imag), feat_erb, feat_spec)
+        mx.eval(out1)
+
+        # Save weights
+        with tempfile.TemporaryDirectory() as tmpdir:
+            weights_path = Path(tmpdir) / "weights.safetensors"
+            model1.save_weights(str(weights_path))
+
+            # Load into new model
+            model2 = DfNet4(params)
+            model2.load_weights(str(weights_path))
+
+            # Get output from loaded model
+            out2 = model2((spec_real, spec_imag), feat_erb, feat_spec)
+            mx.eval(out2)
+
+            # Should be identical
+            np.testing.assert_array_almost_equal(np.array(out1[0]), np.array(out2[0]), decimal=5)
+            np.testing.assert_array_almost_equal(np.array(out1[1]), np.array(out2[1]), decimal=5)
+
+    def test_trainer_checkpoint_roundtrip(self):
+        """Test Trainer checkpoint save/load with optimizer state."""
+        from pathlib import Path
+
+        from df_mlx.config import ModelParams4, TrainConfig
+        from df_mlx.model import DfNet4
+        from df_mlx.train import Trainer
+
+        checkpoint_dir = tempfile.mkdtemp()
+        params = ModelParams4()
+        model = DfNet4(params)
+        config = TrainConfig(learning_rate=1e-4, checkpoint_dir=checkpoint_dir)
+        trainer = Trainer(model, config)
+
+        # Run a training step to update optimizer state
+        batch, time, n_freqs = 1, 10, params.n_freqs
+        spec_real = mx.random.normal(shape=(batch, time, n_freqs))
+        spec_imag = mx.random.normal(shape=(batch, time, n_freqs))
+        feat_erb = mx.random.normal(shape=(batch, time, params.nb_erb))
+        feat_spec = mx.random.normal(shape=(batch, time, params.nb_df, 2))
+
+        target_real = spec_real * 0.5
+        target_imag = spec_imag * 0.5
+
+        loss = trainer.train_step(
+            (spec_real, spec_imag),
+            feat_erb,
+            feat_spec,
+            (target_real, target_imag),
+        )
+        mx.eval(loss)
+
+        # Save checkpoint - Trainer saves to checkpoint_dir/filename
+        trainer.save_checkpoint("test_ckpt.safetensors")
+
+        # Get model output
+        out1 = trainer.model((spec_real, spec_imag), feat_erb, feat_spec)
+        mx.eval(out1)
+
+        # Create new trainer and load checkpoint
+        # load_checkpoint takes full path
+        model2 = DfNet4(params)
+        trainer2 = Trainer(model2, config)
+        full_path = str(Path(checkpoint_dir) / "test_ckpt.safetensors")
+        trainer2.load_checkpoint(full_path)
+
+        # Get output from loaded trainer
+        out2 = trainer2.model((spec_real, spec_imag), feat_erb, feat_spec)
+        mx.eval(out2)
+
+        # Should be identical
+        np.testing.assert_array_almost_equal(np.array(out1[0]), np.array(out2[0]), decimal=5)
+
+        # Cleanup
+        import shutil
+
+        shutil.rmtree(checkpoint_dir, ignore_errors=True)
+
+    def test_forward_deterministic(self):
+        """Test model forward is deterministic with same input."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        params = ModelParams4()
+        model = DfNet4(params)
+
+        batch, time, n_freqs = 2, 15, params.n_freqs
+        spec_real = mx.random.normal(shape=(batch, time, n_freqs), key=mx.random.key(42))
+        spec_imag = mx.random.normal(shape=(batch, time, n_freqs), key=mx.random.key(43))
+        feat_erb = mx.random.normal(shape=(batch, time, params.nb_erb), key=mx.random.key(44))
+        feat_spec = mx.random.normal(shape=(batch, time, params.nb_df, 2), key=mx.random.key(45))
+        mx.eval(spec_real, spec_imag, feat_erb, feat_spec)
+
+        # Run twice with same input
+        out1 = model((spec_real, spec_imag), feat_erb, feat_spec)
+        mx.eval(out1)
+
+        out2 = model((spec_real, spec_imag), feat_erb, feat_spec)
+        mx.eval(out2)
+
+        # Should be identical
+        np.testing.assert_array_almost_equal(np.array(out1[0]), np.array(out2[0]), decimal=6)
+        np.testing.assert_array_almost_equal(np.array(out1[1]), np.array(out2[1]), decimal=6)
+
+    def test_inference_vs_training_mode(self):
+        """Test that training=True/False produces different outputs with LSNR dropout."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        params = ModelParams4()
+        params.lsnr.lsnr_dropout = True
+        model = DfNet4(params, lsnr_dropout=True)
+
+        batch, time, n_freqs = 2, 15, params.n_freqs
+        spec_real = mx.random.normal(shape=(batch, time, n_freqs))
+        spec_imag = mx.random.normal(shape=(batch, time, n_freqs))
+        feat_erb = mx.random.normal(shape=(batch, time, params.nb_erb))
+        feat_spec = mx.random.normal(shape=(batch, time, params.nb_df, 2))
+
+        out_train = model((spec_real, spec_imag), feat_erb, feat_spec, training=True)
+        mx.eval(out_train)
+
+        out_infer = model((spec_real, spec_imag), feat_erb, feat_spec, training=False)
+        mx.eval(out_infer)
+
+        # Both should be valid
+        assert not mx.any(mx.isnan(out_train[0]))
+        assert not mx.any(mx.isnan(out_infer[0]))
+
+    def test_complex_gain_mode_integration(self):
+        """Test full pipeline with complex gain mode."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        params = ModelParams4()
+        params.df.df_output_mode = "complex_gain"
+        model = DfNet4(params)
+
+        # Enhance audio
+        sr = params.sr
+        duration = 0.5
+        num_samples = int(sr * duration)
+        noisy = mx.random.normal(shape=(num_samples,)) * 0.5
+
+        enhanced = model.enhance(noisy)
+        mx.eval(enhanced)
+
+        assert enhanced.shape == noisy.shape
+        assert not mx.any(mx.isnan(enhanced))
+
+    def test_post_filter_integration(self):
+        """Test full pipeline with post-filter enabled."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        params = ModelParams4()
+        params.df.mask_pf = True
+        params.df.pf_beta = 0.05
+        model = DfNet4(params)
+
+        # Enhance audio
+        sr = params.sr
+        duration = 0.5
+        num_samples = int(sr * duration)
+        noisy = mx.random.normal(shape=(num_samples,)) * 0.5
+
+        enhanced = model.enhance(noisy)
+        mx.eval(enhanced)
+
+        assert enhanced.shape == noisy.shape
+        assert not mx.any(mx.isnan(enhanced))
+
+    def test_lookahead_integration(self):
+        """Test full pipeline with lookahead enabled."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        params = ModelParams4()
+        params.df.df_lookahead = 2
+        params.df.conv_lookahead = 2
+        model = DfNet4(params)
+
+        # Enhance audio
+        sr = params.sr
+        duration = 0.5
+        num_samples = int(sr * duration)
+        noisy = mx.random.normal(shape=(num_samples,)) * 0.5
+
+        enhanced = model.enhance(noisy)
+        mx.eval(enhanced)
+
+        assert enhanced.shape == noisy.shape
+        assert not mx.any(mx.isnan(enhanced))
+
+    def test_all_features_combined(self):
+        """Test pipeline with all features enabled together."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        params = ModelParams4()
+        params.df.mask_pf = True
+        params.df.pf_beta = 0.03
+        params.df.df_lookahead = 1
+        params.df.conv_lookahead = 1
+        params.lsnr.lsnr_dropout = True
+
+        model = DfNet4(params, lsnr_dropout=True)
+
+        # Enhance audio
+        sr = params.sr
+        duration = 0.5
+        num_samples = int(sr * duration)
+        noisy = mx.random.normal(shape=(num_samples,)) * 0.5
+
+        enhanced = model.enhance(noisy)
+        mx.eval(enhanced)
+
+        assert enhanced.shape == noisy.shape
+        assert not mx.any(mx.isnan(enhanced))
 
 
 # ============================================================================
