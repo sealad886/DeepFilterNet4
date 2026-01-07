@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, cast
 import h5py
 
 if TYPE_CHECKING:
-    from h5py import Group
+    from h5py import Group  # noqa: F401 (used by cast())
 
 
 def is_valid_key(key: str) -> bool:

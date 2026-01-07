@@ -14,4 +14,4 @@ path = "src/lib.rs"
 deep_filter = { features = ["transforms", "logging"], path = "../libDF" }
 pyo3 = { version = "0.21", features = ["extension-module"]}
 numpy = "0.21"
-ndarray = "0.15"
+ndarray = { workspace = true }

@@ -10,7 +10,7 @@ import numpy as np
 from icecream import ic
 
 if TYPE_CHECKING:
-    from h5py import Group
+    from h5py import Group  # noqa: F401 (used by cast())
 
 splits = (0.7, 0.15, 0.15)
 assert np.sum(splits) == 1

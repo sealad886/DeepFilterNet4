@@ -15,7 +15,7 @@ from df.utils import angle, as_complex, get_device
 from libdf import DF
 
 if TYPE_CHECKING:
-    from df.whisper_adapter import MLXWhisperBackend
+    from df.whisper_adapter import MLXWhisperBackend  # noqa: F401 (used by cast())
 
 
 def wg(S: Tensor, X: Tensor, eps: float = 1e-10) -> Tensor:
