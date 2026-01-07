@@ -28,6 +28,316 @@ from .config import LossConfig, TrainConfig
 from .model import DfNet4, count_parameters
 
 # ============================================================================
+# Running Statistics
+# ============================================================================
+
+
+class RunningStats(nn.Module):
+    """Track running mean and variance statistics.
+
+    Useful for input feature normalization, online statistics computation,
+    and monitoring training dynamics.
+
+    The statistics are updated using exponential moving average:
+        running_mean = momentum * running_mean + (1 - momentum) * batch_mean
+        running_var = momentum * running_var + (1 - momentum) * batch_var
+
+    Attributes:
+        num_features: Number of features to track
+        momentum: EMA momentum (higher = slower update)
+        eps: Small constant for numerical stability
+
+    Example:
+        >>> stats = RunningStats(num_features=256)
+        >>> for batch in data_loader:
+        ...     normalized = stats(batch, training=True)
+        >>> # During inference
+        >>> normalized = stats(data, training=False)
+    """
+
+    def __init__(
+        self,
+        num_features: int,
+        momentum: float = 0.1,
+        eps: float = 1e-5,
+    ):
+        super().__init__()
+        self.num_features = num_features
+        self.momentum = momentum
+        self.eps = eps
+
+        # Running statistics - initialized to 0 mean, 1 variance
+        self.running_mean = mx.zeros((num_features,))
+        self.running_var = mx.ones((num_features,))
+        self.num_batches_tracked = mx.array(0)
+
+    def update(self, x: mx.array) -> None:
+        """Update running statistics with a batch of data.
+
+        Args:
+            x: Input data (..., num_features)
+        """
+        # Compute batch statistics (reduce over all dims except last)
+        batch_mean = mx.mean(x, axis=tuple(range(x.ndim - 1)))
+        batch_var = mx.var(x, axis=tuple(range(x.ndim - 1)))
+
+        # Update running statistics with EMA
+        self.running_mean = (1 - self.momentum) * self.running_mean + self.momentum * batch_mean
+        self.running_var = (1 - self.momentum) * self.running_var + self.momentum * batch_var
+        self.num_batches_tracked = self.num_batches_tracked + 1
+
+    def normalize(
+        self,
+        x: mx.array,
+        use_running: bool = True,
+    ) -> mx.array:
+        """Normalize input using statistics.
+
+        Args:
+            x: Input data (..., num_features)
+            use_running: If True, use running stats; else compute from x
+
+        Returns:
+            Normalized data
+        """
+        if use_running:
+            mean = self.running_mean
+            var = self.running_var
+        else:
+            mean = mx.mean(x, axis=tuple(range(x.ndim - 1)), keepdims=True)
+            var = mx.var(x, axis=tuple(range(x.ndim - 1)), keepdims=True)
+            mean = mx.squeeze(mean)
+            var = mx.squeeze(var)
+
+        return (x - mean) / mx.sqrt(var + self.eps)
+
+    def __call__(
+        self,
+        x: mx.array,
+        training: bool = True,
+    ) -> mx.array:
+        """Update stats (if training) and normalize.
+
+        Args:
+            x: Input data (..., num_features)
+            training: If True, update running stats
+
+        Returns:
+            Normalized data
+        """
+        if training:
+            self.update(x)
+            # During training, use batch stats for normalization
+            return self.normalize(x, use_running=False)
+        else:
+            # During inference, use running stats
+            return self.normalize(x, use_running=True)
+
+
+class FeatureNormalizer(nn.Module):
+    """Per-sample feature normalizer with EMA smoothing.
+
+    Implements a causal normalizer similar to the libdf unit_norm function.
+    Uses exponential moving average to track feature magnitudes over time.
+
+    This is useful for normalizing input features where the statistics
+    need to adapt over time within each sample.
+
+    Args:
+        num_features: Number of features per time step
+        alpha: EMA smoothing factor (0 = no smoothing, 1 = full smoothing)
+        eps: Small constant for numerical stability
+    """
+
+    def __init__(
+        self,
+        num_features: int,
+        alpha: float = 0.9,
+        eps: float = 1e-10,
+    ):
+        super().__init__()
+        self.num_features = num_features
+        self.alpha = alpha
+        self.eps = eps
+
+        # Initial state for normalization
+        self._init_state = mx.ones((num_features,))
+
+    def __call__(
+        self,
+        x: mx.array,
+        state: Optional[mx.array] = None,
+    ) -> Tuple[mx.array, mx.array]:
+        """Normalize features with EMA smoothing.
+
+        Args:
+            x: Input features (batch, time, features) or (time, features)
+            state: Optional initial state (batch, features)
+
+        Returns:
+            Tuple of (normalized features, final state)
+        """
+        # Handle input dimensions
+        input_2d = x.ndim == 2
+        if input_2d:
+            x = mx.expand_dims(x, axis=0)
+
+        batch, time_steps, features = x.shape
+
+        # Initialize state
+        if state is None:
+            state = mx.broadcast_to(self._init_state, (batch, features))
+
+        # Compute magnitude per time step
+        x_mag = mx.sqrt(mx.sum(x**2, axis=-1, keepdims=True) + self.eps)
+
+        # Process time steps
+        outputs = []
+        for t in range(time_steps):
+            # EMA update: state = alpha * state + (1 - alpha) * x_mag
+            state = self.alpha * state + (1 - self.alpha) * x_mag[:, t, :]
+
+            # Normalize
+            norm_factor = mx.sqrt(state + self.eps)
+            normalized = x[:, t, :] / norm_factor
+            outputs.append(normalized)
+
+        output = mx.stack(outputs, axis=1)
+
+        if input_2d:
+            output = mx.squeeze(output, axis=0)
+            state = mx.squeeze(state, axis=0)
+
+        return output, state
+
+
+class ModelStatistics:
+    """Track model training statistics.
+
+    Monitors various metrics during training including:
+    - Loss history
+    - Gradient norms
+    - Parameter statistics
+    - Learning rate
+
+    Example:
+        >>> stats = ModelStatistics()
+        >>> for batch in data_loader:
+        ...     loss = train_step(batch)
+        ...     stats.update(loss=float(loss), lr=scheduler.get_lr())
+        >>> stats.summary()
+    """
+
+    def __init__(self):
+        self.history: Dict[str, list] = {
+            "loss": [],
+            "grad_norm": [],
+            "lr": [],
+            "step_time": [],
+        }
+        self.step_count = 0
+
+    def update(
+        self,
+        loss: Optional[float] = None,
+        grad_norm: Optional[float] = None,
+        lr: Optional[float] = None,
+        step_time: Optional[float] = None,
+        **kwargs: Any,
+    ) -> None:
+        """Update statistics with current step values.
+
+        Args:
+            loss: Training loss
+            grad_norm: Gradient L2 norm
+            lr: Current learning rate
+            step_time: Time for this step (seconds)
+            **kwargs: Additional metrics to track
+        """
+        if loss is not None:
+            self.history["loss"].append(loss)
+        if grad_norm is not None:
+            self.history["grad_norm"].append(grad_norm)
+        if lr is not None:
+            self.history["lr"].append(lr)
+        if step_time is not None:
+            self.history["step_time"].append(step_time)
+
+        for key, value in kwargs.items():
+            if key not in self.history:
+                self.history[key] = []
+            self.history[key].append(value)
+
+        self.step_count += 1
+
+    def get_recent(self, key: str, n: int = 100) -> list:
+        """Get recent values for a metric.
+
+        Args:
+            key: Metric name
+            n: Number of recent values
+
+        Returns:
+            List of recent values
+        """
+        return self.history.get(key, [])[-n:]
+
+    def get_mean(self, key: str, n: int = 100) -> float:
+        """Get mean of recent values.
+
+        Args:
+            key: Metric name
+            n: Number of recent values to average
+
+        Returns:
+            Mean value
+        """
+        values = self.get_recent(key, n)
+        return sum(values) / max(len(values), 1)
+
+    def summary(self) -> Dict[str, float]:
+        """Get summary statistics.
+
+        Returns:
+            Dictionary of summary metrics
+        """
+        return {
+            "steps": self.step_count,
+            "loss_mean": self.get_mean("loss"),
+            "loss_std": float(np.std(self.get_recent("loss"))) if self.history["loss"] else 0.0,
+            "grad_norm_mean": self.get_mean("grad_norm"),
+            "step_time_mean": self.get_mean("step_time"),
+        }
+
+    def save(self, path: str) -> None:
+        """Save statistics to JSON file.
+
+        Args:
+            path: Output file path
+        """
+        with open(path, "w") as f:
+            json.dump(
+                {
+                    "history": self.history,
+                    "step_count": self.step_count,
+                },
+                f,
+                indent=2,
+            )
+
+    def load(self, path: str) -> None:
+        """Load statistics from JSON file.
+
+        Args:
+            path: Input file path
+        """
+        with open(path) as f:
+            data = json.load(f)
+        self.history = data.get("history", {})
+        self.step_count = data.get("step_count", 0)
+
+
+# ============================================================================
 # Loss Functions
 # ============================================================================
 

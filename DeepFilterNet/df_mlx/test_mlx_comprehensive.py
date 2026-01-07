@@ -942,6 +942,281 @@ class TestTraining:
 
 
 # ============================================================================
+# Test: Running Statistics
+# ============================================================================
+
+
+class TestRunningStats:
+    """Tests for running statistics tracking."""
+
+    def test_running_stats_init(self):
+        """Test RunningStats initialization."""
+        from df_mlx.train import RunningStats
+
+        stats = RunningStats(num_features=256)
+
+        assert stats.running_mean.shape == (256,)
+        assert stats.running_var.shape == (256,)
+        assert mx.all(stats.running_mean == 0)
+        assert mx.all(stats.running_var == 1)
+
+    def test_running_stats_update(self):
+        """Test RunningStats update."""
+        from df_mlx.train import RunningStats
+
+        stats = RunningStats(num_features=64, momentum=0.1)
+
+        # Generate data with known mean/var
+        x = mx.random.normal(shape=(10, 32, 64)) * 2 + 3  # Mean ~3, Var ~4
+        stats.update(x)
+
+        mx.eval(stats.running_mean, stats.running_var)
+
+        # After one update with momentum=0.1:
+        # running_mean = 0.9 * 0 + 0.1 * batch_mean
+        assert not mx.all(stats.running_mean == 0)
+        assert int(stats.num_batches_tracked) == 1
+
+    def test_running_stats_normalize_training(self):
+        """Test RunningStats normalization during training."""
+        from df_mlx.train import RunningStats
+
+        stats = RunningStats(num_features=64)
+
+        x = mx.random.normal(shape=(8, 32, 64))
+        out = stats(x, training=True)
+        mx.eval(out)
+
+        assert out.shape == x.shape
+        # During training, uses batch stats - should have ~0 mean, ~1 var
+        mean = mx.mean(out)
+        var = mx.var(out)
+        mx.eval(mean, var)
+        assert abs(float(mean)) < 0.5  # Close to 0
+        assert abs(float(var) - 1.0) < 0.5  # Close to 1
+
+    def test_running_stats_normalize_inference(self):
+        """Test RunningStats normalization during inference."""
+        from df_mlx.train import RunningStats
+
+        stats = RunningStats(num_features=64)
+
+        # Update stats multiple times
+        for _ in range(10):
+            x = mx.random.normal(shape=(8, 32, 64)) * 2 + 3
+            stats.update(x)
+
+        # Inference uses running stats
+        x_test = mx.random.normal(shape=(4, 16, 64)) * 2 + 3
+        out = stats(x_test, training=False)
+        mx.eval(out)
+
+        assert out.shape == x_test.shape
+        assert not mx.any(mx.isnan(out))
+
+    def test_running_stats_different_batch_sizes(self):
+        """Test RunningStats with varying batch sizes."""
+        from df_mlx.train import RunningStats
+
+        stats = RunningStats(num_features=32)
+
+        # Different batch sizes should work
+        for batch_size in [1, 4, 8, 16]:
+            x = mx.random.normal(shape=(batch_size, 10, 32))
+            out = stats(x, training=True)
+            mx.eval(out)
+            assert out.shape == x.shape
+
+
+class TestFeatureNormalizer:
+    """Tests for feature normalizer with EMA."""
+
+    def test_feature_normalizer_init(self):
+        """Test FeatureNormalizer initialization."""
+        from df_mlx.train import FeatureNormalizer
+
+        fn = FeatureNormalizer(num_features=128, alpha=0.9)
+
+        assert fn.num_features == 128
+        assert fn.alpha == 0.9
+        assert fn._init_state.shape == (128,)
+
+    def test_feature_normalizer_forward(self):
+        """Test FeatureNormalizer forward pass."""
+        from df_mlx.train import FeatureNormalizer
+
+        fn = FeatureNormalizer(num_features=64)
+
+        x = mx.random.normal(shape=(4, 100, 64))
+        out, state = fn(x)
+        mx.eval(out, state)
+
+        assert out.shape == x.shape
+        assert state.shape == (4, 64)
+        assert not mx.any(mx.isnan(out))
+
+    def test_feature_normalizer_2d_input(self):
+        """Test FeatureNormalizer with 2D input."""
+        from df_mlx.train import FeatureNormalizer
+
+        fn = FeatureNormalizer(num_features=64)
+
+        x = mx.random.normal(shape=(100, 64))  # No batch dim
+        out, state = fn(x)
+        mx.eval(out, state)
+
+        assert out.shape == (100, 64)
+        assert state.shape == (64,)
+
+    def test_feature_normalizer_state_persistence(self):
+        """Test FeatureNormalizer state persistence."""
+        from df_mlx.train import FeatureNormalizer
+
+        fn = FeatureNormalizer(num_features=32, alpha=0.9)
+
+        # First chunk
+        x1 = mx.random.normal(shape=(2, 50, 32))
+        out1, state1 = fn(x1)
+        mx.eval(out1, state1)
+
+        # Second chunk with state
+        x2 = mx.random.normal(shape=(2, 50, 32))
+        out2, state2 = fn(x2, state=state1)
+        mx.eval(out2, state2)
+
+        # Without state
+        out3, state3 = fn(x2)
+        mx.eval(out3, state3)
+
+        # Outputs should be different since state differs
+        assert not mx.allclose(out2, out3)
+
+    def test_feature_normalizer_ema_smoothing(self):
+        """Test FeatureNormalizer EMA smoothing effect."""
+        from df_mlx.train import FeatureNormalizer
+
+        # High alpha = more smoothing
+        fn_smooth = FeatureNormalizer(num_features=32, alpha=0.99)
+        # Low alpha = less smoothing
+        fn_fast = FeatureNormalizer(num_features=32, alpha=0.5)
+
+        x = mx.random.normal(shape=(2, 100, 32))
+
+        out_smooth, _ = fn_smooth(x)
+        out_fast, _ = fn_fast(x)
+        mx.eval(out_smooth, out_fast)
+
+        # Smooth version should have less variance over time
+        var_smooth = mx.var(out_smooth, axis=1)
+        var_fast = mx.var(out_fast, axis=1)
+        mx.eval(var_smooth, var_fast)
+
+        # Different alpha should produce different outputs
+        assert not mx.allclose(out_smooth, out_fast)
+
+
+class TestModelStatistics:
+    """Tests for model training statistics tracking."""
+
+    def test_model_statistics_init(self):
+        """Test ModelStatistics initialization."""
+        from df_mlx.train import ModelStatistics
+
+        stats = ModelStatistics()
+
+        assert stats.step_count == 0
+        assert len(stats.history["loss"]) == 0
+        assert len(stats.history["grad_norm"]) == 0
+
+    def test_model_statistics_update(self):
+        """Test ModelStatistics update."""
+        from df_mlx.train import ModelStatistics
+
+        stats = ModelStatistics()
+
+        stats.update(loss=0.5, grad_norm=1.2, lr=1e-4, step_time=0.1)
+        stats.update(loss=0.4, grad_norm=1.0, lr=9e-5, step_time=0.15)
+
+        assert stats.step_count == 2
+        assert len(stats.history["loss"]) == 2
+        assert stats.history["loss"] == [0.5, 0.4]
+
+    def test_model_statistics_custom_metrics(self):
+        """Test ModelStatistics with custom metrics."""
+        from df_mlx.train import ModelStatistics
+
+        stats = ModelStatistics()
+
+        stats.update(loss=0.5, snr=12.5, pesq=3.2)
+        stats.update(loss=0.4, snr=14.0, pesq=3.5)
+
+        assert "snr" in stats.history
+        assert "pesq" in stats.history
+        assert len(stats.history["snr"]) == 2
+
+    def test_model_statistics_get_recent(self):
+        """Test ModelStatistics get_recent."""
+        from df_mlx.train import ModelStatistics
+
+        stats = ModelStatistics()
+
+        for i in range(200):
+            stats.update(loss=float(i))
+
+        recent = stats.get_recent("loss", n=50)
+
+        assert len(recent) == 50
+        assert recent[0] == 150
+        assert recent[-1] == 199
+
+    def test_model_statistics_get_mean(self):
+        """Test ModelStatistics get_mean."""
+        from df_mlx.train import ModelStatistics
+
+        stats = ModelStatistics()
+
+        for i in range(10):
+            stats.update(loss=1.0)
+
+        assert stats.get_mean("loss", n=10) == 1.0
+
+    def test_model_statistics_summary(self):
+        """Test ModelStatistics summary."""
+        from df_mlx.train import ModelStatistics
+
+        stats = ModelStatistics()
+
+        for i in range(5):
+            stats.update(loss=0.5, grad_norm=1.0, step_time=0.1)
+
+        summary = stats.summary()
+
+        assert summary["steps"] == 5
+        assert summary["loss_mean"] == 0.5
+        assert summary["grad_norm_mean"] == 1.0
+        assert summary["step_time_mean"] == 0.1
+
+    def test_model_statistics_save_load(self):
+        """Test ModelStatistics save and load."""
+        from df_mlx.train import ModelStatistics
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stats = ModelStatistics()
+            for i in range(10):
+                stats.update(loss=float(i) * 0.1, grad_norm=1.0)
+
+            path = Path(tmpdir) / "stats.json"
+            stats.save(str(path))
+
+            # Load into new instance
+            stats2 = ModelStatistics()
+            stats2.load(str(path))
+
+            assert stats2.step_count == stats.step_count
+            assert stats2.history["loss"] == stats.history["loss"]
+
+
+# ============================================================================
 # Test: Weight Conversion
 # ============================================================================
 
