@@ -21,6 +21,8 @@ class DfParams:
     df_n_layers: int = 3  # Number of DF layers
     df_dec_type: Literal["multi-res", "single-res", "adaptive"] = "multi-res"
     df_resolutions: List[int] = field(default_factory=lambda: [1, 2, 4])
+    mask_pf: bool = False  # Enable mask post-filter
+    pf_beta: float = 0.02  # Post-filter beta parameter (attenuation strength)
 
 
 @dataclass
@@ -158,6 +160,14 @@ class ModelParams4:
     @property
     def nb_df_layers(self) -> int:
         return self.df.df_n_layers
+
+    @property
+    def mask_pf(self) -> bool:
+        return self.df.mask_pf
+
+    @property
+    def pf_beta(self) -> float:
+        return self.df.pf_beta
 
 
 @dataclass

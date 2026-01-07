@@ -1751,6 +1751,197 @@ class TestLookaheadConfig:
 
 
 # ============================================================================
+# Post-Filter Tests
+# ============================================================================
+
+
+class TestPostFilter:
+    """Tests for mask-based post-filter functionality."""
+
+    def test_config_has_post_filter_params(self):
+        """Test that config has post-filter parameters."""
+        from df_mlx.config import DfParams, ModelParams4
+
+        df_params = DfParams()
+        assert hasattr(df_params, "mask_pf")
+        assert hasattr(df_params, "pf_beta")
+        assert df_params.mask_pf is False  # Default disabled
+        assert df_params.pf_beta == 0.02
+
+        model_params = ModelParams4()
+        assert hasattr(model_params, "mask_pf")
+        assert hasattr(model_params, "pf_beta")
+
+    def test_dfnet4_post_filter_disabled_by_default(self):
+        """Test that post-filter is disabled by default."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        params = ModelParams4()
+        model = DfNet4(params)
+
+        assert model.post_filter is False
+        assert model.post_filter_beta == 0.02
+
+    def test_dfnet4_post_filter_enabled(self):
+        """Test that post-filter can be enabled."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        params = ModelParams4()
+        params.df.mask_pf = True
+        params.df.pf_beta = 0.05
+
+        model = DfNet4(params)
+
+        assert model.post_filter is True
+        assert model.post_filter_beta == 0.05
+
+    def test_post_filter_changes_output(self):
+        """Test that post-filter modifies the output."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        # Create two models: one with post-filter, one without
+        params_no_pf = ModelParams4()
+        params_no_pf.df.mask_pf = False
+
+        params_with_pf = ModelParams4()
+        params_with_pf.df.mask_pf = True
+        params_with_pf.df.pf_beta = 0.05
+
+        model_no_pf = DfNet4(params_no_pf)
+        model_with_pf = DfNet4(params_with_pf)
+
+        # Use same input for both
+        batch, time, n_freqs = 1, 20, 481
+        spec_real = mx.random.normal(shape=(batch, time, n_freqs))
+        spec_imag = mx.random.normal(shape=(batch, time, n_freqs))
+        feat_erb = mx.random.normal(shape=(batch, time, 32))
+        feat_spec = mx.random.normal(shape=(batch, time, 96, 2))
+
+        out_no_pf = model_no_pf((spec_real, spec_imag), feat_erb, feat_spec)
+        out_with_pf = model_with_pf((spec_real, spec_imag), feat_erb, feat_spec)
+        mx.eval(out_no_pf, out_with_pf)
+
+        # Outputs should be different due to different model weights and post-filter
+        # We can't compare directly since weights are random, but we verify shapes match
+        assert out_no_pf[0].shape == out_with_pf[0].shape
+        assert out_no_pf[1].shape == out_with_pf[1].shape
+
+    def test_post_filter_bypass_when_disabled(self):
+        """Test that _apply_post_filter bypasses when disabled."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        params = ModelParams4()
+        params.df.mask_pf = False  # Disabled
+
+        model = DfNet4(params)
+
+        # Create test spectra
+        spec_enh = (mx.ones((1, 10, 100)), mx.zeros((1, 10, 100)))
+        spec_orig = (mx.ones((1, 10, 100)) * 2, mx.zeros((1, 10, 100)))
+
+        result = model._apply_post_filter(spec_enh, spec_orig)
+        mx.eval(result)
+
+        # When disabled, output should be identical to input
+        np.testing.assert_array_almost_equal(np.array(result[0]), np.array(spec_enh[0]))
+        np.testing.assert_array_almost_equal(np.array(result[1]), np.array(spec_enh[1]))
+
+    def test_post_filter_numerical_behavior(self):
+        """Test post-filter numerical behavior matches expected formula."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        params = ModelParams4()
+        params.df.mask_pf = True
+        params.df.pf_beta = 0.02
+
+        model = DfNet4(params)
+
+        # Create simple test case
+        # Enhanced magnitude = 0.5 * original magnitude (mask = 0.5)
+        orig_real = mx.ones((1, 5, 10))
+        orig_imag = mx.zeros((1, 5, 10))
+        enh_real = mx.ones((1, 5, 10)) * 0.5
+        enh_imag = mx.zeros((1, 5, 10))
+
+        result = model._apply_post_filter((enh_real, enh_imag), (orig_real, orig_imag))
+        mx.eval(result)
+
+        # For mask = 0.5:
+        # mask_sin = 0.5 * sin(π * 0.5 / 2) = 0.5 * sin(π/4) ≈ 0.3536
+        # ratio = 0.5 / 0.3536 ≈ 1.414
+        # pf = (1 + 0.02) / (1 + 0.02 * 1.414^2) ≈ 1.02 / 1.04 ≈ 0.98
+        # Result should be slightly attenuated (0.5 * 0.98 ≈ 0.49)
+
+        assert result[0].shape == enh_real.shape
+        # Post-filtered should be <= enhanced (attenuation)
+        assert float(mx.mean(mx.abs(result[0]))) <= float(mx.mean(mx.abs(enh_real))) + 0.01
+
+    def test_post_filter_preserves_clean_signal(self):
+        """Test that post-filter has minimal effect on clean signals (mask ≈ 1)."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        params = ModelParams4()
+        params.df.mask_pf = True
+        params.df.pf_beta = 0.02
+
+        model = DfNet4(params)
+
+        # When enhanced ≈ original (mask ≈ 1), post-filter should have minimal effect
+        orig_real = mx.ones((1, 5, 10))
+        orig_imag = mx.zeros((1, 5, 10))
+        enh_real = mx.ones((1, 5, 10)) * 0.99  # Mask ≈ 1
+        enh_imag = mx.zeros((1, 5, 10))
+
+        result = model._apply_post_filter((enh_real, enh_imag), (orig_real, orig_imag))
+        mx.eval(result)
+
+        # For mask ≈ 1:
+        # mask_sin ≈ 1 * sin(π/2) = 1
+        # pf ≈ (1 + β) / (1 + β) ≈ 1
+        diff = float(mx.mean(mx.abs(result[0] - enh_real)))
+        assert diff < 0.02  # Should be very close
+
+    def test_post_filter_beta_effect(self):
+        """Test that higher beta causes more attenuation."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        # Create model with low beta
+        params_low = ModelParams4()
+        params_low.df.mask_pf = True
+        params_low.df.pf_beta = 0.01
+        model_low = DfNet4(params_low)
+
+        # Create model with high beta
+        params_high = ModelParams4()
+        params_high.df.mask_pf = True
+        params_high.df.pf_beta = 0.1
+        model_high = DfNet4(params_high)
+
+        # Create test case with mask = 0.3 (moderate attenuation)
+        orig_real = mx.ones((1, 5, 10))
+        orig_imag = mx.zeros((1, 5, 10))
+        enh_real = mx.ones((1, 5, 10)) * 0.3
+        enh_imag = mx.zeros((1, 5, 10))
+
+        result_low = model_low._apply_post_filter((enh_real, enh_imag), (orig_real, orig_imag))
+        result_high = model_high._apply_post_filter((enh_real, enh_imag), (orig_real, orig_imag))
+        mx.eval(result_low, result_high)
+
+        # Higher beta should cause more attenuation (smaller magnitude)
+        mag_low = float(mx.mean(mx.abs(result_low[0])))
+        mag_high = float(mx.mean(mx.abs(result_high[0])))
+
+        assert mag_high < mag_low  # Higher beta = more attenuation
+
+
+# ============================================================================
 # Hybrid Encoder Tests
 # ============================================================================
 

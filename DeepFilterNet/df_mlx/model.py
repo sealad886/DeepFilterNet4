@@ -855,6 +855,10 @@ class DfNet4(nn.Module):
         else:
             self.lsnr_dropout_threshold = -10.0
 
+        # Post-filter settings
+        self.post_filter = p.mask_pf
+        self.post_filter_beta = p.pf_beta
+
         # ERB filterbank (non-trainable)
         self._erb_fb = erb_fb(
             sr=p.sr,
@@ -917,6 +921,54 @@ class DfNet4(nn.Module):
         else:
             raise ValueError(f"Unsupported ndim {ndim} for feature padding")
 
+    def _apply_post_filter(
+        self,
+        spec_enhanced: Tuple[mx.array, mx.array],
+        spec_original: Tuple[mx.array, mx.array],
+    ) -> Tuple[mx.array, mx.array]:
+        """Apply mask-based post-filter to reduce musical noise.
+
+        The post-filter applies additional attenuation based on the ratio
+        of enhanced to original magnitude, using a sinusoidal transfer
+        function that smoothly increases attenuation for low-gain regions.
+
+        Args:
+            spec_enhanced: Enhanced spectrum as (real, imag)
+            spec_original: Original noisy spectrum as (real, imag)
+
+        Returns:
+            Post-filtered spectrum as (real, imag)
+        """
+        if not self.post_filter:
+            return spec_enhanced
+
+        enh_real, enh_imag = spec_enhanced
+        orig_real, orig_imag = spec_original
+        beta = self.post_filter_beta
+        eps = 1e-12
+
+        # Compute magnitudes
+        enh_mag = mx.sqrt(enh_real**2 + enh_imag**2 + eps)
+        orig_mag = mx.sqrt(orig_real**2 + orig_imag**2 + eps)
+
+        # Compute mask as ratio (clipped to [eps, 1])
+        mask = mx.clip(enh_mag / (orig_mag + eps), eps, 1.0)
+
+        # Sinusoidal mask transfer function
+        # mask_sin = mask * sin(π * mask / 2), clipped to prevent division by zero
+        pi = 3.141592653589793
+        mask_sin = mx.maximum(mask * mx.sin(pi * mask / 2), eps)
+
+        # Post-filter gain: (1 + beta) / (1 + beta * (mask / mask_sin)^2)
+        ratio = mask / mask_sin
+        pf = (1 + beta) / (1 + beta * ratio * ratio)
+
+        # Apply post-filter to enhanced spectrum
+        pf_real = enh_real * pf
+        pf_imag = enh_imag * pf
+
+        return (pf_real, pf_imag)
+
     def __call__(
         self,
         spec: Tuple[mx.array, mx.array],
@@ -977,6 +1029,9 @@ class DfNet4(nn.Module):
             df_coef,
         )
 
+        # Apply post-filter (optional, reduces musical noise)
+        spec_out = self._apply_post_filter(spec_out, spec)
+
         # Apply LSNR dropout masking
         if self.lsnr_dropout and training:
             spec_out_real, spec_out_imag = spec_out
@@ -1032,6 +1087,9 @@ class DfNet4(nn.Module):
 
         # Apply deep filtering
         spec_out = self.df_op((masked_real, masked_imag), df_coef)
+
+        # Apply post-filter (optional, reduces musical noise)
+        spec_out = self._apply_post_filter(spec_out, spec)
 
         # Apply LSNR dropout masking
         if self.lsnr_dropout and training:
