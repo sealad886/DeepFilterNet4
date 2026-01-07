@@ -601,23 +601,39 @@ def main():
             if interrupted or is_shutdown_requested():
                 break
 
-            # Get existing sample count for resume
+            # Get existing progress for resume
             existing_samples = writer.get_sample_count(split_name)
+            files_already_processed = writer.get_files_processed(split_name)
 
             print(f"\nProcessing {split_name} split ({len(split_files):,} files)...")
-            if existing_samples > 0:
-                print(f"  Resuming: {existing_samples:,} samples already exist")
+            if files_already_processed > 0:
+                print(f"  Resuming: skipping {files_already_processed:,} already-processed files")
+                print(f"            ({existing_samples:,} samples exist)")
 
             writer.set_split(split_name)
 
             samples_added = 0
+            files_skipped = 0
             try:
-                pbar = tqdm(split_files, desc=split_name)
-                for speech_path in pbar:
+                pbar = tqdm(
+                    enumerate(split_files),
+                    total=len(split_files),
+                    desc=split_name,
+                    initial=files_already_processed,
+                )
+                for file_idx, speech_path in pbar:
+                    # Skip already-processed files on resume
+                    if file_idx < files_already_processed:
+                        files_skipped += 1
+                        continue
+
                     # Check for interrupt
                     if is_shutdown_requested():
                         interrupted = True
                         break
+
+                    # Track that we're processing this file
+                    writer.increment_files_processed(split_name)
 
                     try:
                         # Load speech
@@ -665,7 +681,7 @@ def main():
                         if result:
                             writer.add_sample(**result)
                             samples_added += 1
-                            pbar.set_postfix({"added": samples_added, "total": existing_samples + samples_added})
+                            pbar.set_postfix({"new": samples_added, "total": existing_samples + samples_added})
 
                     except Exception as e:
                         print(f"  Warning: Failed to process {speech_path}: {e}")
@@ -675,7 +691,9 @@ def main():
                 print(f"\n\nInterrupted during {split_name} split.")
                 interrupted = True
 
-            print(f"  Added {samples_added:,} samples to {split_name}")
+            print(f"  Added {samples_added:,} new samples to {split_name}")
+            if files_skipped > 0:
+                print(f"  (Skipped {files_skipped:,} already-processed files)")
 
         # Context manager handles finalize
         if interrupted:

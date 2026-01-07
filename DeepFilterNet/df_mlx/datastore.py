@@ -90,6 +90,7 @@ class DatastoreIndex:
     config: DatastoreConfig
     shards: List[ShardInfo] = field(default_factory=list)
     total_samples: Dict[str, int] = field(default_factory=dict)
+    files_processed: Dict[str, int] = field(default_factory=dict)  # Files processed per split
 
     def to_dict(self) -> dict:
         return {
@@ -107,13 +108,15 @@ class DatastoreIndex:
             },
             "shards": [{"path": s.path, "num_samples": s.num_samples, "split": s.split} for s in self.shards],
             "total_samples": self.total_samples,
+            "files_processed": self.files_processed,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "DatastoreIndex":
         config = DatastoreConfig(**data["config"])
         shards = [ShardInfo(**s) for s in data["shards"]]
-        return cls(config=config, shards=shards, total_samples=data["total_samples"])
+        files_processed = data.get("files_processed", {})  # Backward compat
+        return cls(config=config, shards=shards, total_samples=data["total_samples"], files_processed=files_processed)
 
     def save(self, path: Path) -> None:
         with open(path, "w") as f:
@@ -158,6 +161,7 @@ class MLXDatastoreWriter:
         self._current_split: str = "train"
         self._shard_counts: Dict[str, int] = {"train": 0, "valid": 0, "test": 0}
         self._sample_counts: Dict[str, int] = {"train": 0, "valid": 0, "test": 0}
+        self._files_processed: Dict[str, int] = {"train": 0, "valid": 0, "test": 0}
         self._shards: List[ShardInfo] = []
 
         # Background writing with daemon threads for clean shutdown
@@ -197,6 +201,7 @@ class MLXDatastoreWriter:
             # Load existing shard info
             self._shards = existing_index.shards
             self._sample_counts = existing_index.total_samples.copy()
+            self._files_processed = existing_index.files_processed.copy()
 
             # Count shards per split
             for shard in self._shards:
@@ -207,9 +212,11 @@ class MLXDatastoreWriter:
 
             self._resumed = True
             print("  Resumed from existing datastore:")
-            print(f"    Train: {self._sample_counts.get('train', 0):,} samples")
-            print(f"    Valid: {self._sample_counts.get('valid', 0):,} samples")
-            print(f"    Test:  {self._sample_counts.get('test', 0):,} samples")
+            for split in ["train", "valid", "test"]:
+                samples = self._sample_counts.get(split, 0)
+                files = self._files_processed.get(split, 0)
+                if samples > 0 or files > 0:
+                    print(f"    {split.capitalize()}: {samples:,} samples from {files:,} files")
 
         except Exception as e:
             print(f"  Warning: Could not resume from index: {e}")
@@ -222,6 +229,14 @@ class MLXDatastoreWriter:
     def get_sample_count(self, split: str) -> int:
         """Get current sample count for a split."""
         return self._sample_counts.get(split, 0)
+
+    def get_files_processed(self, split: str) -> int:
+        """Get number of files already processed for a split."""
+        return self._files_processed.get(split, 0)
+
+    def increment_files_processed(self, split: str) -> None:
+        """Increment the count of processed files for a split."""
+        self._files_processed[split] = self._files_processed.get(split, 0) + 1
 
     def set_split(self, split: str) -> None:
         """Set current split (train/valid/test)."""
@@ -310,6 +325,7 @@ class MLXDatastoreWriter:
             config=self.config,
             shards=self._shards,
             total_samples=self._sample_counts.copy(),
+            files_processed=self._files_processed.copy(),
         )
         index.save(self.output_dir / "index.json")
 
@@ -437,13 +453,16 @@ class MLXDatastoreWriter:
             config=self.config,
             shards=self._shards,
             total_samples=self._sample_counts.copy(),
+            files_processed=self._files_processed.copy(),
         )
         index.save(self.output_dir / "index.json")
 
         print("\nDatastore finalized:")
-        print(f"  Train samples: {self._sample_counts['train']:,}")
-        print(f"  Valid samples: {self._sample_counts['valid']:,}")
-        print(f"  Test samples:  {self._sample_counts['test']:,}")
+        for split in ["train", "valid", "test"]:
+            samples = self._sample_counts.get(split, 0)
+            files = self._files_processed.get(split, 0)
+            if samples > 0 or files > 0:
+                print(f"  {split.capitalize()}: {samples:,} samples from {files:,} files")
         if _shutdown_requested:
             print("  (Interrupted - progress saved for resume)")
 
