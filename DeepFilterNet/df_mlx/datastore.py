@@ -1,0 +1,469 @@
+"""MLX-native datastore for DeepFilterNet training.
+
+This module provides efficient data storage and loading for MLX training:
+- Sharded .npz files for parallel loading
+- Pre-computed spectral features (STFT, ERB, DF)
+- Memory-efficient streaming with configurable batch sizes
+- Index-based random access and shuffling
+
+The datastore format:
+    dataset_dir/
+        index.json          # Metadata and shard manifest
+        train_000.npz       # Sharded training data
+        train_001.npz
+        ...
+        valid_000.npz       # Validation data
+        ...
+"""
+
+import json
+import random
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, Iterator, List, Optional, Tuple
+
+import mlx.core as mx
+import numpy as np
+
+
+@dataclass
+class DatastoreConfig:
+    """Configuration for MLX datastore."""
+
+    sample_rate: int = 48000
+    fft_size: int = 960
+    hop_size: int = 480
+    nb_erb: int = 32
+    nb_df: int = 96
+    norm_alpha: float = 0.99
+    samples_per_shard: int = 1000
+    min_nb_freqs: int = 481  # FFT bins
+    dtype: str = "float32"
+
+
+@dataclass
+class ShardInfo:
+    """Information about a single shard."""
+
+    path: str
+    num_samples: int
+    split: str  # "train", "valid", "test"
+
+
+@dataclass
+class DatastoreIndex:
+    """Index for the entire datastore."""
+
+    config: DatastoreConfig
+    shards: List[ShardInfo] = field(default_factory=list)
+    total_samples: Dict[str, int] = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {
+            "config": {
+                "sample_rate": self.config.sample_rate,
+                "fft_size": self.config.fft_size,
+                "hop_size": self.config.hop_size,
+                "nb_erb": self.config.nb_erb,
+                "nb_df": self.config.nb_df,
+                "norm_alpha": self.config.norm_alpha,
+                "samples_per_shard": self.config.samples_per_shard,
+                "min_nb_freqs": self.config.min_nb_freqs,
+                "dtype": self.config.dtype,
+            },
+            "shards": [{"path": s.path, "num_samples": s.num_samples, "split": s.split} for s in self.shards],
+            "total_samples": self.total_samples,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "DatastoreIndex":
+        config = DatastoreConfig(**data["config"])
+        shards = [ShardInfo(**s) for s in data["shards"]]
+        return cls(config=config, shards=shards, total_samples=data["total_samples"])
+
+    def save(self, path: Path) -> None:
+        with open(path, "w") as f:
+            json.dump(self.to_dict(), f, indent=2)
+
+    @classmethod
+    def load(cls, path: Path) -> "DatastoreIndex":
+        with open(path) as f:
+            return cls.from_dict(json.load(f))
+
+
+class MLXDatastoreWriter:
+    """Write pre-computed features to MLX datastore format."""
+
+    def __init__(
+        self,
+        output_dir: Path,
+        config: Optional[DatastoreConfig] = None,
+    ):
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.config = config or DatastoreConfig()
+
+        self._current_shard: Dict[str, List[np.ndarray]] = {}
+        self._current_split: str = "train"
+        self._shard_counts: Dict[str, int] = {"train": 0, "valid": 0, "test": 0}
+        self._sample_counts: Dict[str, int] = {"train": 0, "valid": 0, "test": 0}
+        self._shards: List[ShardInfo] = []
+
+    def set_split(self, split: str) -> None:
+        """Set current split (train/valid/test)."""
+        if self._current_shard:
+            self._flush_shard()
+        self._current_split = split
+        self._current_shard = {}
+
+    def add_sample(
+        self,
+        spec_real: np.ndarray,
+        spec_imag: np.ndarray,
+        feat_erb: np.ndarray,
+        feat_spec: np.ndarray,
+        clean_real: np.ndarray,
+        clean_imag: np.ndarray,
+        snr_db: float = 0.0,
+        metadata: Optional[dict] = None,
+    ) -> None:
+        """Add a single sample to the current shard.
+
+        Args:
+            spec_real: Noisy spectrum real part (time, freq)
+            spec_imag: Noisy spectrum imaginary part (time, freq)
+            feat_erb: ERB features (time, erb_bands)
+            feat_spec: DF-band features (time, df_bins, 2)
+            clean_real: Clean spectrum real part (time, freq)
+            clean_imag: Clean spectrum imaginary part (time, freq)
+            snr_db: Signal-to-noise ratio in dB
+            metadata: Optional metadata dict
+        """
+        if "spec_real" not in self._current_shard:
+            self._current_shard = {
+                "spec_real": [],
+                "spec_imag": [],
+                "feat_erb": [],
+                "feat_spec": [],
+                "clean_real": [],
+                "clean_imag": [],
+                "snr_db": [],
+            }
+
+        self._current_shard["spec_real"].append(spec_real.astype(np.float32))
+        self._current_shard["spec_imag"].append(spec_imag.astype(np.float32))
+        self._current_shard["feat_erb"].append(feat_erb.astype(np.float32))
+        self._current_shard["feat_spec"].append(feat_spec.astype(np.float32))
+        self._current_shard["clean_real"].append(clean_real.astype(np.float32))
+        self._current_shard["clean_imag"].append(clean_imag.astype(np.float32))
+        self._current_shard["snr_db"].append(np.float32(snr_db))
+
+        if len(self._current_shard["spec_real"]) >= self.config.samples_per_shard:
+            self._flush_shard()
+
+    def _flush_shard(self) -> None:
+        """Write current shard to disk."""
+        if not self._current_shard or not self._current_shard.get("spec_real"):
+            return
+
+        shard_idx = self._shard_counts[self._current_split]
+        shard_name = f"{self._current_split}_{shard_idx:04d}.npz"
+        shard_path = self.output_dir / shard_name
+
+        num_samples = len(self._current_shard["spec_real"])
+
+        # Stack arrays and save
+        np.savez_compressed(
+            shard_path,
+            spec_real=np.stack(self._current_shard["spec_real"]),
+            spec_imag=np.stack(self._current_shard["spec_imag"]),
+            feat_erb=np.stack(self._current_shard["feat_erb"]),
+            feat_spec=np.stack(self._current_shard["feat_spec"]),
+            clean_real=np.stack(self._current_shard["clean_real"]),
+            clean_imag=np.stack(self._current_shard["clean_imag"]),
+            snr_db=np.array(self._current_shard["snr_db"]),
+        )
+
+        self._shards.append(ShardInfo(path=shard_name, num_samples=num_samples, split=self._current_split))
+        self._shard_counts[self._current_split] += 1
+        self._sample_counts[self._current_split] += num_samples
+        self._current_shard = {}
+
+        print(f"  Wrote shard: {shard_name} ({num_samples} samples)")
+
+    def finalize(self) -> DatastoreIndex:
+        """Finalize datastore and write index."""
+        # Flush any remaining samples
+        for split in ["train", "valid", "test"]:
+            self.set_split(split)
+        self._flush_shard()
+
+        index = DatastoreIndex(
+            config=self.config,
+            shards=self._shards,
+            total_samples=self._sample_counts.copy(),
+        )
+        index.save(self.output_dir / "index.json")
+
+        print("\nDatastore complete:")
+        print(f"  Train samples: {self._sample_counts['train']:,}")
+        print(f"  Valid samples: {self._sample_counts['valid']:,}")
+        print(f"  Test samples:  {self._sample_counts['test']:,}")
+
+        return index
+
+
+class MLXDataLoader:
+    """Efficient data loader for MLX training.
+
+    Loads pre-computed features from sharded .npz files and yields
+    batches as MLX arrays.
+
+    Example:
+        >>> loader = MLXDataLoader("dataset/", split="train", batch_size=8)
+        >>> for batch in loader:
+        ...     spec, feat_erb, feat_spec, target = batch
+        ...     loss = train_step(spec, feat_erb, feat_spec, target)
+    """
+
+    def __init__(
+        self,
+        datastore_dir: Path | str,
+        split: str = "train",
+        batch_size: int = 8,
+        shuffle: bool = True,
+        drop_last: bool = True,
+        max_samples: Optional[int] = None,
+    ):
+        self.datastore_dir = Path(datastore_dir)
+        self.split = split
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.drop_last = drop_last
+        self.max_samples = max_samples
+
+        # Load index
+        self.index = DatastoreIndex.load(self.datastore_dir / "index.json")
+
+        # Get shards for this split
+        self.shards = [s for s in self.index.shards if s.split == split]
+        if not self.shards:
+            raise ValueError(f"No shards found for split '{split}'")
+
+        # Build sample index: (shard_idx, sample_idx)
+        self._sample_indices: List[Tuple[int, int]] = []
+        for shard_idx, shard in enumerate(self.shards):
+            for sample_idx in range(shard.num_samples):
+                self._sample_indices.append((shard_idx, sample_idx))
+
+        if max_samples:
+            self._sample_indices = self._sample_indices[:max_samples]
+
+        self._loaded_shard_idx: Optional[int] = None
+        self._loaded_shard_data: Optional[Dict[str, np.ndarray]] = None
+
+    def __len__(self) -> int:
+        """Number of batches per epoch."""
+        n = len(self._sample_indices)
+        if self.drop_last:
+            return n // self.batch_size
+        return (n + self.batch_size - 1) // self.batch_size
+
+    @property
+    def num_samples(self) -> int:
+        """Total number of samples."""
+        return len(self._sample_indices)
+
+    def _load_shard(self, shard_idx: int) -> Dict[str, np.ndarray]:
+        """Load a shard into memory."""
+        if self._loaded_shard_idx == shard_idx and self._loaded_shard_data is not None:
+            return self._loaded_shard_data
+
+        shard = self.shards[shard_idx]
+        shard_path = self.datastore_dir / shard.path
+
+        data = dict(np.load(shard_path))
+        self._loaded_shard_idx = shard_idx
+        self._loaded_shard_data = data
+        return data
+
+    def _get_sample(self, shard_idx: int, sample_idx: int) -> Dict[str, np.ndarray]:
+        """Get a single sample."""
+        data = self._load_shard(shard_idx)
+        return {
+            "spec_real": data["spec_real"][sample_idx],
+            "spec_imag": data["spec_imag"][sample_idx],
+            "feat_erb": data["feat_erb"][sample_idx],
+            "feat_spec": data["feat_spec"][sample_idx],
+            "clean_real": data["clean_real"][sample_idx],
+            "clean_imag": data["clean_imag"][sample_idx],
+            "snr_db": data["snr_db"][sample_idx],
+        }
+
+    def __iter__(self) -> Iterator[Tuple[Tuple[mx.array, mx.array], mx.array, mx.array, Tuple[mx.array, mx.array]]]:
+        """Iterate over batches."""
+        indices = self._sample_indices.copy()
+        if self.shuffle:
+            random.shuffle(indices)
+
+        batch_spec_real = []
+        batch_spec_imag = []
+        batch_feat_erb = []
+        batch_feat_spec = []
+        batch_clean_real = []
+        batch_clean_imag = []
+
+        for shard_idx, sample_idx in indices:
+            sample = self._get_sample(shard_idx, sample_idx)
+
+            batch_spec_real.append(sample["spec_real"])
+            batch_spec_imag.append(sample["spec_imag"])
+            batch_feat_erb.append(sample["feat_erb"])
+            batch_feat_spec.append(sample["feat_spec"])
+            batch_clean_real.append(sample["clean_real"])
+            batch_clean_imag.append(sample["clean_imag"])
+
+            if len(batch_spec_real) >= self.batch_size:
+                yield self._make_batch(
+                    batch_spec_real,
+                    batch_spec_imag,
+                    batch_feat_erb,
+                    batch_feat_spec,
+                    batch_clean_real,
+                    batch_clean_imag,
+                )
+                batch_spec_real = []
+                batch_spec_imag = []
+                batch_feat_erb = []
+                batch_feat_spec = []
+                batch_clean_real = []
+                batch_clean_imag = []
+
+        # Handle remaining samples
+        if batch_spec_real and not self.drop_last:
+            yield self._make_batch(
+                batch_spec_real,
+                batch_spec_imag,
+                batch_feat_erb,
+                batch_feat_spec,
+                batch_clean_real,
+                batch_clean_imag,
+            )
+
+    def _make_batch(
+        self,
+        spec_real: List[np.ndarray],
+        spec_imag: List[np.ndarray],
+        feat_erb: List[np.ndarray],
+        feat_spec: List[np.ndarray],
+        clean_real: List[np.ndarray],
+        clean_imag: List[np.ndarray],
+    ) -> Tuple[Tuple[mx.array, mx.array], mx.array, mx.array, Tuple[mx.array, mx.array]]:
+        """Convert lists to MLX batch tensors."""
+        spec = (
+            mx.array(np.stack(spec_real)),
+            mx.array(np.stack(spec_imag)),
+        )
+        erb = mx.array(np.stack(feat_erb))
+        df_spec = mx.array(np.stack(feat_spec))
+        target = (
+            mx.array(np.stack(clean_real)),
+            mx.array(np.stack(clean_imag)),
+        )
+        return spec, erb, df_spec, target
+
+
+class StreamingMLXDataLoader:
+    """Memory-efficient streaming data loader.
+
+    Loads one shard at a time for large datasets that don't fit in memory.
+    """
+
+    def __init__(
+        self,
+        datastore_dir: Path | str,
+        split: str = "train",
+        batch_size: int = 8,
+        shuffle_shards: bool = True,
+        shuffle_samples: bool = True,
+    ):
+        self.datastore_dir = Path(datastore_dir)
+        self.split = split
+        self.batch_size = batch_size
+        self.shuffle_shards = shuffle_shards
+        self.shuffle_samples = shuffle_samples
+
+        self.index = DatastoreIndex.load(self.datastore_dir / "index.json")
+        self.shards = [s for s in self.index.shards if s.split == split]
+
+    def __len__(self) -> int:
+        total = sum(s.num_samples for s in self.shards)
+        return total // self.batch_size
+
+    def __iter__(self) -> Iterator[Tuple[Tuple[mx.array, mx.array], mx.array, mx.array, Tuple[mx.array, mx.array]]]:
+        """Iterate over batches, streaming one shard at a time."""
+        shard_order = list(range(len(self.shards)))
+        if self.shuffle_shards:
+            random.shuffle(shard_order)
+
+        buffer_spec_real = []
+        buffer_spec_imag = []
+        buffer_feat_erb = []
+        buffer_feat_spec = []
+        buffer_clean_real = []
+        buffer_clean_imag = []
+
+        for shard_idx in shard_order:
+            shard = self.shards[shard_idx]
+            shard_path = self.datastore_dir / shard.path
+            data = dict(np.load(shard_path))
+
+            indices = list(range(shard.num_samples))
+            if self.shuffle_samples:
+                random.shuffle(indices)
+
+            for idx in indices:
+                buffer_spec_real.append(data["spec_real"][idx])
+                buffer_spec_imag.append(data["spec_imag"][idx])
+                buffer_feat_erb.append(data["feat_erb"][idx])
+                buffer_feat_spec.append(data["feat_spec"][idx])
+                buffer_clean_real.append(data["clean_real"][idx])
+                buffer_clean_imag.append(data["clean_imag"][idx])
+
+                if len(buffer_spec_real) >= self.batch_size:
+                    yield self._make_batch(
+                        buffer_spec_real[: self.batch_size],
+                        buffer_spec_imag[: self.batch_size],
+                        buffer_feat_erb[: self.batch_size],
+                        buffer_feat_spec[: self.batch_size],
+                        buffer_clean_real[: self.batch_size],
+                        buffer_clean_imag[: self.batch_size],
+                    )
+                    buffer_spec_real = buffer_spec_real[self.batch_size :]
+                    buffer_spec_imag = buffer_spec_imag[self.batch_size :]
+                    buffer_feat_erb = buffer_feat_erb[self.batch_size :]
+                    buffer_feat_spec = buffer_feat_spec[self.batch_size :]
+                    buffer_clean_real = buffer_clean_real[self.batch_size :]
+                    buffer_clean_imag = buffer_clean_imag[self.batch_size :]
+
+    def _make_batch(
+        self,
+        spec_real: List[np.ndarray],
+        spec_imag: List[np.ndarray],
+        feat_erb: List[np.ndarray],
+        feat_spec: List[np.ndarray],
+        clean_real: List[np.ndarray],
+        clean_imag: List[np.ndarray],
+    ) -> Tuple[Tuple[mx.array, mx.array], mx.array, mx.array, Tuple[mx.array, mx.array]]:
+        """Convert lists to MLX batch tensors."""
+        spec = (
+            mx.array(np.stack(spec_real)),
+            mx.array(np.stack(spec_imag)),
+        )
+        erb = mx.array(np.stack(feat_erb))
+        df_spec = mx.array(np.stack(feat_spec))
+        target = (
+            mx.array(np.stack(clean_real)),
+            mx.array(np.stack(clean_imag)),
+        )
+        return spec, erb, df_spec, target

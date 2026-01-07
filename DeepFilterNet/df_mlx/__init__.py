@@ -60,6 +60,7 @@ except ImportError:
 if MLX_AVAILABLE:
     # Re-export public API - noqa for intentional re-exports
     from .config import ModelParams4, TrainConfig, get_default_config, load_config  # noqa: F401
+    from .datastore import DatastoreConfig, MLXDataLoader, MLXDatastoreWriter, StreamingMLXDataLoader  # noqa: F401
     from .mamba import BidirectionalMamba, GroupedLinear, Mamba, MambaBlock, SqueezedMamba  # noqa: F401
     from .model import DfNet4, DfNet4Lite, count_parameters, init_model, model_summary  # noqa: F401
     from .modules import ComplexMask, Conv2dNormAct, ConvTranspose2dNormAct, DfOp, ErbFilterbank  # noqa: F401
@@ -131,6 +132,11 @@ if MLX_AVAILABLE:
         "create_dataloader",
         "compute_snr",
         "benchmark_model",
+        # Datastore
+        "DatastoreConfig",
+        "MLXDataLoader",
+        "MLXDatastoreWriter",
+        "StreamingMLXDataLoader",
         # Version
         "__version__",
         "MLX_AVAILABLE",
