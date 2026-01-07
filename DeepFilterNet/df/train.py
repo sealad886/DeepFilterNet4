@@ -3,6 +3,7 @@ import os
 import random
 import signal
 import sys
+import time
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -115,6 +116,17 @@ def main():
         default="x86",
         choices=["x86", "fbgemm", "qnnpack", "onednn"],
         help="Quantization backend (default: x86)",
+    )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Enable profiling for first epoch to measure MPS/GPU utilization",
+    )
+    parser.add_argument(
+        "--profile-iterations",
+        type=int,
+        default=50,
+        help="Number of iterations to profile (default: 50)",
     )
     args = parser.parse_args()
     if not os.path.isfile(args.data_config_file):
@@ -337,6 +349,7 @@ def main():
             opt_disc=opt_disc,
             disc_lr_values=disc_lrs,
             gan_start_epoch=gan_start_epoch if gan_enabled else 0,
+            profile_iterations=args.profile_iterations if args.profile else 0,
         )
         metrics = {"loss": train_loss}
         try:
@@ -495,6 +508,7 @@ def run_epoch(
     opt_disc: Optional[optim.Optimizer] = None,
     disc_lr_values: Optional[np.ndarray] = None,
     gan_start_epoch: int = 0,
+    profile_iterations: int = 0,
 ) -> float:
     log_freq = config("LOG_FREQ", cast=int, default=100, section="train")
     bs = loader.get_batch_size(split)
@@ -517,11 +531,31 @@ def run_epoch(
     n_nans = 0
     start_steps = epoch * loader.len(split)
 
+    # Profiling setup
+    do_profile = profile_iterations > 0 and is_train and epoch == 0
+    profile_timings: Dict[str, List[float]] = {
+        "transfer": [],
+        "forward": [],
+        "loss": [],
+        "backward": [],
+        "optimizer": [],
+        "total": [],
+    }
+
+    def sync_device():
+        """Synchronize device for accurate timing."""
+        if dev.type == "mps":
+            torch.mps.synchronize()
+        elif dev.type == "cuda":
+            torch.cuda.synchronize()
+
     # GAN training settings
     gan_active = is_train and discriminator is not None and opt_disc is not None and epoch >= gan_start_epoch
     disc_update_freq = config("DISCRIMINATOR_UPDATE_FREQ", 1, int, section="train") if gan_active else 1
 
     for i, batch in enumerate(loader.iter_epoch(split, seed)):
+        iter_start = time.perf_counter() if do_profile and i < profile_iterations else 0.0
+
         opt.zero_grad()
         if opt_disc is not None:
             opt_disc.zero_grad()
@@ -542,21 +576,45 @@ def run_epoch(
 
         assert batch.feat_spec is not None
         assert batch.feat_erb is not None
+
+        # Profile data transfer
+        if do_profile and i < profile_iterations:
+            transfer_start = time.perf_counter()
+
         feat_erb = batch.feat_erb.to(dev, non_blocking=True)
         feat_spec = as_real(batch.feat_spec.to(dev, non_blocking=True))
         noisy = batch.noisy.to(dev, non_blocking=True)
         clean = batch.speech.to(dev, non_blocking=True)
         snrs = batch.snr.to(dev, non_blocking=True)
+
+        if do_profile and i < profile_iterations:
+            sync_device()
+            profile_timings["transfer"].append((time.perf_counter() - transfer_start) * 1000)
+
         with set_detect_anomaly(detect_anomaly and is_train), set_grad_enabled(is_train):
             if not is_train:
                 input = as_real(noisy).clone()
             else:
                 input = as_real(noisy)
+
+            # Profile forward pass
+            if do_profile and i < profile_iterations:
+                forward_start = time.perf_counter()
+
             enh, m, lsnr, other = model.forward(
                 spec=input,
                 feat_erb=feat_erb,
                 feat_spec=feat_spec,
             )
+
+            if do_profile and i < profile_iterations:
+                sync_device()
+                profile_timings["forward"].append((time.perf_counter() - forward_start) * 1000)
+
+            # Profile loss computation
+            if do_profile and i < profile_iterations:
+                loss_start = time.perf_counter()
+
             try:
                 err = losses.forward(clean, noisy, enh, m, lsnr, snrs=snrs)
             except Exception as e:
@@ -593,7 +651,15 @@ def run_epoch(
                 err = err + gan_g_loss
                 l_gan_g_mem.append(gan_g_loss.detach())
 
+            if do_profile and i < profile_iterations:
+                sync_device()
+                profile_timings["loss"].append((time.perf_counter() - loss_start) * 1000)
+
             if is_train:
+                # Profile backward pass
+                if do_profile and i < profile_iterations:
+                    backward_start = time.perf_counter()
+
                 try:
                     err.backward()
                     clip_grad_norm_(model.parameters(), 1.0, error_if_nonfinite=True)
@@ -622,9 +688,60 @@ def run_epoch(
                         continue
                     else:
                         raise e
+
+                if do_profile and i < profile_iterations:
+                    sync_device()
+                    profile_timings["backward"].append((time.perf_counter() - backward_start) * 1000)
+                    opt_start = time.perf_counter()
+
                 opt.step()
+
+                if do_profile and i < profile_iterations:
+                    sync_device()
+                    profile_timings["optimizer"].append((time.perf_counter() - opt_start) * 1000)
+
             detach_hidden(model)
         l_mem.append(err.detach())
+
+        # Record total iteration time
+        if do_profile and i < profile_iterations:
+            profile_timings["total"].append((time.perf_counter() - iter_start) * 1000)
+
+        # Print profiling report after collecting all samples
+        if do_profile and i == profile_iterations - 1:
+            logger.info("\n" + "=" * 80)
+            logger.info("MPS/GPU PROFILING REPORT")
+            logger.info("=" * 80)
+            logger.info(f"Device: {dev}")
+            logger.info(f"Profiled iterations: {profile_iterations}")
+            logger.info("-" * 80)
+
+            total_avg = sum(profile_timings["total"]) / len(profile_timings["total"])
+            for stage, times in profile_timings.items():
+                if times:
+                    avg = sum(times) / len(times)
+                    pct = (avg / total_avg * 100) if total_avg > 0 else 0
+                    bar = "█" * int(pct / 2)
+                    logger.info(f"{stage:12s}: {avg:8.2f} ms ({pct:5.1f}%) {bar}")
+
+            # MPS utilization estimate
+            if dev.type == "mps":
+                gpu_time = (
+                    sum(profile_timings["forward"]) / len(profile_timings["forward"])
+                    + sum(profile_timings["backward"]) / len(profile_timings["backward"])
+                    + sum(profile_timings["loss"]) / len(profile_timings["loss"])
+                )
+                logger.info("-" * 80)
+                logger.info(f"Estimated MPS GPU compute time: {gpu_time:.2f} ms/iter")
+                logger.info(f"Estimated MPS utilization: {gpu_time / total_avg * 100:.1f}%")
+
+                # Memory stats
+                logger.info("-" * 80)
+                logger.info(f"MPS allocated: {torch.mps.current_allocated_memory() / 1e9:.3f} GB")
+                logger.info(f"MPS driver allocated: {torch.mps.driver_allocated_memory() / 1e9:.3f} GB")
+
+            logger.info("=" * 80 + "\n")
+
         if i % log_freq == 0:
             l_mean = torch.stack(l_mem[-100:]).mean().cpu()
             if torch.isnan(l_mean):
