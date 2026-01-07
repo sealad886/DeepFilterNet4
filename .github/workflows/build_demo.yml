@@ -14,9 +14,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: [self-hosted, Linux, ARM64]
+          - os: ubuntu-25.0
             rust: nightly
-          - os: macos-14
+          - os: macos-15
             rust: nightly
           - os: windows-2022
             rust: nightly
