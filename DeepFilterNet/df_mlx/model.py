@@ -352,13 +352,18 @@ class DfNet4(nn.Module):
         """End-to-end enhancement from audio.
 
         Args:
-            noisy_audio: Noisy audio waveform (batch, samples)
+            noisy_audio: Noisy audio waveform (samples,) or (batch, samples)
             return_spec: Whether to also return the spectrum
 
         Returns:
             Enhanced audio waveform (or tuple with spectrum if return_spec)
         """
         from .ops import istft, stft
+
+        # Handle 1D input by adding batch dimension
+        input_1d = noisy_audio.ndim == 1
+        if input_1d:
+            noisy_audio = mx.expand_dims(noisy_audio, axis=0)
 
         # STFT
         spec_real, spec_imag = stft(
@@ -382,6 +387,12 @@ class DfNet4(nn.Module):
             hop_length=self.p.hop_size,
         )
 
+        # Remove batch dimension if input was 1D
+        if input_1d:
+            enhanced = mx.squeeze(enhanced, axis=0)
+            if return_spec:
+                spec_out = (mx.squeeze(spec_out[0], axis=0), mx.squeeze(spec_out[1], axis=0))
+
         if return_spec:
             return enhanced, spec_out
         return enhanced
@@ -397,12 +408,17 @@ class DfNet4Lite(DfNet4):
     def __init__(self, p: Optional[ModelParams4] = None):
         if p is None:
             p = get_default_config()
-            # Reduce dimensions for lite version
-            p.encoder.conv_channels = 32
-            p.encoder.emb_hidden_dim = 128
-            p.df.nb_df_hidden = 128
-            p.erb.erb_hidden = 32
-            p.backbone.nb_layers = 2
+
+        # Always apply lite modifications to create a smaller model
+        # Create a copy to avoid mutating the original
+        import copy
+
+        p = copy.deepcopy(p)
+        p.encoder.conv_channels = 32
+        p.encoder.emb_hidden_dim = 128
+        p.df.nb_df_hidden = 128
+        p.erb.erb_hidden = 32
+        p.backbone.nb_layers = 2
 
         super().__init__(p)
 

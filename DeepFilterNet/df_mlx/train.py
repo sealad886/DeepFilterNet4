@@ -260,7 +260,7 @@ class Trainer:
 
         # Gradient clipping
         if self.config.grad_clip > 0:
-            grads = optim.clip_grad_norm(grads, self.config.grad_clip)
+            grads, _ = optim.clip_grad_norm(grads, self.config.grad_clip)
 
         # Update parameters
         self.optimizer.update(self.model, grads)
@@ -394,10 +394,14 @@ class Trainer:
         Args:
             filename: Checkpoint filename
         """
+        from mlx.utils import tree_flatten
+
         path = self.checkpoint_dir / filename
 
-        # Save weights
-        weights = dict(self.model.parameters())
+        # Save weights - flatten the nested dict to a flat dict for safetensors
+        params = self.model.parameters()
+        flat_params = tree_flatten(params)
+        weights = {k: v for k, v in flat_params}
         mx.save_safetensors(str(path), weights)
 
         # Save training state
