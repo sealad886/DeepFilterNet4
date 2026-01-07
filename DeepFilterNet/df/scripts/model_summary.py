@@ -1,4 +1,4 @@
-from typing import List, Tuple
+from typing import List
 
 import torch
 
@@ -32,7 +32,7 @@ def model_summary_table(m: torch.nn.Module):
 
     childs = list(m.named_modules())[1:]
     max_len_name = max(len(n) for n, _ in childs) + 1
-    out: List[Tuple[str, str]] = []
+    out: List[str] = []
     # Heading
     out.append(("Name".ljust(max_len_name, " "), "Parameters"))
     out.append(("-" * len(out[0][0]), "-" * len(out[0][1])))

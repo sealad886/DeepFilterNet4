@@ -137,7 +137,8 @@ def init_df(
         epoch (int): Epoch number of the loaded checkpoint.
     """
     try:
-        from icecream import ic, install
+        from icecream import ic
+        from icecream.builtins import install
 
         ic.configureOutput(includeContext=True)
         install()

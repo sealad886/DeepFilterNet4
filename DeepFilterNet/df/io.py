@@ -33,7 +33,7 @@ except ImportError:
 
 # Handle AudioMetaData import across TorchAudio versions
 try:
-    from torchaudio import AudioMetaData
+    from torchaudio import AudioMetaData  # type: ignore[import-unresolved]  # noqa: F401
 
     TA_RESAMPLE_SINC = "sinc_interp_hann"
     TA_RESAMPLE_KAISER = "sinc_interp_kaiser"

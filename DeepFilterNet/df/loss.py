@@ -98,7 +98,7 @@ class Istft(nn.Module):
 class MultiResSpecLoss(nn.Module):
     gamma: Final[float]
     f: Final[float]
-    f_complex: Final[Optional[List[float]]]
+    f_complex: Optional[List[float]]  # Mutable during __init__, then treated as Final
 
     def __init__(
         self,

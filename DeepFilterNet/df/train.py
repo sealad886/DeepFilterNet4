@@ -4,6 +4,7 @@ import random
 import signal
 import sys
 import time
+from contextlib import nullcontext
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -11,6 +12,7 @@ import torch
 import torchaudio
 from loguru import logger
 from torch import Tensor, nn, optim
+from torch.amp.autocast_mode import autocast
 from torch.autograd.anomaly_mode import set_detect_anomaly
 from torch.autograd.grad_mode import set_grad_enabled
 from torch.nn.utils.clip_grad import clip_grad_norm_
@@ -146,6 +148,64 @@ def main():
     init_logger(file=os.path.join(args.base_dir, "train.log"), level=log_level, model=args.base_dir)
     config_file = os.path.join(args.base_dir, "config.ini")
     config.load(config_file)
+
+    # Hardware auto-tuning: detect and apply optimal settings if not explicitly configured
+    auto_tune = config("AUTO_TUNE", True, bool, section="train")
+    if auto_tune:
+        try:
+            from df.hardware import HardwareConfig
+
+            hw_config = HardwareConfig.detect(verbose=True)
+
+            # Apply auto-tuned settings: override if not set OR if set to invalid/zero values
+            # This handles the case where config was saved with bad values from an interrupted session
+            current_batch = config("BATCH_SIZE", 0, int, section="train")
+            if current_batch <= 0:
+                config.set("BATCH_SIZE", hw_config.batch_size, int, section="train")
+                logger.info(f"Auto-tuned BATCH_SIZE: {hw_config.batch_size}")
+
+            current_batch_eval = config("BATCH_SIZE_EVAL", 0, int, section="train")
+            if current_batch_eval <= 0:
+                config.set("BATCH_SIZE_EVAL", hw_config.batch_size_eval, int, section="train")
+                logger.info(f"Auto-tuned BATCH_SIZE_EVAL: {hw_config.batch_size_eval}")
+
+            current_workers = config("NUM_WORKERS", 0, int, section="train")
+            if current_workers <= 0:
+                config.set("NUM_WORKERS", hw_config.num_workers, int, section="train")
+                logger.info(f"Auto-tuned NUM_WORKERS: {hw_config.num_workers}")
+
+            current_prefetch = config("NUM_PREFETCH_BATCHES", 0, int, section="train")
+            if current_prefetch <= 0:
+                config.set("NUM_PREFETCH_BATCHES", hw_config.prefetch_batches, int, section="train")
+                logger.info(f"Auto-tuned NUM_PREFETCH_BATCHES: {hw_config.prefetch_batches}")
+
+            current_device = config("DEVICE", "", str, section="train")
+            if not current_device:
+                config.set("DEVICE", hw_config.device, str, section="train")
+                logger.info(f"Auto-tuned DEVICE: {hw_config.device}")
+
+            # Apply mixed precision settings
+            current_amp = config("ENABLE_AMP", None, bool, section="train")
+            if current_amp is None:
+                config.set("ENABLE_AMP", hw_config.enable_amp, bool, section="train")
+                logger.info(f"Auto-tuned ENABLE_AMP: {hw_config.enable_amp}")
+
+            current_amp_dtype = config("AMP_DTYPE", "", str, section="train")
+            if not current_amp_dtype:
+                config.set("AMP_DTYPE", hw_config.amp_dtype, str, section="train")
+                logger.info(f"Auto-tuned AMP_DTYPE: {hw_config.amp_dtype}")
+
+            # Apply MPS fallback if needed
+            if hw_config.use_mps_fallback:
+                os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+                logger.info("Enabled PYTORCH_ENABLE_MPS_FALLBACK for MPS complex tensor support")
+
+            logger.info("Hardware auto-tuning applied (set AUTO_TUNE=false to disable)")
+        except ImportError as e:
+            logger.warning(f"Hardware auto-tuning unavailable: {e}")
+        except Exception as e:
+            logger.warning(f"Hardware auto-tuning failed, using defaults: {e}")
+
     seed = config("SEED", 42, int, section="train")
     check_manual_seed(seed)
     logger.info("Running on device {}".format(get_device()))
@@ -185,6 +245,23 @@ def main():
         mask_only=mask_only,
         train_df_only=train_df_only,
     )
+
+    # Optional torch.compile for faster training (experimental on MPS)
+    use_compile: bool = config("TORCH_COMPILE", False, bool, section="train")
+    if use_compile:
+        try:
+            dev = get_device()
+            # torch.compile works best with CUDA, has limited MPS support
+            if dev.type == "cuda":
+                logger.info("Compiling model with torch.compile (mode=reduce-overhead)")
+                model = torch.compile(model, mode="reduce-overhead")  # type: ignore
+            elif dev.type == "mps":
+                logger.info("Compiling model with torch.compile (mode=default, MPS backend)")
+                model = torch.compile(model, mode="default")  # type: ignore
+            else:
+                logger.warning("torch.compile not supported on CPU, skipping")
+        except Exception as e:
+            logger.warning(f"torch.compile failed, continuing without: {e}")
 
     bs: int = config("BATCH_SIZE", 1, int, section="train")
     bs_eval: int = config("BATCH_SIZE_EVAL", 0, int, section="train")
@@ -518,6 +595,27 @@ def run_epoch(
     if detect_anomaly:
         logger.info("Running with autograd profiling")
     dev = get_device()
+
+    # Mixed precision setup
+    enable_amp: bool = config("ENABLE_AMP", False, bool, section="train")
+    amp_dtype_str: str = config("AMP_DTYPE", "float16", str, section="train")
+    amp_dtype = torch.float16 if amp_dtype_str == "float16" else torch.bfloat16
+
+    # Determine autocast device type
+    if dev.type == "mps":
+        amp_device = "mps"
+    elif dev.type == "cuda":
+        amp_device = "cuda"
+    else:
+        amp_device = "cpu"
+        enable_amp = False  # AMP not beneficial on CPU
+
+    if enable_amp:
+        logger.info(f"Mixed precision enabled: {amp_dtype_str} on {amp_device}")
+        amp_context = autocast(device_type=amp_device, dtype=amp_dtype)
+    else:
+        amp_context = nullcontext()
+
     l_mem = []
     l_gan_g_mem = []
     l_gan_d_mem = []
@@ -591,7 +689,7 @@ def run_epoch(
             sync_device()
             profile_timings["transfer"].append((time.perf_counter() - transfer_start) * 1000)
 
-        with set_detect_anomaly(detect_anomaly and is_train), set_grad_enabled(is_train):
+        with set_detect_anomaly(detect_anomaly and is_train), set_grad_enabled(is_train), amp_context:
             if not is_train:
                 input = as_real(noisy).clone()
             else:
@@ -973,8 +1071,12 @@ def cleanup(*args):
 
 
 if __name__ == "__main__":
-    from icecream import ic, install
+    try:
+        from icecream import ic
+        from icecream.builtins import install
 
-    ic.includeContext = True
-    install()
+        ic.includeContext = True
+        install()
+    except ImportError:
+        pass  # icecream is optional for debugging
     main()

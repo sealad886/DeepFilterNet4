@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import sys
+from typing import Tuple
 
 import h5py
 import torch
@@ -22,7 +23,7 @@ def windowed_energy(x: Tensor, ws: int, hop) -> Tensor:
     return x
 
 
-def trim(audio: Tensor, sr: int) -> (Tensor, bool):
+def trim(audio: Tensor, sr: int) -> Tuple[Tensor, bool]:
     ws = sr // 10
     hop = sr // 20
     e = windowed_energy(audio, ws, hop)
@@ -77,12 +78,12 @@ def main(path: str):
                 if codec == "pcm" and out_codec == codec:
                     data = audio
                 else:
-                    data = encode(audio, sr, out_codec).squeeze()
+                    data = encode(audio, sr, out_codec, dtype=audio.dtype).squeeze()
             else:
                 if codec == out_codec:
                     data = sample
                 else:
-                    data = encode(audio, sr, out_codec).squeeze()
+                    data = encode(audio, sr, out_codec, dtype=audio.dtype).squeeze()
 
             ds = grp.create_dataset(n, data=data, **comp_kwargs)
             ds.attrs["n_samples"] = audio.shape[-1]

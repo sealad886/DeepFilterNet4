@@ -36,7 +36,7 @@ def eval_metric(
     is_close = torch.isclose(m_e, m_t, atol=__a_tol, rtol=__r_tol).all()
     if not is_close:
         logger.error(prefix + f"Diff     {m_t - m_e}")
-    return is_close
+    return all(is_close)
 
 
 TARGET_METRICS = {
