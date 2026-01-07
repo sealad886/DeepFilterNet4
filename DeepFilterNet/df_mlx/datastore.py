@@ -203,6 +203,18 @@ class MLXDatastoreWriter:
             self._sample_counts = existing_index.total_samples.copy()
             self._files_processed = existing_index.files_processed.copy()
 
+            # Backward compatibility: estimate files_processed from samples if missing
+            # (old format didn't track files_processed)
+            for split in ["train", "valid", "test"]:
+                samples = self._sample_counts.get(split, 0)
+                files = self._files_processed.get(split, 0)
+                if samples > 0 and files == 0:
+                    # Estimate: assume ~25% of files are skipped (too short)
+                    # This is a conservative estimate to avoid re-processing
+                    estimated_files = int(samples * 1.35)
+                    self._files_processed[split] = estimated_files
+                    print(f"  Warning: Upgrading old index - estimated {estimated_files:,} files processed for {split}")
+
             # Count shards per split
             for shard in self._shards:
                 self._shard_counts[shard.split] = max(
