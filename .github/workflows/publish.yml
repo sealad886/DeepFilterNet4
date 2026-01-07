@@ -21,7 +21,7 @@ jobs:
       upload_url: ${{ steps.release.outputs.upload_url }}
     steps:
       - name: Checkout DeepFilterNet
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -105,7 +105,7 @@ jobs:
         shell: bash
     steps:
       - name: Checkout DeepFilterNet
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Echo git tag
         run: |
@@ -124,7 +124,7 @@ jobs:
 
       - name: Install Python
         if: runner.os != 'linux'
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python.version }}
       - name: Setup Python manylinux x86
@@ -183,7 +183,7 @@ jobs:
           delvewheel repair target/wheels/DeepFilterLib-*.whl -w target/repaired
           mv target/repaired/* target/wheels/
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v4
         with:
           name: libdf-wheels-${{ needs.create-release.outputs.df_version }}
           path: target/wheels/
@@ -196,8 +196,8 @@ jobs:
         python-version: ["3.10"] # wheel will be independent of python version
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install poetry
@@ -205,7 +205,7 @@ jobs:
       - name: Build wheels
         run: poetry build -vvv
         working-directory: DeepFilterNet
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v4
         with:
           name: deepfilternet-wheels-${{ needs.create-release.outputs.df_version }}
           path: DeepFilterNet/dist/
@@ -214,7 +214,7 @@ jobs:
     runs-on: ubuntu-22.04
     needs: [build-libdf-wheels, build-deepfilternet-wheels, create-release]
     steps:
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v5
       - name: Show DF version
         run: |
           echo "DF_VERSION=${{ needs.create-release.outputs.df_version }}" >> $GITHUB_ENV
@@ -267,7 +267,7 @@ jobs:
       image: docker://messense/manylinux${{matrix.manylinux}}-cross:${{matrix.platform.arch}}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
@@ -285,7 +285,7 @@ jobs:
             --target ${{ matrix.platform.target }} \
             --manylinux ${{ matrix.manylinux }} \
             -m pyDF/Cargo.toml
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v4
         with:
           name: libdf-arm-wheels
           path: dist/
@@ -335,7 +335,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -375,7 +375,7 @@ jobs:
           mv "target/${{ matrix.target }}/release/deep-filter${{ matrix.ext }}" "${{ env.TARGET_DIR }}/${{ env.DF_BIN_NAME }}"
           chmod +x "${{ env.TARGET_DIR }}/${{ env.DF_BIN_NAME }}"
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v4
         with:
           name: ${{ env.DF_BIN_NAME }}
           path: ${{ env.TARGET_DIR }}/${{ env.DF_BIN_NAME }}
@@ -437,7 +437,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -471,7 +471,7 @@ jobs:
         run: |
           mv "target/${{ matrix.target }}/release-lto/${{ matrix.libname }}.${{ matrix.libext }}" "${{ env.TARGET_DIR }}/${{ env.DF_LADSPA_NAME }}"
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v4
         with:
           name: ${{ env.DF_LADSPA_NAME }}
           path: ${{ env.TARGET_DIR }}/${{ env.DF_LADSPA_NAME }}
