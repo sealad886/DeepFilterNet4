@@ -199,7 +199,7 @@ class ErbDecoder4(nn.Module):
         # Simple linear decoder for now
         x = self.input_proj(emb)
         x = self.output_proj(x)
-        mask = self.mask(x)
+        mask: mx.array = self.mask(x)  # type: ignore[assignment]
         return mask
 
 
@@ -1002,7 +1002,7 @@ class DfNet4(nn.Module):
         self,
         noisy_audio: mx.array,
         return_spec: bool = False,
-    ) -> mx.array:
+    ) -> mx.array | tuple[mx.array, tuple[mx.array, mx.array]]:
         """End-to-end enhancement from audio.
 
         Args:
