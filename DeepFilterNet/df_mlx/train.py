@@ -120,6 +120,32 @@ def snr_loss(
     return -snr  # Negative for minimization
 
 
+def lsnr_loss(
+    pred_lsnr: mx.array,
+    target_lsnr: mx.array,
+    lsnr_min: float = -15.0,
+    lsnr_max: float = 40.0,
+) -> mx.array:
+    """LSNR (Local SNR) prediction loss.
+
+    L1 loss between predicted and target LSNR values, clipped to valid range.
+
+    Args:
+        pred_lsnr: Predicted LSNR (batch, time, 1)
+        target_lsnr: Target LSNR (batch, time, 1)
+        lsnr_min: Minimum valid LSNR value
+        lsnr_max: Maximum valid LSNR value
+
+    Returns:
+        Scalar loss value
+    """
+    # Clip to valid range
+    pred_clipped = mx.clip(pred_lsnr, lsnr_min, lsnr_max)
+    target_clipped = mx.clip(target_lsnr, lsnr_min, lsnr_max)
+
+    return mx.mean(mx.abs(pred_clipped - target_clipped))
+
+
 # ============================================================================
 # Learning Rate Scheduling
 # ============================================================================

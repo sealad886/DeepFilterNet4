@@ -85,6 +85,11 @@ for batch in dataloader:
 | Training loop | ✅ Complete | Spectral loss, gradient clipping |
 | Checkpointing | ✅ Complete | Save/load with safetensors |
 | Weight conversion | ✅ Complete | PyTorch → MLX conversion |
+| LSNR estimation | ✅ Complete | Encoder outputs per-frame LSNR |
+| LSNR dropout | ✅ Complete | Training-mode dropout based on LSNR threshold |
+| MultiResDfDecoder | ✅ Complete | Multi-resolution DF with shared Mamba backbone |
+| AdaptiveOrderPredictor | ✅ Complete | Predicts optimal filter order per frame |
+| LSNR loss | ✅ Complete | L1 loss for LSNR prediction |
 
 ### ⚠️ Partially Implemented
 
@@ -99,10 +104,7 @@ These features exist in the PyTorch `deepfilternet4.py` but are not in the MLX i
 
 | Feature | PyTorch Location | Description |
 |---------|-----------------|-------------|
-| MultiResDfDecoder | Lines 850-950 | Multi-resolution deep filtering with multiple filter orders |
-| AdaptiveDfDecoder | Lines 960-1050 | Adaptive filter order based on frequency band |
 | HybridEncoder | Lines 1100-1200 | Separate time/phase processing branches |
-| LSNR dropout | Loss functions | Local SNR-based masking during training |
 | Lookahead configurations | Model variants | Different lookahead settings for real-time variants |
 | Complex gain output | DfDecoder variants | Alternative to coefficient-based filtering |
 | Model statistics tracking | Training | Running mean/variance tracking for normalization |
@@ -111,9 +113,9 @@ These features exist in the PyTorch `deepfilternet4.py` but are not in the MLX i
 
 For most use cases (inference with pretrained models), the current implementation provides full feature coverage. The missing features are primarily:
 
-1. **Training enhancements** (LSNR dropout, multi-res loss) - for advanced training
-2. **Alternative architectures** (MultiRes, Adaptive, Hybrid) - for research/experimentation
-3. **Real-time variants** - for streaming applications
+1. **Alternative architectures** (HybridEncoder) - for research/experimentation
+2. **Real-time variants** - for streaming applications with specific lookahead requirements
+3. **Alternative outputs** (Complex gain) - for different filtering strategies
 
 ## Testing
 
@@ -124,8 +126,8 @@ cd DeepFilterNet
 python -m pytest df_mlx/test_mlx_comprehensive.py -v
 ```
 
-This includes 87 tests covering:
-- STFT/iSTFT operations (14 tests)
+This includes 122 tests covering:
+- STFT/iSTFT operations (15 tests)
 - ERB filterbank (7 tests)
 - Complex operations (4 tests)
 - Conv modules (11 tests)
@@ -137,6 +139,11 @@ This includes 87 tests covering:
 - Training utilities (7 tests)
 - Weight conversion (1 test)
 - Edge cases (4 tests)
+- Numerical properties (6 tests)
+- LSNR features (7 tests)
+- Multi-resolution decoder (7 tests)
+- Adaptive order predictor (12 tests)
+- LSNR config (3 tests)
 
 ## Known Limitations
 

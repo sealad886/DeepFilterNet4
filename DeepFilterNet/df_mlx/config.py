@@ -72,6 +72,16 @@ class AudioParams:
 
 
 @dataclass
+class LsnrParams:
+    """LSNR (Local SNR) estimation and dropout parameters."""
+
+    lsnr_min: float = -15.0  # Minimum LSNR value (dB)
+    lsnr_max: float = 40.0  # Maximum LSNR value (dB)
+    lsnr_dropout_threshold: float = -10.0  # LSNR threshold for dropout (dB)
+    lsnr_dropout: bool = False  # Enable LSNR dropout during training
+
+
+@dataclass
 class ModelParams4:
     """Complete model parameters for DeepFilterNet4.
 
@@ -85,6 +95,7 @@ class ModelParams4:
     encoder: EncoderParams = field(default_factory=EncoderParams)
     backbone: BackboneParams = field(default_factory=BackboneParams)
     audio: AudioParams = field(default_factory=AudioParams)
+    lsnr: LsnrParams = field(default_factory=LsnrParams)
 
     # Convenience aliases (for compatibility with PyTorch impl)
     @property
@@ -170,6 +181,10 @@ class TrainConfig:
     # Logging
     log_every: int = 100
     wandb_project: Optional[str] = None
+
+    # LSNR dropout
+    lsnr_dropout: bool = False
+    lsnr_dropout_threshold: float = -10.0
 
 
 def get_default_config() -> ModelParams4:

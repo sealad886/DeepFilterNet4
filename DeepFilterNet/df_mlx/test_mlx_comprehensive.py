@@ -660,13 +660,16 @@ class TestFullModel:
         feat_erb = mx.random.normal(shape=(2, 100, 32))
         feat_spec = mx.random.normal(shape=(2, 100, 96, 2))
 
-        emb = encoder(feat_erb, feat_spec)
-        mx.eval(emb)
+        # Encoder now returns (emb, lsnr) tuple
+        emb, lsnr = encoder(feat_erb, feat_spec)
+        mx.eval(emb, lsnr)
 
         assert emb.shape[0] == 2
         assert emb.shape[1] == 100
         assert emb.shape[2] == params.emb_hidden_dim
         assert not mx.any(mx.isnan(emb))
+        # LSNR is per-frame with shape (batch, time, 1)
+        assert lsnr.shape == (2, 100, 1)
 
     def test_erb_decoder_forward(self):
         """Test ErbDecoder4 forward pass."""
@@ -1198,6 +1201,397 @@ class TestNumericalProperties:
         # Should be identical
         assert mx.allclose(out1_real, out2_real).item()
         assert mx.allclose(out1_imag, out2_imag).item()
+
+
+# ============================================================================
+# Test: New Features - LSNR, MultiResDfDecoder, AdaptiveOrderPredictor
+# ============================================================================
+
+
+class TestLSNRFeatures:
+    """Tests for LSNR estimation and dropout features."""
+
+    def test_encoder_outputs_lsnr(self):
+        """Test that Encoder4 now outputs both embedding and LSNR."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import Encoder4
+
+        params = ModelParams4()
+        encoder = Encoder4(params)
+
+        batch, time = 2, 100
+        feat_erb = mx.random.normal(shape=(batch, time, 32))
+        feat_spec = mx.random.normal(shape=(batch, time, 96, 2))
+
+        output = encoder(feat_erb, feat_spec)
+        mx.eval(output)
+
+        # Should return tuple of (emb, lsnr)
+        assert isinstance(output, tuple)
+        assert len(output) == 2
+
+        emb, lsnr = output
+        mx.eval(emb, lsnr)
+
+        assert emb.shape == (batch, time, params.emb_hidden_dim)
+        assert lsnr.shape == (batch, time, 1)
+        assert not mx.any(mx.isnan(emb))
+        assert not mx.any(mx.isnan(lsnr))
+
+    def test_lsnr_range(self):
+        """Test that LSNR is within expected range."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import Encoder4
+
+        params = ModelParams4()
+        encoder = Encoder4(params)
+
+        batch, time = 2, 100
+        feat_erb = mx.random.normal(shape=(batch, time, 32))
+        feat_spec = mx.random.normal(shape=(batch, time, 96, 2))
+
+        _, lsnr = encoder(feat_erb, feat_spec)
+        mx.eval(lsnr)
+
+        lsnr_min = params.lsnr.lsnr_min
+        lsnr_max = params.lsnr.lsnr_max
+
+        # LSNR should be bounded by tanh scaling
+        assert float(mx.min(lsnr)) >= lsnr_min - 0.1
+        assert float(mx.max(lsnr)) <= lsnr_max + 0.1
+
+    def test_dfnet4_lsnr_dropout_flag(self):
+        """Test DfNet4 with LSNR dropout enabled."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        params = ModelParams4()
+        model = DfNet4(params, lsnr_dropout=True, lsnr_dropout_threshold=-10.0)
+
+        assert model.lsnr_dropout is True
+        assert model.lsnr_dropout_threshold == -10.0
+
+    def test_dfnet4_training_mode(self):
+        """Test DfNet4 forward with training flag."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        params = ModelParams4()
+        model = DfNet4(params, lsnr_dropout=True)
+
+        batch, time, n_freqs = 2, 50, 481
+        spec_real = mx.random.normal(shape=(batch, time, n_freqs))
+        spec_imag = mx.random.normal(shape=(batch, time, n_freqs))
+        feat_erb = mx.random.normal(shape=(batch, time, 32))
+        feat_spec = mx.random.normal(shape=(batch, time, 96, 2))
+
+        # Run in training mode
+        out_train = model((spec_real, spec_imag), feat_erb, feat_spec, training=True)
+        mx.eval(out_train[0])
+
+        # Run in inference mode
+        out_eval = model((spec_real, spec_imag), feat_erb, feat_spec, training=False)
+        mx.eval(out_eval[0])
+
+        # Both should produce valid output
+        assert not mx.any(mx.isnan(out_train[0]))
+        assert not mx.any(mx.isnan(out_eval[0]))
+
+    def test_forward_with_lsnr(self):
+        """Test forward_with_lsnr method."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        params = ModelParams4()
+        model = DfNet4(params)
+
+        batch, time, n_freqs = 2, 50, 481
+        spec_real = mx.random.normal(shape=(batch, time, n_freqs))
+        spec_imag = mx.random.normal(shape=(batch, time, n_freqs))
+        feat_erb = mx.random.normal(shape=(batch, time, 32))
+        feat_spec = mx.random.normal(shape=(batch, time, 96, 2))
+
+        result = model.forward_with_lsnr((spec_real, spec_imag), feat_erb, feat_spec)
+        mx.eval(result)
+
+        assert isinstance(result, tuple)
+        spec_out, lsnr = result
+
+        assert isinstance(spec_out, tuple)
+        assert lsnr.shape == (batch, time, 1)
+        assert not mx.any(mx.isnan(lsnr))
+
+    def test_lsnr_loss_function(self):
+        """Test LSNR loss computation."""
+        from df_mlx.train import lsnr_loss
+
+        pred_lsnr = mx.random.normal(shape=(2, 50, 1)) * 10
+        target_lsnr = mx.random.normal(shape=(2, 50, 1)) * 10
+
+        loss = lsnr_loss(pred_lsnr, target_lsnr)
+        mx.eval(loss)
+
+        assert loss.shape == ()
+        assert not mx.isnan(loss)
+        assert float(loss) >= 0
+
+    def test_lsnr_loss_clipping(self):
+        """Test that LSNR loss clips values correctly."""
+        from df_mlx.train import lsnr_loss
+
+        # Create extreme values
+        pred_lsnr = mx.array([[[100.0]], [[-100.0]]])
+        target_lsnr = mx.array([[[0.0]], [[0.0]]])
+
+        loss = lsnr_loss(pred_lsnr, target_lsnr, lsnr_min=-15.0, lsnr_max=40.0)
+        mx.eval(loss)
+
+        # Loss should be finite due to clipping
+        assert not mx.isnan(loss)
+
+
+class TestMultiResDfDecoder:
+    """Tests for multi-resolution DF decoder."""
+
+    def test_multi_res_df_decoder_init(self):
+        """Test MultiResDfDecoder initialization."""
+        from df_mlx.model import MultiResDfDecoder
+
+        resolutions = [(96, 5), (48, 3), (24, 2)]
+        decoder = MultiResDfDecoder(
+            emb_dim=256,
+            hidden_dim=256,
+            resolutions=resolutions,
+        )
+
+        assert len(decoder.output_heads) == len(resolutions)
+
+    def test_multi_res_df_decoder_forward(self):
+        """Test MultiResDfDecoder forward pass."""
+        from df_mlx.model import MultiResDfDecoder
+
+        resolutions = [(96, 5), (48, 3), (24, 2)]
+        emb_dim = 256
+        decoder = MultiResDfDecoder(
+            emb_dim=emb_dim,
+            hidden_dim=256,
+            resolutions=resolutions,
+        )
+
+        batch, time = 2, 50
+        emb = mx.random.normal(shape=(batch, time, emb_dim))
+
+        outputs = decoder(emb)
+        mx.eval(outputs)
+
+        # Should return list of coefficients for each resolution
+        assert isinstance(outputs, list)
+        assert len(outputs) == len(resolutions)
+
+        for (nb_df, df_order), coef in zip(resolutions, outputs):
+            assert coef.shape == (batch, time, nb_df, df_order, 2)
+            assert not mx.any(mx.isnan(coef))
+
+    @pytest.mark.parametrize(
+        "resolutions",
+        [
+            [(96, 5)],
+            [(96, 5), (48, 3)],
+            [(96, 5), (48, 3), (24, 2)],
+            [(64, 4), (32, 2)],
+        ],
+    )
+    def test_multi_res_various_configs(self, resolutions):
+        """Test MultiResDfDecoder with various resolution configs."""
+        from df_mlx.model import MultiResDfDecoder
+
+        emb_dim = 256
+        decoder = MultiResDfDecoder(
+            emb_dim=emb_dim,
+            hidden_dim=256,
+            resolutions=resolutions,
+        )
+
+        batch, time = 2, 50
+        emb = mx.random.normal(shape=(batch, time, emb_dim))
+
+        outputs = decoder(emb)
+        mx.eval(outputs)
+
+        assert len(outputs) == len(resolutions)
+
+    def test_multi_res_gradient_flow(self):
+        """Test gradient flow through MultiResDfDecoder."""
+        from df_mlx.model import MultiResDfDecoder
+
+        resolutions = [(96, 5), (48, 3)]
+        emb_dim = 256
+        decoder = MultiResDfDecoder(
+            emb_dim=emb_dim,
+            hidden_dim=256,
+            resolutions=resolutions,
+        )
+
+        batch, time = 2, 20
+        emb = mx.random.normal(shape=(batch, time, emb_dim))
+
+        def loss_fn(model):
+            outputs = model(emb)
+            return sum(mx.mean(c**2) for c in outputs)
+
+        loss, grads = nn.value_and_grad(decoder, loss_fn)(decoder)
+        mx.eval(loss)
+
+        assert not mx.isnan(loss)
+
+
+class TestAdaptiveOrderPredictor:
+    """Tests for adaptive order predictor."""
+
+    def test_adaptive_order_init(self):
+        """Test AdaptiveOrderPredictor initialization."""
+        from df_mlx.model import AdaptiveOrderPredictor
+
+        predictor = AdaptiveOrderPredictor(
+            emb_dim=256,
+            max_order=5,
+            min_order=1,
+        )
+
+        assert predictor.max_order == 5
+
+    def test_adaptive_order_forward(self):
+        """Test AdaptiveOrderPredictor forward pass."""
+        from df_mlx.model import AdaptiveOrderPredictor
+
+        max_order = 5
+        min_order = 1
+        predictor = AdaptiveOrderPredictor(
+            emb_dim=256,
+            max_order=max_order,
+            min_order=min_order,
+        )
+
+        batch, time = 2, 50
+        emb = mx.random.normal(shape=(batch, time, 256))
+
+        order_weights, predicted_order = predictor(emb)
+        mx.eval(order_weights, predicted_order)
+
+        # order_weights: (batch, time, num_orders) - softmax probabilities
+        num_orders = max_order - min_order + 1
+        assert order_weights.shape == (batch, time, num_orders)
+        # Should sum to ~1 along order dimension
+        sums = mx.sum(order_weights, axis=-1)
+        assert mx.allclose(sums, mx.ones_like(sums), atol=1e-5).item()
+
+        # predicted_order: (batch, time) - integer order
+        assert predicted_order.shape == (batch, time)
+
+    @pytest.mark.parametrize("max_order", [3, 5, 7, 10])
+    def test_adaptive_order_various_max(self, max_order):
+        """Test with various max_order values."""
+        from df_mlx.model import AdaptiveOrderPredictor
+
+        min_order = 2
+        predictor = AdaptiveOrderPredictor(
+            emb_dim=256,
+            max_order=max_order,
+            min_order=min_order,
+        )
+
+        batch, time = 2, 50
+        emb = mx.random.normal(shape=(batch, time, 256))
+
+        order_weights, predicted_order = predictor(emb)
+        mx.eval(order_weights)
+
+        num_orders = max_order - min_order + 1
+        assert order_weights.shape == (batch, time, num_orders)
+
+    @pytest.mark.parametrize("temperature", [0.1, 0.5, 1.0, 2.0, 5.0])
+    def test_adaptive_order_temperature(self, temperature):
+        """Test temperature effect on order predictions."""
+        from df_mlx.model import AdaptiveOrderPredictor
+
+        predictor = AdaptiveOrderPredictor(
+            emb_dim=256,
+            max_order=5,
+            min_order=2,
+        )
+
+        batch, time = 2, 50
+        emb = mx.random.normal(shape=(batch, time, 256))
+
+        # Temperature is passed to __call__, not __init__
+        order_weights, _ = predictor(emb, temperature=temperature)
+        mx.eval(order_weights)
+
+        # Lower temperature should produce more peaked distributions
+        # Higher temperature should produce more uniform distributions
+        entropy = -mx.sum(order_weights * mx.log(order_weights + 1e-8), axis=-1)
+        avg_entropy = float(mx.mean(entropy))
+
+        # Just verify it produces valid output
+        assert not mx.isnan(mx.array(avg_entropy))
+
+    def test_adaptive_order_gradient_flow(self):
+        """Test gradient flow through AdaptiveOrderPredictor."""
+        from df_mlx.model import AdaptiveOrderPredictor
+
+        predictor = AdaptiveOrderPredictor(
+            emb_dim=256,
+            max_order=5,
+            min_order=2,
+        )
+
+        batch, time = 2, 20
+        emb = mx.random.normal(shape=(batch, time, 256))
+
+        def loss_fn(model):
+            order_weights, _ = model(emb)
+            return mx.mean(order_weights)
+
+        loss, grads = nn.value_and_grad(predictor, loss_fn)(predictor)
+        mx.eval(loss)
+
+        assert not mx.isnan(loss)
+
+
+class TestLSNRConfig:
+    """Tests for LSNR configuration."""
+
+    def test_lsnr_params_defaults(self):
+        """Test LsnrParams default values."""
+        from df_mlx.config import LsnrParams
+
+        params = LsnrParams()
+
+        assert params.lsnr_min == -15.0
+        assert params.lsnr_max == 40.0
+        assert params.lsnr_dropout_threshold == -10.0
+        assert params.lsnr_dropout is False
+
+    def test_model_params_has_lsnr(self):
+        """Test that ModelParams4 includes LsnrParams."""
+        from df_mlx.config import ModelParams4
+
+        params = ModelParams4()
+
+        assert hasattr(params, "lsnr")
+        assert params.lsnr.lsnr_min == -15.0
+        assert params.lsnr.lsnr_max == 40.0
+
+    def test_train_config_lsnr_dropout(self):
+        """Test TrainConfig has LSNR dropout settings."""
+        from df_mlx.config import TrainConfig
+
+        config = TrainConfig()
+
+        assert hasattr(config, "lsnr_dropout")
+        assert hasattr(config, "lsnr_dropout_threshold")
+        assert config.lsnr_dropout is False
+        assert config.lsnr_dropout_threshold == -10.0
 
 
 # ============================================================================

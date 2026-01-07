@@ -86,11 +86,18 @@ class Encoder4(nn.Module):
         self.emb_linear = GroupedLinear(combined_dim, p.emb_hidden_dim, groups=p.enc_linear_groups)
         self.emb_norm = nn.LayerNorm(p.emb_hidden_dim)
 
+        # LSNR estimation head
+        lsnr_min = p.lsnr.lsnr_min if hasattr(p, "lsnr") else -15.0
+        lsnr_max = p.lsnr.lsnr_max if hasattr(p, "lsnr") else 40.0
+        self.lsnr_scale = (lsnr_max - lsnr_min) / 2
+        self.lsnr_offset = lsnr_min + self.lsnr_scale
+        self.lsnr_fc = nn.Linear(p.emb_hidden_dim, 1)
+
     def __call__(
         self,
         feat_erb: mx.array,
         feat_spec: mx.array,
-    ) -> mx.array:
+    ) -> Tuple[mx.array, mx.array]:
         """Forward pass.
 
         Args:
@@ -98,7 +105,9 @@ class Encoder4(nn.Module):
             feat_spec: DF features (batch, time, df_bins, 2)
 
         Returns:
-            Embedding tensor (batch, time, emb_hidden_dim)
+            Tuple of:
+                - Embedding tensor (batch, time, emb_hidden_dim)
+                - LSNR estimate (batch, time, 1)
         """
         batch, time = feat_erb.shape[:2]
 
@@ -129,7 +138,10 @@ class Encoder4(nn.Module):
         emb = self.emb_linear(combined)
         emb = self.emb_norm(emb)
 
-        return emb
+        # LSNR estimation (tanh to bound output, then scale)
+        lsnr = mx.tanh(self.lsnr_fc(emb)) * self.lsnr_scale + self.lsnr_offset
+
+        return emb, lsnr
 
 
 # ============================================================================
@@ -245,6 +257,143 @@ class DfDecoder4(nn.Module):
         return x
 
 
+class MultiResDfDecoder(nn.Module):
+    """Multi-resolution Deep Filter decoder.
+
+    Generates DF coefficients at multiple frequency resolutions for improved
+    enhancement quality. Uses a shared backbone with resolution-specific output heads.
+
+    Args:
+        emb_dim: Input embedding dimension
+        hidden_dim: Hidden dimension for backbone
+        resolutions: List of (num_freqs, frame_size) tuples defining each resolution
+        num_layers: Number of backbone layers
+        d_state: Mamba state dimension
+        d_conv: Mamba convolution width
+    """
+
+    def __init__(
+        self,
+        emb_dim: int = 256,
+        hidden_dim: int = 256,
+        resolutions: Optional[list] = None,
+        num_layers: int = 3,
+        d_state: int = 16,
+        d_conv: int = 4,
+    ):
+        super().__init__()
+
+        if resolutions is None:
+            resolutions = [(96, 5), (48, 3), (24, 2)]
+
+        self.resolutions = resolutions
+        self.emb_dim = emb_dim
+        self.hidden_dim = hidden_dim
+
+        # Shared backbone using SqueezedMamba
+        self.backbone = SqueezedMamba(
+            input_size=emb_dim,
+            hidden_size=hidden_dim,
+            output_size=hidden_dim,
+            num_layers=num_layers,
+            d_state=d_state,
+            d_conv=d_conv,
+        )
+
+        # Resolution-specific output heads
+        self.output_heads = []
+        for num_freqs, frame_size in resolutions:
+            out_dim = num_freqs * frame_size * 2  # Complex coefficients
+            head = nn.Sequential(
+                nn.Linear(hidden_dim, out_dim),
+                nn.Tanh(),
+            )
+            self.output_heads.append(head)
+
+    def __call__(self, emb: mx.array) -> list:
+        """Generate DF coefficients for all resolutions.
+
+        Args:
+            emb: Encoder embedding (batch, time, emb_dim)
+
+        Returns:
+            List of coefficient tensors, one per resolution.
+            Each has shape (batch, time, num_freqs, frame_size, 2)
+        """
+        batch, time, _ = emb.shape
+
+        # Shared backbone processing
+        hidden, _ = self.backbone(emb)  # (batch, time, hidden_dim)
+
+        # Generate coefficients for each resolution
+        coefs_list = []
+        for head, (num_freqs, frame_size) in zip(self.output_heads, self.resolutions):
+            # Generate raw coefficients
+            raw_coefs = head(hidden)  # (batch, time, num_freqs * frame_size * 2)
+
+            # Reshape to (batch, time, num_freqs, frame_size, 2)
+            coefs = raw_coefs.reshape(batch, time, num_freqs, frame_size, 2)
+            coefs_list.append(coefs)
+
+        return coefs_list
+
+
+class AdaptiveOrderPredictor(nn.Module):
+    """Predicts optimal filter order per frame.
+
+    Uses a small network to predict which filter order is best for each
+    time frame based on input characteristics.
+
+    Args:
+        emb_dim: Input embedding dimension
+        max_order: Maximum filter order
+        min_order: Minimum filter order
+    """
+
+    def __init__(
+        self,
+        emb_dim: int = 256,
+        max_order: int = 7,
+        min_order: int = 2,
+    ):
+        super().__init__()
+        self.max_order = max_order
+        self.min_order = min_order
+        self.num_orders = max_order - min_order + 1
+
+        # Predictor network
+        self.predictor = nn.Sequential(
+            nn.Linear(emb_dim, emb_dim // 2),
+            nn.ReLU(),
+            nn.Linear(emb_dim // 2, self.num_orders),
+        )
+
+    def __call__(
+        self,
+        emb: mx.array,
+        temperature: float = 1.0,
+    ) -> tuple:
+        """Predict filter order.
+
+        Args:
+            emb: Embedding tensor (batch, time, emb_dim)
+            temperature: Softmax temperature (lower = more confident)
+
+        Returns:
+            order_weights: Soft order selection weights (batch, time, num_orders)
+            predicted_order: Hard order prediction (batch, time)
+        """
+        logits = self.predictor(emb)  # (batch, time, num_orders)
+
+        # Soft selection using softmax
+        order_weights = mx.softmax(logits / temperature, axis=-1)
+
+        # Hard selection (argmax)
+        predicted_order = mx.argmax(logits, axis=-1) + self.min_order
+
+        return order_weights, predicted_order
+
+
 # ============================================================================
 # Main Model
 # ============================================================================
@@ -258,14 +407,36 @@ class DfNet4(nn.Module):
 
     Args:
         p: Model parameters (uses defaults if None)
+        lsnr_dropout: Enable LSNR-based dropout during training (overrides config)
+        lsnr_dropout_threshold: LSNR threshold for dropout in dB
     """
 
-    def __init__(self, p: Optional[ModelParams4] = None):
+    def __init__(
+        self,
+        p: Optional[ModelParams4] = None,
+        lsnr_dropout: Optional[bool] = None,
+        lsnr_dropout_threshold: Optional[float] = None,
+    ):
         super().__init__()
 
         if p is None:
             p = get_default_config()
         self.p = p
+
+        # LSNR dropout settings
+        if lsnr_dropout is not None:
+            self.lsnr_dropout = lsnr_dropout
+        elif hasattr(p, "lsnr"):
+            self.lsnr_dropout = p.lsnr.lsnr_dropout
+        else:
+            self.lsnr_dropout = False
+
+        if lsnr_dropout_threshold is not None:
+            self.lsnr_dropout_threshold = lsnr_dropout_threshold
+        elif hasattr(p, "lsnr"):
+            self.lsnr_dropout_threshold = p.lsnr.lsnr_dropout_threshold
+        else:
+            self.lsnr_dropout_threshold = -10.0
 
         # ERB filterbank (non-trainable)
         self._erb_fb = erb_fb(
@@ -304,6 +475,7 @@ class DfNet4(nn.Module):
         spec: Tuple[mx.array, mx.array],
         feat_erb: mx.array,
         feat_spec: mx.array,
+        training: bool = False,
     ) -> Tuple[mx.array, mx.array]:
         """Forward pass.
 
@@ -311,14 +483,25 @@ class DfNet4(nn.Module):
             spec: Input spectrum as (real, imag), each (batch, time, freq)
             feat_erb: ERB features (batch, time, erb_bands)
             feat_spec: DF features (batch, time, df_bins, 2)
+            training: Whether in training mode (enables LSNR dropout)
 
         Returns:
             Enhanced spectrum as (real, imag)
         """
         spec_real, spec_imag = spec
+        batch, time, freq = spec_real.shape
 
-        # Encode
-        emb = self.encoder(feat_erb, feat_spec)
+        # Encode (now returns embedding and LSNR estimate)
+        emb, lsnr = self.encoder(feat_erb, feat_spec)
+
+        # LSNR dropout: process only frames above threshold during training
+        if self.lsnr_dropout and training:
+            # Find active frames (LSNR > threshold)
+            # lsnr shape: (batch, time, 1)
+            active_mask = mx.squeeze(lsnr, axis=-1) > self.lsnr_dropout_threshold
+
+            # For simplicity in MLX, we process all frames but mask the output
+            # This is less efficient than the PyTorch gather approach but works with MLX's static graphs
 
         # Mamba backbone
         emb, _ = self.backbone(emb)
@@ -342,7 +525,71 @@ class DfNet4(nn.Module):
             df_coef,
         )
 
+        # Apply LSNR dropout masking
+        if self.lsnr_dropout and training:
+            spec_out_real, spec_out_imag = spec_out
+            # For frames below threshold, keep original noisy spectrum
+            active_mask_expanded = mx.expand_dims(active_mask, axis=-1)
+            spec_out_real = mx.where(active_mask_expanded, spec_out_real, spec_real)
+            spec_out_imag = mx.where(active_mask_expanded, spec_out_imag, spec_imag)
+            spec_out = (spec_out_real, spec_out_imag)
+
         return spec_out
+
+    def forward_with_lsnr(
+        self,
+        spec: Tuple[mx.array, mx.array],
+        feat_erb: mx.array,
+        feat_spec: mx.array,
+        training: bool = False,
+    ) -> Tuple[Tuple[mx.array, mx.array], mx.array]:
+        """Forward pass that also returns LSNR estimate.
+
+        Useful for training with LSNR loss.
+
+        Args:
+            spec: Input spectrum as (real, imag)
+            feat_erb: ERB features
+            feat_spec: DF features
+            training: Whether in training mode
+
+        Returns:
+            Tuple of (enhanced spectrum, LSNR estimate)
+        """
+        spec_real, spec_imag = spec
+        batch, time, freq = spec_real.shape
+
+        # Encode
+        emb, lsnr = self.encoder(feat_erb, feat_spec)
+
+        # LSNR dropout during training
+        if self.lsnr_dropout and training:
+            active_mask = mx.squeeze(lsnr, axis=-1) > self.lsnr_dropout_threshold
+
+        # Mamba backbone
+        emb, _ = self.backbone(emb)
+
+        # Decode ERB mask
+        erb_mask = self.erb_decoder(emb)
+        mask = mx.matmul(erb_mask, mx.transpose(self._erb_fb))
+        masked_real = spec_real * mask
+        masked_imag = spec_imag * mask
+
+        # Decode DF coefficients
+        df_coef = self.df_decoder(emb)
+
+        # Apply deep filtering
+        spec_out = self.df_op((masked_real, masked_imag), df_coef)
+
+        # Apply LSNR dropout masking
+        if self.lsnr_dropout and training:
+            spec_out_real, spec_out_imag = spec_out
+            active_mask_expanded = mx.expand_dims(active_mask, axis=-1)
+            spec_out_real = mx.where(active_mask_expanded, spec_out_real, spec_real)
+            spec_out_imag = mx.where(active_mask_expanded, spec_out_imag, spec_imag)
+            spec_out = (spec_out_real, spec_out_imag)
+
+        return spec_out, lsnr
 
     def enhance(
         self,
@@ -377,8 +624,8 @@ class DfNet4(nn.Module):
         feat_erb = mx.matmul(mag, self._erb_fb)
         feat_spec = mx.stack([spec_real[:, :, : self.p.nb_df], spec_imag[:, :, : self.p.nb_df]], axis=-1)
 
-        # Forward pass
-        spec_out = self((spec_real, spec_imag), feat_erb, feat_spec)
+        # Forward pass (inference mode - no dropout)
+        spec_out = self((spec_real, spec_imag), feat_erb, feat_spec, training=False)
 
         # iSTFT
         enhanced = istft(
