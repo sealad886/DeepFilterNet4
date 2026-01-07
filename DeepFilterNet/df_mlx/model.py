@@ -830,6 +830,16 @@ class DfNet4(nn.Module):
             p = get_default_config()
         self.p = p
 
+        # Lookahead settings
+        self.df_lookahead = p.df_lookahead
+        self.conv_lookahead = p.conv_lookahead
+
+        # Validate lookahead settings
+        if self.conv_lookahead > 0:
+            assert self.conv_lookahead >= self.df_lookahead, (
+                f"conv_lookahead ({self.conv_lookahead}) must be >= " f"df_lookahead ({self.df_lookahead})"
+            )
+
         # LSNR dropout settings
         if lsnr_dropout is not None:
             self.lsnr_dropout = lsnr_dropout
@@ -877,6 +887,36 @@ class DfNet4(nn.Module):
             df_lookahead=p.df_lookahead,
         )
 
+    def _pad_features(self, x: mx.array, lookahead: int) -> mx.array:
+        """Apply lookahead padding to features.
+
+        Shifts the time axis by padding future frames and removing past frames.
+        This enables non-causal processing with controllable lookahead.
+
+        Args:
+            x: Input tensor with time in axis 1 (batch, time, ...)
+            lookahead: Number of lookahead frames
+
+        Returns:
+            Padded tensor with same time dimension
+        """
+        if lookahead == 0:
+            return x
+
+        # Pad future frames with zeros, then slice to remove past frames
+        # This creates a shift: output[t] sees input[t+lookahead]
+        ndim = x.ndim
+        if ndim == 3:
+            # (batch, time, features)
+            x_pad = mx.pad(x, [(0, 0), (0, lookahead), (0, 0)])
+            return x_pad[:, lookahead:, :]
+        elif ndim == 4:
+            # (batch, time, freq, channels)
+            x_pad = mx.pad(x, [(0, 0), (0, lookahead), (0, 0), (0, 0)])
+            return x_pad[:, lookahead:, :, :]
+        else:
+            raise ValueError(f"Unsupported ndim {ndim} for feature padding")
+
     def __call__(
         self,
         spec: Tuple[mx.array, mx.array],
@@ -897,6 +937,11 @@ class DfNet4(nn.Module):
         """
         spec_real, spec_imag = spec
         batch, time, freq = spec_real.shape
+
+        # Apply feature lookahead padding if configured
+        if self.conv_lookahead > 0:
+            feat_erb = self._pad_features(feat_erb, self.conv_lookahead)
+            feat_spec = self._pad_features(feat_spec, self.conv_lookahead)
 
         # Encode (now returns embedding and LSNR estimate)
         emb, lsnr = self.encoder(feat_erb, feat_spec)

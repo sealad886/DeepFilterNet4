@@ -16,6 +16,7 @@ class DfParams:
     nb_df: int = 96  # Number of DF frequency bins
     df_order: int = 5  # DF filter order
     df_lookahead: int = 0  # DF lookahead frames
+    conv_lookahead: int = 0  # Convolutional lookahead frames (encoder/decoder)
     nb_df_hidden: int = 256  # DF hidden dimension
     df_n_layers: int = 3  # Number of DF layers
     df_dec_type: Literal["multi-res", "single-res", "adaptive"] = "multi-res"
@@ -109,6 +110,10 @@ class ModelParams4:
     @property
     def df_lookahead(self) -> int:
         return self.df.df_lookahead
+
+    @property
+    def conv_lookahead(self) -> int:
+        return self.df.conv_lookahead
 
     @property
     def nb_erb(self) -> int:

@@ -1595,6 +1595,162 @@ class TestLSNRConfig:
 
 
 # ============================================================================
+# Lookahead Configuration Tests
+# ============================================================================
+
+
+class TestLookaheadConfig:
+    """Tests for lookahead configurations."""
+
+    def test_df_params_has_lookahead(self):
+        """Test DfParams has lookahead settings."""
+        from df_mlx.config import DfParams
+
+        params = DfParams()
+
+        assert hasattr(params, "df_lookahead")
+        assert hasattr(params, "conv_lookahead")
+        assert params.df_lookahead == 0
+        assert params.conv_lookahead == 0
+
+    def test_model_params_lookahead_properties(self):
+        """Test ModelParams4 has lookahead property aliases."""
+        from df_mlx.config import ModelParams4
+
+        params = ModelParams4()
+
+        assert params.df_lookahead == 0
+        assert params.conv_lookahead == 0
+
+    def test_dfnet4_lookahead_zero(self):
+        """Test DfNet4 with lookahead=0 (fully causal)."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        params = ModelParams4()
+        params.df.df_lookahead = 0
+        params.df.conv_lookahead = 0
+
+        model = DfNet4(params)
+
+        assert model.df_lookahead == 0
+        assert model.conv_lookahead == 0
+
+        # Test forward pass
+        batch, time, n_freqs = 2, 50, 481
+        spec_real = mx.random.normal(shape=(batch, time, n_freqs))
+        spec_imag = mx.random.normal(shape=(batch, time, n_freqs))
+        feat_erb = mx.random.normal(shape=(batch, time, 32))
+        feat_spec = mx.random.normal(shape=(batch, time, 96, 2))
+
+        out_real, out_imag = model((spec_real, spec_imag), feat_erb, feat_spec)
+
+        assert out_real.shape == (batch, time, n_freqs)
+        assert out_imag.shape == (batch, time, n_freqs)
+
+    def test_dfnet4_lookahead_one(self):
+        """Test DfNet4 with lookahead=1."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        params = ModelParams4()
+        params.df.df_lookahead = 1
+        params.df.conv_lookahead = 1
+
+        model = DfNet4(params)
+
+        assert model.df_lookahead == 1
+        assert model.conv_lookahead == 1
+
+        batch, time, n_freqs = 2, 50, 481
+        spec_real = mx.random.normal(shape=(batch, time, n_freqs))
+        spec_imag = mx.random.normal(shape=(batch, time, n_freqs))
+        feat_erb = mx.random.normal(shape=(batch, time, 32))
+        feat_spec = mx.random.normal(shape=(batch, time, 96, 2))
+
+        out_real, out_imag = model((spec_real, spec_imag), feat_erb, feat_spec)
+
+        assert out_real.shape == (batch, time, n_freqs)
+        assert out_imag.shape == (batch, time, n_freqs)
+
+    def test_dfnet4_lookahead_two(self):
+        """Test DfNet4 with lookahead=2 (default for non-realtime)."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        params = ModelParams4()
+        params.df.df_lookahead = 2
+        params.df.conv_lookahead = 2
+
+        model = DfNet4(params)
+
+        assert model.df_lookahead == 2
+        assert model.conv_lookahead == 2
+
+        batch, time, n_freqs = 2, 50, 481
+        spec_real = mx.random.normal(shape=(batch, time, n_freqs))
+        spec_imag = mx.random.normal(shape=(batch, time, n_freqs))
+        feat_erb = mx.random.normal(shape=(batch, time, 32))
+        feat_spec = mx.random.normal(shape=(batch, time, 96, 2))
+
+        out_real, out_imag = model((spec_real, spec_imag), feat_erb, feat_spec)
+
+        assert out_real.shape == (batch, time, n_freqs)
+        assert out_imag.shape == (batch, time, n_freqs)
+
+    def test_dfnet4_lookahead_validation(self):
+        """Test that conv_lookahead >= df_lookahead is enforced."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        params = ModelParams4()
+        params.df.df_lookahead = 2
+        params.df.conv_lookahead = 1  # Invalid: conv < df
+
+        with pytest.raises(AssertionError):
+            DfNet4(params)
+
+    def test_dfop_various_lookahead(self):
+        """Test DfOp with various lookahead values."""
+        from df_mlx.modules import DfOp
+
+        for lookahead in [0, 1, 2, 3]:
+            df_op = DfOp(nb_df=96, df_order=5, df_lookahead=lookahead)
+
+            batch, time, n_freqs = 2, 30, 481
+            spec_real = mx.random.normal(shape=(batch, time, n_freqs))
+            spec_imag = mx.random.normal(shape=(batch, time, n_freqs))
+            coef = mx.random.normal(shape=(batch, time, 96, 5, 2))
+
+            out_real, out_imag = df_op((spec_real, spec_imag), coef)
+
+            assert out_real.shape == (batch, time, n_freqs)
+            assert out_imag.shape == (batch, time, n_freqs)
+
+    def test_feature_padding(self):
+        """Test feature padding helper method."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        params = ModelParams4()
+        params.df.conv_lookahead = 2
+        params.df.df_lookahead = 2
+
+        model = DfNet4(params)
+
+        # Test 3D tensor padding
+        x = mx.array([[[1, 2], [3, 4], [5, 6], [7, 8], [9, 10]]])  # (1, 5, 2)
+        padded = model._pad_features(x, lookahead=2)
+
+        # Output should have same shape, but shifted
+        assert padded.shape == x.shape
+        # First elements should be from position 2 of input
+        np.testing.assert_array_equal(np.array(padded[0, 0]), np.array([5, 6]))
+        # Last elements should be zeros (padded)
+        np.testing.assert_array_equal(np.array(padded[0, -1]), np.array([0, 0]))
+
+
+# ============================================================================
 # Hybrid Encoder Tests
 # ============================================================================
 
