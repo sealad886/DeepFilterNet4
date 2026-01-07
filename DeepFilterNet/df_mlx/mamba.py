@@ -402,7 +402,7 @@ class SqueezedMamba(nn.Module):
         if not self.batch_first:
             x = mx.transpose(x, (1, 0, 2))
 
-        return x, mx.stack(states, axis=0) if states else None
+        return x, mx.stack(states, axis=0) if states else None  # type: ignore
 
 
 class BidirectionalMamba(nn.Module):

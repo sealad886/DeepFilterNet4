@@ -51,7 +51,8 @@ def streaming_enhance(
     Returns:
         Enhanced audio samples
     """
-    from df_mlx.model import StreamingDfNet4, init_model, load_checkpoint
+    from df_mlx.model import StreamingDfNet4, init_model
+    from df_mlx.train import load_checkpoint
 
     # Initialize model
     model = init_model()
@@ -145,7 +146,8 @@ def load_audio(path: str, target_sr: int = 48000) -> mx.array:
         from scipy import signal
 
         num_samples = int(len(audio) * target_sr / sr)
-        audio = signal.resample(audio, num_samples).astype(np.float32)
+        resampled = signal.resample(audio, num_samples)
+        audio = np.asarray(resampled, dtype=np.float32)
 
     return mx.array(audio)
 

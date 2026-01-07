@@ -11,7 +11,7 @@ DeepFilterNet4, including:
 All modules are optimized for Apple Silicon unified memory architecture.
 """
 
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, cast
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -297,7 +297,7 @@ def erb_fb(sr: int = 48000, fft_size: int = 960, nb_bands: int = 32, **kwargs) -
     Returns:
         ERB filterbank matrix (n_freqs, nb_bands)
     """
-    return make_erb_fb(sr=sr, fft_size=fft_size, nb_bands=nb_bands, **kwargs)
+    return cast(mx.array, make_erb_fb(sr=sr, fft_size=fft_size, nb_bands=nb_bands, **kwargs))
 
 
 # ============================================================================

@@ -768,7 +768,9 @@ class TestFullModel:
         model = init_model()
 
         # Enhance audio
-        enhanced = model.enhance(sample_audio)
+        result = model.enhance(sample_audio)
+        assert isinstance(result, mx.array), "enhance() should return mx.array when return_spec=False"
+        enhanced = result
         mx.eval(enhanced)
 
         assert enhanced.shape == sample_audio.shape
@@ -3000,7 +3002,9 @@ class TestIntegration:
         noisy = mx.array(clean + noise)
 
         # Enhance
-        enhanced = model.enhance(noisy)
+        result = model.enhance(noisy)
+        assert isinstance(result, mx.array), "enhance() should return mx.array when return_spec=False"
+        enhanced = result
         mx.eval(enhanced)
 
         # Verify output
@@ -3028,6 +3032,7 @@ class TestIntegration:
         enhanced = model.enhance(noisy_batch)
         mx.eval(enhanced)
 
+        assert isinstance(enhanced, mx.array)
         assert enhanced.shape == (batch_size, num_samples)
         assert not mx.any(mx.isnan(enhanced))
 
@@ -3267,6 +3272,7 @@ class TestIntegration:
         enhanced = model.enhance(noisy)
         mx.eval(enhanced)
 
+        assert isinstance(enhanced, mx.array)
         assert enhanced.shape == noisy.shape
         assert not mx.any(mx.isnan(enhanced))
 
@@ -3289,6 +3295,7 @@ class TestIntegration:
         enhanced = model.enhance(noisy)
         mx.eval(enhanced)
 
+        assert isinstance(enhanced, mx.array)
         assert enhanced.shape == noisy.shape
         assert not mx.any(mx.isnan(enhanced))
 
@@ -3308,7 +3315,9 @@ class TestIntegration:
         num_samples = int(sr * duration)
         noisy = mx.random.normal(shape=(num_samples,)) * 0.5
 
-        enhanced = model.enhance(noisy)
+        result = model.enhance(noisy)
+        assert isinstance(result, mx.array), "enhance() should return mx.array when return_spec=False"
+        enhanced = result
         mx.eval(enhanced)
 
         assert enhanced.shape == noisy.shape
@@ -3337,6 +3346,7 @@ class TestIntegration:
         enhanced = model.enhance(noisy)
         mx.eval(enhanced)
 
+        assert isinstance(enhanced, mx.array)
         assert enhanced.shape == noisy.shape
         assert not mx.any(mx.isnan(enhanced))
 
@@ -3492,12 +3502,13 @@ class TestNumericalEquivalence:
 
         # Copy weights (PyTorch: [out, in, H, W] -> MLX: [out, H, W, in])
         pt_weight = pt_conv.weight.detach().numpy()  # [out, in, H, W]
-        pt_bias = pt_conv.bias.detach().numpy()  # [out]
+        pt_bias = pt_conv.bias.detach().numpy() if pt_conv.bias is not None else None  # [out]
 
         # MLX expects [out, H, W, in]
         mlx_weight = np.transpose(pt_weight, (0, 2, 3, 1))
         mlx_conv.weight = mx.array(mlx_weight)
-        mlx_conv.bias = mx.array(pt_bias)
+        if pt_bias is not None:
+            mlx_conv.bias = mx.array(pt_bias)
 
         # Test input
         np.random.seed(42)

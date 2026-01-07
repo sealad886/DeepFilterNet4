@@ -52,8 +52,8 @@ def load_audio(path: str, target_sr: int = 48000) -> mx.array:
         from scipy import signal
 
         num_samples = int(len(audio) * target_sr / sr)
-        audio = signal.resample(audio, num_samples)
-        audio = audio.astype(np.float32)
+        resampled = signal.resample(audio, num_samples)
+        audio = np.asarray(resampled, dtype=np.float32)
 
     return mx.array(audio)
 
@@ -93,7 +93,8 @@ def enhance_audio(
     Returns:
         Enhanced audio samples
     """
-    from df_mlx.model import enhance, init_model, load_checkpoint
+    from df_mlx.model import init_model
+    from df_mlx.train import load_checkpoint
 
     # Initialize model with default parameters
     model = init_model()
@@ -106,10 +107,11 @@ def enhance_audio(
         print("Using randomly initialized model (for demonstration)")
         print("For real usage, provide a trained checkpoint with --model")
 
-    # Enhance audio
-    enhanced = enhance(model, audio)
+    # Enhance audio using model's enhance method (return_spec=False returns mx.array)
+    result = model.enhance(audio)
+    assert isinstance(result, mx.array), "Expected mx.array from enhance()"
 
-    return enhanced
+    return result
 
 
 def main():

@@ -144,6 +144,7 @@ def test_modules():
     mask_module = Mask(481, mask_type="sigmoid")
     mask = mx.random.normal((batch, 50, 481))
     out = mask_module(mask)
+    assert isinstance(out, mx.array), "Expected mx.array output"
     assert mx.all(out >= 0) and mx.all(out <= 1), "Sigmoid mask should be in [0,1]"
     print(f"   ✓ Mask output shape: {out.shape}")
 

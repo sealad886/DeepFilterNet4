@@ -60,7 +60,7 @@ def stft(
     window: str = "sqrt_hann",
     center: bool = True,
     return_complex: bool = True,
-) -> mx.array:
+) -> mx.array | tuple[mx.array, mx.array]:
     """Short-Time Fourier Transform.
 
     Args:

@@ -27,7 +27,7 @@ Requirements:
 import argparse
 import random
 import sys
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, cast
 
 import numpy as np
 from scipy import signal as scipy_signal
@@ -46,7 +46,7 @@ try:
             # Simple resampling using scipy
             num_samples = int(len(audio) * sr / file_sr)
             audio = scipy_signal.resample(audio, num_samples)
-        return audio.astype(np.float32)
+        return cast(np.ndarray, audio).astype(np.float32)
 
 except ImportError:
     from scipy.io import wavfile
@@ -63,7 +63,7 @@ except ImportError:
         if file_sr != sr:
             num_samples = int(len(audio) * sr / file_sr)
             audio = scipy_signal.resample(audio, num_samples)
-        return audio.astype(np.float32)
+        return cast(np.ndarray, audio).astype(np.float32)
 
 
 def read_file_list(path: str) -> List[str]:

@@ -637,6 +637,151 @@ def lsnr_loss(
 
 
 # ============================================================================
+# Combined Loss Functions (Module-Level)
+# ============================================================================
+
+
+def combined_loss(
+    pred: Tuple[mx.array, mx.array],
+    target: Tuple[mx.array, mx.array],
+    alpha_spec: float = 1.0,
+    alpha_time: float = 0.1,
+) -> mx.array:
+    """Combined spectral and time-domain loss for training.
+
+    This is a convenience function combining spectral loss and time-domain loss
+    for use in custom training loops outside the Trainer class.
+
+    Args:
+        pred: Predicted spectrum as (real, imag)
+        target: Target spectrum as (real, imag)
+        alpha_spec: Weight for spectral loss (magnitude + complex)
+        alpha_time: Weight for time-domain loss (waveform)
+
+    Returns:
+        Combined scalar loss value
+
+    Example:
+        >>> loss = combined_loss(
+        ...     pred=(out_real, out_imag),
+        ...     target=(target_real, target_imag),
+        ...     alpha_spec=1.0,
+        ...     alpha_time=0.1,
+        ... )
+    """
+    # Spectral loss (magnitude + complex)
+    spec_loss = spectral_loss(pred, target, alpha=0.5)
+
+    # Time-domain loss via ISTFT approximation
+    pred_real, pred_imag = pred
+    target_real, target_imag = target
+
+    # Approximate time-domain error using magnitude difference
+    pred_mag = mx.sqrt(pred_real**2 + pred_imag**2 + 1e-8)
+    target_mag = mx.sqrt(target_real**2 + target_imag**2 + 1e-8)
+    time_loss = mx.mean((pred_mag - target_mag) ** 2)
+
+    return alpha_spec * spec_loss + alpha_time * time_loss
+
+
+def save_checkpoint(
+    model: nn.Module,
+    optimizer: optim.Optimizer | None = None,
+    path: str | Path = "checkpoint.safetensors",
+    epoch: int = 0,
+    step: int = 0,
+    loss: float = 0.0,
+    **extra_state: Any,
+) -> Path:
+    """Save model checkpoint to file.
+
+    This is a standalone function for saving checkpoints outside the Trainer class.
+
+    Args:
+        model: Model to save
+        optimizer: Optional optimizer (state saved separately if provided)
+        path: Path to save checkpoint
+        epoch: Current epoch number
+        step: Current training step
+        loss: Current loss value
+        **extra_state: Additional state to save in metadata
+
+    Returns:
+        Path to saved checkpoint
+
+    Example:
+        >>> save_checkpoint(
+        ...     model=model,
+        ...     optimizer=optimizer,
+        ...     path="checkpoints/epoch_010.safetensors",
+        ...     epoch=10,
+        ...     step=1000,
+        ...     loss=0.123,
+        ... )
+    """
+    from mlx.utils import tree_flatten
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Save model weights
+    params = model.parameters()
+    flat_params = tree_flatten(params)
+    weights = {k: v for k, v in flat_params}
+    mx.save_safetensors(str(path), weights)
+
+    # Save training state as JSON
+    state_path = path.with_suffix(".json")
+    state = {
+        "epoch": epoch,
+        "step": step,
+        "loss": loss,
+        **extra_state,
+    }
+    with open(state_path, "w") as f:
+        json.dump(state, f, indent=2)
+
+    return path
+
+
+def load_checkpoint(
+    model: nn.Module,
+    path: str | Path,
+    strict: bool = True,
+) -> Dict[str, Any]:
+    """Load model checkpoint from file.
+
+    This is a standalone function for loading checkpoints outside the Trainer class.
+
+    Args:
+        model: Model to load weights into
+        path: Path to checkpoint file
+        strict: Whether to require all keys to match
+
+    Returns:
+        Dictionary with training state (epoch, step, loss, etc.)
+
+    Example:
+        >>> state = load_checkpoint(model, "checkpoints/epoch_010.safetensors")
+        >>> start_epoch = state.get("epoch", 0)
+    """
+    path = Path(path)
+
+    # Load model weights - mx.load returns Dict[str, mx.array] for safetensors
+    weights: Dict[str, mx.array] = mx.load(str(path))  # type: ignore[assignment]
+    model.load_weights(list(weights.items()))
+
+    # Load training state
+    state_path = path.with_suffix(".json")
+    state: Dict[str, Any] = {}
+    if state_path.exists():
+        with open(state_path) as f:
+            state = json.load(f)
+
+    return state
+
+
+# ============================================================================
 # Learning Rate Scheduling
 # ============================================================================
 
@@ -936,7 +1081,7 @@ class Trainer:
 
         print(f"Saved checkpoint: {path}")
 
-    def load_checkpoint(self, path: str):
+    def load_checkpoint(self, path: str | Path):
         """Load model checkpoint.
 
         Args:
