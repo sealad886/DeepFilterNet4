@@ -109,11 +109,12 @@ def profile_forward_step(
     # Forward pass
     start = time.perf_counter()
     with torch.no_grad():
-        enh, m, lsnr, other = model.forward(
+        _enh, _m, _lsnr, _other = model.forward(
             spec=as_real(noisy),
             feat_erb=feat_erb,
             feat_spec=feat_spec,
         )
+        del _enh, _m, _lsnr, _other  # Suppress unused variable warnings
     sync_device(device)
     timings["forward_time_ms"] = (time.perf_counter() - start) * 1000
 

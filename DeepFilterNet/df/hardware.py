@@ -497,6 +497,7 @@ def _get_cpu_name() -> str:
             if result.returncode == 0:
                 return result.stdout.strip()
         except (subprocess.TimeoutExpired, FileNotFoundError):
+            # sysctl not available; fall back to platform.processor() below
             pass
     elif platform.system() == "Linux":
         try:
@@ -505,6 +506,7 @@ def _get_cpu_name() -> str:
                     if line.startswith("model name"):
                         return line.split(":")[1].strip()
         except FileNotFoundError:
+            # /proc/cpuinfo not available; fall back to platform.processor() below
             pass
     return platform.processor() or "Unknown CPU"
 
@@ -541,6 +543,7 @@ def _get_system_memory_gb() -> float:
             if result.returncode == 0:
                 return int(result.stdout.strip()) / (1024**3)
         except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
+            # sysctl not available or returned invalid value; fall back to default below
             pass
     elif platform.system() == "Linux":
         try:
@@ -550,6 +553,7 @@ def _get_system_memory_gb() -> float:
                         kb = int(line.split()[1])
                         return kb / (1024**2)
         except FileNotFoundError:
+            # /proc/meminfo not available; fall back to default below
             pass
 
     return 8.0  # Conservative default

@@ -406,11 +406,11 @@ def main():
         lines = f.readlines()
         logger.info(f"Found {len(lines)} entries in file list.")
 
-        check_file_fn = partial(_check_file, working_dir=working_dir)
+        validate_file_path = partial(_check_file, working_dir=working_dir)
         with Pool(max(args.num_workers, 1)) as p:
             results = list(
                 tqdm(
-                    p.imap(check_file_fn, lines, chunksize=100),
+                    p.imap(validate_file_path, lines, chunksize=100),
                     total=len(lines),
                     desc="Validating files",
                     unit="files",

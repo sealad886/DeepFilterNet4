@@ -1063,7 +1063,8 @@ class DfNet4(nn.Module):
             Enhanced spectrum as (real, imag)
         """
         spec_real, spec_imag = spec
-        batch, time, freq = spec_real.shape
+        # Shape is (batch, time, freq) - used implicitly in operations below
+        _ = spec_real.shape
 
         # Apply feature lookahead padding if configured
         if self.conv_lookahead > 0:
@@ -1074,6 +1075,8 @@ class DfNet4(nn.Module):
         emb, lsnr = self.encoder(feat_erb, feat_spec)
 
         # LSNR dropout: process only frames above threshold during training
+        # Initialize mask to None for use later
+        active_mask: mx.array | None = None
         if self.lsnr_dropout and training:
             # Find active frames (LSNR > threshold)
             # lsnr shape: (batch, time, 1)
@@ -1114,7 +1117,7 @@ class DfNet4(nn.Module):
         spec_out = self._apply_post_filter(spec_out, spec)
 
         # Apply LSNR dropout masking
-        if self.lsnr_dropout and training:
+        if self.lsnr_dropout and training and active_mask is not None:
             spec_out_real, spec_out_imag = spec_out
             # For frames below threshold, keep original noisy spectrum
             active_mask_expanded = mx.expand_dims(active_mask, axis=-1)
@@ -1145,12 +1148,14 @@ class DfNet4(nn.Module):
             Tuple of (enhanced spectrum, LSNR estimate)
         """
         spec_real, spec_imag = spec
-        batch, time, freq = spec_real.shape
+        # Shape is (batch, time, freq) - used implicitly in operations below
+        _ = spec_real.shape
 
         # Encode
         emb, lsnr = self.encoder(feat_erb, feat_spec)
 
-        # LSNR dropout during training
+        # LSNR dropout during training - initialize mask to None for use later
+        active_mask: mx.array | None = None
         if self.lsnr_dropout and training:
             active_mask = mx.squeeze(lsnr, axis=-1) > self.lsnr_dropout_threshold
 
@@ -1177,7 +1182,7 @@ class DfNet4(nn.Module):
         spec_out = self._apply_post_filter(spec_out, spec)
 
         # Apply LSNR dropout masking
-        if self.lsnr_dropout and training:
+        if self.lsnr_dropout and training and active_mask is not None:
             spec_out_real, spec_out_imag = spec_out
             active_mask_expanded = mx.expand_dims(active_mask, axis=-1)
             spec_out_real = mx.where(active_mask_expanded, spec_out_real, spec_real)
@@ -1716,11 +1721,6 @@ def count_parameters(model: nn.Module) -> int:
     Returns:
         Number of parameters
     """
-
-    def _count_array(arr):
-        if isinstance(arr, mx.array):
-            return arr.size
-        return 0
 
     def _count_recursive(params):
         total = 0

@@ -32,9 +32,11 @@ except ImportError:
     print("✗ PyTorch not installed")
 
 try:
-    import mlx.core as _mx  # noqa: F401 - imported to check availability
+    import mlx.core as _mx
 
     MLX_AVAILABLE = True
+    # Use _mx to verify import and suppress unused warning
+    _ = _mx.array([0.0])
     print("✓ MLX available")
 except ImportError:
     print("✗ MLX not installed")

@@ -3,8 +3,9 @@ import os
 import platform
 import random
 import subprocess
+from collections.abc import Iterable, Mapping
 from socket import gethostname
-from typing import Any, Iterable, Mapping, Optional, Set, Tuple, Union
+from typing import Any, Optional, Set, Tuple, Union
 
 import numpy as np
 import torch

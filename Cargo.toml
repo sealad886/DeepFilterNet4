@@ -29,7 +29,3 @@ panic = "abort"
 [workspace.dependencies]
 # Force all ndarray usage to 0.15.6 to match hdf5-rust's dependency
 ndarray = "=0.15.6"
-
-# Force cargo to resolve to ndarray 0.15.6 only (numpy allows 0.15-0.16)
-[workspace.metadata.force-resolve]
-ndarray = "0.15.6"

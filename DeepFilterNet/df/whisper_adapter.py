@@ -389,7 +389,7 @@ class PyTorchWhisperBackend:
                 device = "cpu"
         self._device = device
 
-        self._model = whisper.load_model(model_name, device=device, download_root=str(download_root))
+        self._model = whisper.load_model(model_name, device=device, download_root=download_root)
 
     @property
     def backend_name(self) -> str:
@@ -549,7 +549,7 @@ class PyTorchWhisperBackend:
         audio_t: torch.Tensor = audio if isinstance(audio, torch.Tensor) else torch.from_numpy(to_numpy(audio))
         if n_mels is None:
             n_mels = self.dims.n_mels
-        return self._whisper.log_mel_spectrogram(audio_t, n_mels=n_mels if n_mels else 80)
+        return self._whisper.log_mel_spectrogram(audio_t, n_mels=n_mels)
 
     def load_audio(self, path: str) -> np.ndarray:
         """
@@ -837,7 +837,7 @@ class MLXWhisperBackend:
         audio_np: np.ndarray = audio if isinstance(audio, np.ndarray) else to_numpy(audio)
         if n_mels is None:
             n_mels = self.dims.n_mels
-        return self._mlx_audio.log_mel_spectrogram(audio_np, n_mels=n_mels if n_mels else 80)
+        return self._mlx_audio.log_mel_spectrogram(audio_np, n_mels=n_mels)
 
     def load_audio(self, path: str) -> np.ndarray:
         """
