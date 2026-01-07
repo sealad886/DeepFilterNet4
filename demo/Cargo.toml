@@ -26,7 +26,7 @@ iced = { version = "0.14", features = [
   "tokio",
   "lazy",
 ], optional = true }
-itertools = "0.12"
+itertools = "0.14"
 crossbeam-channel = "0.5"
 image_rs = { package = "image", version = "0.24", optional = true }
 anyhow = "1.0"
