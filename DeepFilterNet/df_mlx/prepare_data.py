@@ -27,6 +27,7 @@ Requirements:
 import argparse
 import random
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional, Tuple, cast
 
 import numpy as np
@@ -359,6 +360,76 @@ def process_sample(
         return None
 
 
+def process_file(
+    speech_path: str,
+    noise_cache: dict,
+    noise_cache_keys: List[str],
+    noise_files: List[str],
+    rir_cache: dict,
+    rir_cache_keys: List[str],
+    rir_prob: float,
+    snr_min: float,
+    snr_max: float,
+    sample_rate: int,
+    segment_samples: int,
+    fft_size: int,
+    hop_size: int,
+    erb_fb: np.ndarray,
+    nb_df: int,
+    window: np.ndarray,
+) -> Optional[dict]:
+    """Process a single file end-to-end (thread-safe).
+
+    Returns:
+        Processed sample dict or None if failed/skipped.
+    """
+    try:
+        # Load speech
+        clean = load_audio(speech_path, sample_rate)
+
+        # Skip if too short
+        if len(clean) < segment_samples:
+            return None
+
+        # Extract random segment
+        if len(clean) > segment_samples:
+            start = random.randint(0, len(clean) - segment_samples)
+            clean = clean[start : start + segment_samples]
+
+        # Select random noise
+        if noise_cache_keys:
+            noise_path = random.choice(noise_cache_keys)
+            noise = noise_cache[noise_path]
+        else:
+            noise_path = random.choice(noise_files)
+            noise = load_audio(noise_path, sample_rate)
+
+        # Select random RIR (optional)
+        rir = None
+        if rir_cache_keys and random.random() < rir_prob:
+            rir_path = random.choice(rir_cache_keys)
+            rir = rir_cache[rir_path]
+
+        # Random SNR
+        snr_db = random.uniform(snr_min, snr_max)
+
+        # Process sample
+        return process_sample(
+            clean,
+            noise,
+            rir,
+            snr_db,
+            fft_size,
+            hop_size,
+            erb_fb,
+            nb_df,
+            window,
+        )
+    except Exception:
+        # Silently skip failed files in threaded mode
+        return None
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Build MLX datastore from audio files",
@@ -614,63 +685,37 @@ def main():
 
             samples_added = 0
             files_skipped = 0
+
+            # Get files to process (skip already-processed on resume)
+            files_to_process = []
+            for file_idx, speech_path in enumerate(split_files):
+                if file_idx < files_already_processed:
+                    files_skipped += 1
+                else:
+                    files_to_process.append((file_idx, speech_path))
+
+            if not files_to_process:
+                print("  All files already processed")
+                continue
+
             try:
-                pbar = tqdm(
-                    enumerate(split_files),
-                    total=len(split_files),
-                    desc=split_name,
-                    initial=files_already_processed,
-                )
-                for file_idx, speech_path in pbar:
-                    # Skip already-processed files on resume
-                    if file_idx < files_already_processed:
-                        files_skipped += 1
-                        continue
+                if args.num_workers > 1:
+                    # Multi-threaded processing
+                    print(f"  Using {args.num_workers} worker threads")
 
-                    # Check for interrupt
-                    if is_shutdown_requested():
-                        interrupted = True
-                        break
-
-                    # Track that we're processing this file
-                    writer.increment_files_processed(split_name)
-
-                    try:
-                        # Load speech
-                        clean = load_audio(speech_path, args.sample_rate)
-
-                        # Skip if too short
-                        if len(clean) < segment_samples:
-                            continue
-
-                        # Extract random segment
-                        if len(clean) > segment_samples:
-                            start = random.randint(0, len(clean) - segment_samples)
-                            clean = clean[start : start + segment_samples]
-
-                        # Select random noise
-                        if noise_cache_keys:
-                            noise_path = random.choice(noise_cache_keys)
-                            noise = noise_cache[noise_path]
-                        else:
-                            noise_path = random.choice(noise_files)
-                            noise = load_audio(noise_path, args.sample_rate)
-
-                        # Select random RIR (optional)
-                        rir = None
-                        if rir_cache_keys and random.random() < args.rir_prob:
-                            rir_path = random.choice(rir_cache_keys)
-                            rir = rir_cache[rir_path]
-
-                        # Random SNR
-                        snr_db = random.uniform(args.snr_min, args.snr_max)
-
-                        # Process sample
-                        result = process_sample(
-                            clean,
-                            noise,
-                            rir,
-                            snr_db,
+                    def submit_file(speech_path):
+                        return process_file(
+                            speech_path,
+                            noise_cache,
+                            noise_cache_keys,
+                            noise_files,
+                            rir_cache,
+                            rir_cache_keys,
+                            args.rir_prob,
+                            args.snr_min,
+                            args.snr_max,
+                            args.sample_rate,
+                            segment_samples,
                             args.fft_size,
                             args.hop_size,
                             erb_fb,
@@ -678,14 +723,110 @@ def main():
                             window,
                         )
 
-                        if result:
-                            writer.add_sample(**result)
-                            samples_added += 1
-                            pbar.set_postfix({"new": samples_added, "total": existing_samples + samples_added})
+                    with ThreadPoolExecutor(max_workers=args.num_workers) as executor:
+                        # Submit all files
+                        future_to_idx = {}
+                        for file_idx, speech_path in files_to_process:
+                            if is_shutdown_requested():
+                                break
+                            future = executor.submit(submit_file, speech_path)
+                            future_to_idx[future] = file_idx
 
-                    except Exception as e:
-                        print(f"  Warning: Failed to process {speech_path}: {e}")
-                        continue
+                        # Process results as they complete
+                        pbar = tqdm(
+                            as_completed(future_to_idx),
+                            total=len(future_to_idx),
+                            desc=split_name,
+                            initial=files_already_processed,
+                        )
+                        for future in pbar:
+                            if is_shutdown_requested():
+                                interrupted = True
+                                # Cancel pending futures
+                                for f in future_to_idx:
+                                    f.cancel()
+                                break
+
+                            # Track file as processed
+                            writer.increment_files_processed(split_name)
+
+                            try:
+                                result = future.result()
+                                if result:
+                                    writer.add_sample(**result)
+                                    samples_added += 1
+                                    pbar.set_postfix({"new": samples_added, "total": existing_samples + samples_added})
+                            except Exception:
+                                pass  # Silently skip failed files
+
+                else:
+                    # Single-threaded processing (original behavior)
+                    pbar = tqdm(
+                        files_to_process,
+                        desc=split_name,
+                        initial=files_already_processed,
+                        total=len(split_files),
+                    )
+                    for file_idx, speech_path in pbar:
+                        # Check for interrupt
+                        if is_shutdown_requested():
+                            interrupted = True
+                            break
+
+                        # Track that we're processing this file
+                        writer.increment_files_processed(split_name)
+
+                        try:
+                            # Load speech
+                            clean = load_audio(speech_path, args.sample_rate)
+
+                            # Skip if too short
+                            if len(clean) < segment_samples:
+                                continue
+
+                            # Extract random segment
+                            if len(clean) > segment_samples:
+                                start = random.randint(0, len(clean) - segment_samples)
+                                clean = clean[start : start + segment_samples]
+
+                            # Select random noise
+                            if noise_cache_keys:
+                                noise_path = random.choice(noise_cache_keys)
+                                noise = noise_cache[noise_path]
+                            else:
+                                noise_path = random.choice(noise_files)
+                                noise = load_audio(noise_path, args.sample_rate)
+
+                            # Select random RIR (optional)
+                            rir = None
+                            if rir_cache_keys and random.random() < args.rir_prob:
+                                rir_path = random.choice(rir_cache_keys)
+                                rir = rir_cache[rir_path]
+
+                            # Random SNR
+                            snr_db = random.uniform(args.snr_min, args.snr_max)
+
+                            # Process sample
+                            result = process_sample(
+                                clean,
+                                noise,
+                                rir,
+                                snr_db,
+                                args.fft_size,
+                                args.hop_size,
+                                erb_fb,
+                                args.nb_df,
+                                window,
+                            )
+
+                            if result:
+                                writer.add_sample(**result)
+                                samples_added += 1
+                                pbar.set_postfix({"new": samples_added, "total": existing_samples + samples_added})
+
+                        except Exception as e:
+                            print(f"  Warning: Failed to process {speech_path}: {e}")
+                            continue
 
             except KeyboardInterrupt:
                 print(f"\n\nInterrupted during {split_name} split.")
