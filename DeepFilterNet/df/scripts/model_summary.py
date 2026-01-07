@@ -7,7 +7,7 @@ from df.logger import log_model_summary
 
 
 def main(args):
-    model, _, _ = init_df(
+    model, _, _, _ = init_df(
         args.model_base_dir,
         post_filter=args.pf,
         log_level=args.log_level,

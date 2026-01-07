@@ -77,9 +77,9 @@ def get_audio_metadata(file: str) -> AudioMetaData:
         decoder = AudioDecoder(file)  # type: ignore[possibly-undefined]
         metadata = decoder.metadata
         return AudioMetaData(
-            sample_rate=metadata.sample_rate,
-            num_frames=metadata.num_frames if hasattr(metadata, "num_frames") else 0,
-            num_channels=metadata.num_channels,
+            sample_rate=getattr(metadata, "sample_rate", 0),  # type: ignore[attr-defined]
+            num_frames=getattr(metadata, "num_frames", 0),  # type: ignore[attr-defined]
+            num_channels=getattr(metadata, "num_channels", 0),  # type: ignore[attr-defined]
             bits_per_sample=getattr(metadata, "bits_per_sample", 0),
             encoding=getattr(metadata, "codec", ""),
         )

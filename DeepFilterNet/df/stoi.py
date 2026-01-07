@@ -37,7 +37,7 @@ def as_windowed(x: Tensor, window_length: int, step: int = 1) -> Tensor:
 
 
 def remove_silent_frames(
-    x: Tensor, y: Tensor, dyn_range: int, framelen: int, hop: int, eps: float = EPS
+    x: Tensor, y: Tensor, dyn_range: int, framelen: int, hop: int, eps: float | np.floating = EPS
 ) -> Tuple[List[Tensor], List[Tensor]]:
     """Remove the silent frames from each signal in the batch.
 

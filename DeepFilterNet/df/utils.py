@@ -1,11 +1,10 @@
-import collections
 import math
 import os
 import platform
 import random
 import subprocess
 from socket import gethostname
-from typing import Any, Optional, Set, Tuple, Union
+from typing import Any, Iterable, Mapping, Optional, Set, Tuple, Union
 
 import numpy as np
 import torch
@@ -255,9 +254,9 @@ def apply_to_tensor(input_, func):
         return func(input_)
     elif isinstance(input_, (str, bytes)):
         return input_
-    elif isinstance(input_, collections.Mapping):
+    elif isinstance(input_, Mapping):
         return {k: apply_to_tensor(sample, func) for k, sample in input_.items()}
-    elif isinstance(input_, collections.Iterable):
+    elif isinstance(input_, Iterable):
         return [apply_to_tensor(sample, func) for sample in input_]
     elif input_ is None:
         return input_

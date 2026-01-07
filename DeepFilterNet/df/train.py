@@ -33,7 +33,7 @@ from df.utils import (
     make_np,
 )
 from libdf import DF
-from libdfdata import PytorchDataLoader as DataLoader
+from libdfdata import PytorchDataLoader as DataLoader  # type: ignore[import-not-found]
 
 should_stop = False
 debug = False
@@ -56,13 +56,13 @@ def setup_discriminator() -> Optional[nn.Module]:
     use_spectral_norm = config("DISCRIMINATOR_SPECTRAL_NORM", False, bool, section="train")
 
     if disc_type == "mpd":
-        periods = config("MPD_PERIODS", [2, 3, 5, 7, 11], Csv(int), section="train")
+        periods = config("MPD_PERIODS", [2, 3, 5, 7, 11], Csv(int), section="train")  # type: ignore[arg-type]
         disc = MultiPeriodDiscriminator(periods=periods, use_spectral_norm=use_spectral_norm)
     elif disc_type == "msd":
         num_scales = config("MSD_SCALES", 3, int, section="train")
         disc = MultiScaleDiscriminator(num_scales=num_scales, use_spectral_norm=use_spectral_norm)
     else:  # combined
-        periods = config("MPD_PERIODS", [2, 3, 5, 7, 11], Csv(int), section="train")
+        periods = config("MPD_PERIODS", [2, 3, 5, 7, 11], Csv(int), section="train")  # type: ignore[arg-type]
         num_scales = config("MSD_SCALES", 3, int, section="train")
         disc = CombinedDiscriminator(
             periods=periods,
@@ -216,13 +216,16 @@ def main():
     # '<epoch>/<batch_size>,<epoch>/<batch_size>,<epoch>/<batch_size>'
     # The first epoch has to be 0, later epoch may modify the batch size as specified.
     # This only applies to training batch size.
-    batch_size_scheduling: List[str] = config("BATCH_SIZE_SCHEDULING", [], Csv(str), section="train")  # type: ignore
+    batch_size_scheduling_raw: List[str] = config("BATCH_SIZE_SCHEDULING", [], Csv(str), section="train")  # type: ignore
+    batch_size_scheduling: List[Tuple[int, int]] = []
     scheduling_bs = bs
     prev_scheduling_bs = bs
-    if len(batch_size_scheduling) > 0:
-        batch_size_scheduling = [(int(bs[0]), int(bs[1])) for bs in (bs.split("/") for bs in batch_size_scheduling)]
+    if len(batch_size_scheduling_raw) > 0:
+        batch_size_scheduling = [
+            (int(item.split("/")[0]), int(item.split("/")[1])) for item in batch_size_scheduling_raw
+        ]
         assert batch_size_scheduling[0][0] == 0  # First epoch must be 0
-        logger.info("Running with learning rate scheduling")
+        logger.info("Running with batch size scheduling")
 
     max_epochs = config("MAX_EPOCHS", 10, int, section="train")
     assert epoch >= 0
@@ -571,6 +574,11 @@ def run_epoch(
             gan_d_loss = torch.tensor(0.0, device=dev)
 
             if gan_active:
+                # These assertions satisfy the type checker - gan_active implies all are not None
+                assert state is not None
+                assert discriminator is not None
+                assert opt_disc is not None
+
                 # Synthesize waveforms for discriminator
                 clean_wav = synthesize_waveform(clean, state)
                 enh_wav = synthesize_waveform(enh, state)
@@ -801,6 +809,7 @@ def summary_write(
     idx: Optional[int] = None,
 ):
     assert state is not None
+    _state = state  # Capture in local variable for closure
 
     p = ModelParams()
     bs = snrs.shape[0]
@@ -809,7 +818,7 @@ def summary_write(
     snr = snrs[idx].detach().cpu().item()
 
     def synthesis(x: Tensor) -> Tensor:
-        return torch.as_tensor(state.synthesis(make_np(as_complex(x.detach()))))
+        return torch.as_tensor(_state.synthesis(make_np(as_complex(x.detach()))))
 
     torchaudio.save(os.path.join(summary_dir, f"{prefix}_clean_snr{snr}.wav"), synthesis(clean[idx]), p.sr)
     torchaudio.save(os.path.join(summary_dir, f"{prefix}_noisy_snr{snr}.wav"), synthesis(noisy[idx]), p.sr)
