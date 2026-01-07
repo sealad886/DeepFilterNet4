@@ -474,6 +474,11 @@ def main():
         default=1,
         help="Number of parallel workers (default: 1)",
     )
+    parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="Start fresh, ignoring any existing datastore",
+    )
 
     args = parser.parse_args()
 
@@ -534,7 +539,11 @@ def main():
         samples_per_shard=args.samples_per_shard,
     )
 
-    writer = MLXDatastoreWriter(args.output_dir, config)
+    writer = MLXDatastoreWriter(args.output_dir, config, resume=not args.no_resume)
+
+    # Check if resuming
+    if writer.resumed:
+        print("\n*** Resuming from existing datastore ***")
 
     # Determine splits
     num_speech = len(speech_files)
@@ -577,10 +586,23 @@ def main():
         if not split_files:
             continue
 
+        # Calculate how many samples to skip when resuming
+        existing_samples = writer.get_sample_count(split_name)
+        skip_count = existing_samples if writer.resumed else 0
+
+        if skip_count > 0:
+            print(f"\nSkipping {skip_count:,} existing {split_name} samples...")
+
         print(f"\nProcessing {split_name} split ({len(split_files):,} files)...")
         writer.set_split(split_name)
 
+        processed = 0
         for speech_path in tqdm(split_files, desc=split_name):
+            # Skip already-processed samples when resuming
+            if processed < skip_count:
+                processed += 1
+                continue
+
             try:
                 # Load speech
                 clean = load_audio(speech_path, args.sample_rate)
@@ -626,9 +648,11 @@ def main():
 
                 if result:
                     writer.add_sample(**result)
+                    processed += 1
 
             except Exception as e:
                 print(f"  Warning: Failed to process {speech_path}: {e}")
+                processed += 1  # Still count as processed to maintain position
                 continue
 
     # Finalize

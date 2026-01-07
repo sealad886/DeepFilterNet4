@@ -5,6 +5,8 @@ This module provides efficient data storage and loading for MLX training:
 - Pre-computed spectral features (STFT, ERB, DF)
 - Memory-efficient streaming with configurable batch sizes
 - Index-based random access and shuffling
+- Background thread shard saving for non-blocking I/O
+- Resume support for interrupted builds
 
 The datastore format:
     dataset_dir/
@@ -18,6 +20,8 @@ The datastore format:
 
 import json
 import random
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
@@ -92,13 +96,29 @@ class DatastoreIndex:
 
 
 class MLXDatastoreWriter:
-    """Write pre-computed features to MLX datastore format."""
+    """Write pre-computed features to MLX datastore format.
+
+    Features:
+    - Background thread for non-blocking shard saves
+    - Resume support: can continue from interrupted builds
+    - Progress tracking with incremental index updates
+    """
 
     def __init__(
         self,
         output_dir: Path,
         config: Optional[DatastoreConfig] = None,
+        resume: bool = True,
+        num_write_threads: int = 2,
     ):
+        """Initialize datastore writer.
+
+        Args:
+            output_dir: Directory to write datastore to
+            config: Datastore configuration
+            resume: If True, resume from existing index if present
+            num_write_threads: Number of background threads for writing shards
+        """
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.config = config or DatastoreConfig()
@@ -108,6 +128,62 @@ class MLXDatastoreWriter:
         self._shard_counts: Dict[str, int] = {"train": 0, "valid": 0, "test": 0}
         self._sample_counts: Dict[str, int] = {"train": 0, "valid": 0, "test": 0}
         self._shards: List[ShardInfo] = []
+
+        # Background writing
+        self._write_executor = ThreadPoolExecutor(max_workers=num_write_threads)
+        self._pending_writes: List = []
+        self._write_lock = threading.Lock()
+
+        # Resume from existing index if available
+        self._resumed = False
+        if resume:
+            self._try_resume()
+
+    def _try_resume(self) -> None:
+        """Try to resume from existing index."""
+        index_path = self.output_dir / "index.json"
+        if not index_path.exists():
+            return
+
+        try:
+            existing_index = DatastoreIndex.load(index_path)
+
+            # Verify config matches (allow minor differences)
+            if (
+                existing_index.config.sample_rate != self.config.sample_rate
+                or existing_index.config.fft_size != self.config.fft_size
+            ):
+                print("  Warning: Config mismatch, starting fresh")
+                return
+
+            # Load existing shard info
+            self._shards = existing_index.shards
+            self._sample_counts = existing_index.total_samples.copy()
+
+            # Count shards per split
+            for shard in self._shards:
+                self._shard_counts[shard.split] = max(
+                    self._shard_counts[shard.split],
+                    int(shard.path.split("_")[1].split(".")[0]) + 1,
+                )
+
+            self._resumed = True
+            print("  Resumed from existing datastore:")
+            print(f"    Train: {self._sample_counts.get('train', 0):,} samples")
+            print(f"    Valid: {self._sample_counts.get('valid', 0):,} samples")
+            print(f"    Test:  {self._sample_counts.get('test', 0):,} samples")
+
+        except Exception as e:
+            print(f"  Warning: Could not resume from index: {e}")
+
+    @property
+    def resumed(self) -> bool:
+        """Whether this writer resumed from an existing datastore."""
+        return self._resumed
+
+    def get_sample_count(self, split: str) -> int:
+        """Get current sample count for a split."""
+        return self._sample_counts.get(split, 0)
 
     def set_split(self, split: str) -> None:
         """Set current split (train/valid/test)."""
@@ -161,8 +237,44 @@ class MLXDatastoreWriter:
         if len(self._current_shard["spec_real"]) >= self.config.samples_per_shard:
             self._flush_shard()
 
+    def _write_shard_async(
+        self,
+        shard_path: Path,
+        shard_data: Dict[str, np.ndarray],
+        shard_info: ShardInfo,
+    ) -> None:
+        """Write shard to disk (called from background thread)."""
+        try:
+            np.savez_compressed(
+                shard_path,
+                spec_real=shard_data["spec_real"],
+                spec_imag=shard_data["spec_imag"],
+                feat_erb=shard_data["feat_erb"],
+                feat_spec=shard_data["feat_spec"],
+                clean_real=shard_data["clean_real"],
+                clean_imag=shard_data["clean_imag"],
+                snr_db=shard_data["snr_db"],
+            )
+
+            # Update index incrementally
+            with self._write_lock:
+                self._shards.append(shard_info)
+                self._save_index_incremental()
+
+        except Exception as e:
+            print(f"  Error writing shard {shard_path}: {e}")
+
+    def _save_index_incremental(self) -> None:
+        """Save index after each shard write for resume support."""
+        index = DatastoreIndex(
+            config=self.config,
+            shards=self._shards,
+            total_samples=self._sample_counts.copy(),
+        )
+        index.save(self.output_dir / "index.json")
+
     def _flush_shard(self) -> None:
-        """Write current shard to disk."""
+        """Queue current shard for async writing."""
         if not self._current_shard or not self._current_shard.get("spec_real"):
             return
 
@@ -172,32 +284,52 @@ class MLXDatastoreWriter:
 
         num_samples = len(self._current_shard["spec_real"])
 
-        # Stack arrays and save
-        np.savez_compressed(
-            shard_path,
-            spec_real=np.stack(self._current_shard["spec_real"]),
-            spec_imag=np.stack(self._current_shard["spec_imag"]),
-            feat_erb=np.stack(self._current_shard["feat_erb"]),
-            feat_spec=np.stack(self._current_shard["feat_spec"]),
-            clean_real=np.stack(self._current_shard["clean_real"]),
-            clean_imag=np.stack(self._current_shard["clean_imag"]),
-            snr_db=np.array(self._current_shard["snr_db"]),
-        )
+        # Stack arrays for writing
+        shard_data = {
+            "spec_real": np.stack(self._current_shard["spec_real"]),
+            "spec_imag": np.stack(self._current_shard["spec_imag"]),
+            "feat_erb": np.stack(self._current_shard["feat_erb"]),
+            "feat_spec": np.stack(self._current_shard["feat_spec"]),
+            "clean_real": np.stack(self._current_shard["clean_real"]),
+            "clean_imag": np.stack(self._current_shard["clean_imag"]),
+            "snr_db": np.array(self._current_shard["snr_db"]),
+        }
 
-        self._shards.append(ShardInfo(path=shard_name, num_samples=num_samples, split=self._current_split))
+        shard_info = ShardInfo(path=shard_name, num_samples=num_samples, split=self._current_split)
+
+        # Update counts immediately
         self._shard_counts[self._current_split] += 1
         self._sample_counts[self._current_split] += num_samples
+
+        # Submit async write
+        future = self._write_executor.submit(self._write_shard_async, shard_path, shard_data, shard_info)
+        self._pending_writes.append(future)
+
+        # Clear current shard
         self._current_shard = {}
 
-        print(f"  Wrote shard: {shard_name} ({num_samples} samples)")
+        print(f"  Queued shard: {shard_name} ({num_samples} samples)")
+
+    def wait_for_writes(self) -> None:
+        """Wait for all pending writes to complete."""
+        for future in self._pending_writes:
+            future.result()
+        self._pending_writes.clear()
 
     def finalize(self) -> DatastoreIndex:
         """Finalize datastore and write index."""
         # Flush any remaining samples
-        for split in ["train", "valid", "test"]:
-            self.set_split(split)
-        self._flush_shard()
+        if self._current_shard:
+            self._flush_shard()
 
+        # Wait for all async writes
+        print("  Waiting for pending writes...")
+        self.wait_for_writes()
+
+        # Shutdown executor
+        self._write_executor.shutdown(wait=True)
+
+        # Save final index
         index = DatastoreIndex(
             config=self.config,
             shards=self._shards,
@@ -211,6 +343,15 @@ class MLXDatastoreWriter:
         print(f"  Test samples:  {self._sample_counts['test']:,}")
 
         return index
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Ensure writes complete even on error."""
+        self.wait_for_writes()
+        self._write_executor.shutdown(wait=True)
+        return False
 
 
 class MLXDataLoader:
