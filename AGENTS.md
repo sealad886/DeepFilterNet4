@@ -6,6 +6,32 @@
 - **NEVER create PRs to or reference Rikorose/DeepFilterNet**
 - All work stays within this repository only
 
+## Issue Tracking & AI Integration
+
+This project uses **bd (beads)** for issue tracking with full AI integration.
+
+### For AI Agents
+- **Skill location:** `.github/skills/beads/` — comprehensive bd integration patterns
+- **Run `bd prime` at session start** to inject workflow context
+- **Git hooks auto-inject** context on commits if installed
+- Consult `SKILL.md` for decision trees, `resources/` for specific patterns
+
+### Quick Reference
+
+| Command | Purpose |
+|---------|---------|
+| `bd ready` | Find unblocked work to claim |
+| `bd create "Title" --type task --priority 2` | Create new issue |
+| `bd update <id> --status in-progress` | Claim work |
+| `bd close <id>` | Complete work |
+| `bd sync` | Sync with git (run at session end) |
+| `bd prime` | Get full workflow context |
+
+### Session Workflow
+1. **Start:** `bd prime` → `bd ready` → claim work
+2. **During:** Reference issues in commits, update status as you go
+3. **End:** `bd sync` → `git push` (work isn't complete until pushed!)
+
 ## Project Structure & Module Organization
 - `DeepFilterNet/` is the main Python package (training, inference, configs, scripts). Core code lives in `DeepFilterNet/df/`.
 - `DeepFilterNet/tests/` contains Python tests (pytest).
@@ -37,3 +63,29 @@
 - Commit messages follow a Conventional Commits style (e.g., `feat(whisper): ...`, `chore(lint): ...`).
 - PRs should include a concise summary, tests run (or why not), and any model/data changes.
 - If a change affects checkpoints or configs, mention the expected model directory layout (`config.ini` + `checkpoints/`).
+
+## Landing the Plane (Session Completion)
+
+**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
+
+**MANDATORY WORKFLOW:**
+
+1. **File issues for remaining work** - Create issues for anything that needs follow-up
+2. **Run quality gates** (if code changed) - Tests, linters, builds
+3. **Update issue status** - Close finished work, update in-progress items
+4. **PUSH TO REMOTE** - This is MANDATORY:
+   ```bash
+   git pull --rebase
+   bd sync
+   git push
+   git status  # MUST show "up to date with origin"
+   ```
+5. **Clean up** - Clear stashes, prune remote branches
+6. **Verify** - All changes committed AND pushed
+7. **Hand off** - Provide context for next session
+
+**CRITICAL RULES:**
+- Work is NOT complete until `git push` succeeds
+- NEVER stop before pushing - that leaves work stranded locally
+- NEVER say "ready to push when you are" - YOU must push
+- If push fails, resolve and retry until it succeeds

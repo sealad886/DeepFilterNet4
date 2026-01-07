@@ -6,9 +6,11 @@ Uses torchcodec for efficient audio decoding and encoding with built-in resampli
 
 import argparse
 import os
+import sys
 import time
+from functools import partial
 from multiprocessing import Pool
-from typing import Optional
+from typing import TYPE_CHECKING, Optional, cast
 
 import h5py as h5
 import numpy as np
@@ -18,8 +20,35 @@ from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 from torchcodec.decoders import AudioDecoder
 from torchcodec.encoders import AudioEncoder
+from tqdm import tqdm
 
 from df.logger import init_logger
+
+if TYPE_CHECKING:
+    from h5py import Group
+
+
+def _worker_init_fn(worker_id: int, quiet: bool = False, log_file: str | None = None) -> None:
+    """Initialize logging in DataLoader worker processes."""
+    if quiet:
+        logger.remove()
+        if log_file:
+            logger.add(log_file, level="DEBUG")
+
+
+def _check_file(file: str, working_dir: str) -> str:
+    """Validate a file path exists (module-level for pickling in multiprocessing)."""
+    file = file.strip()
+    if not file:
+        return ""
+    # Handle both absolute and relative paths
+    if os.path.isabs(file):
+        path = file
+    else:
+        path = os.path.join(working_dir, file)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"File not found: {path}")
+    return path
 
 
 def write_to_h5(
@@ -32,6 +61,8 @@ def write_to_h5(
     mono: bool = False,
     compression: Optional[str] = None,
     num_workers: int = 4,
+    quiet: bool = False,
+    log_file: str | None = None,
 ):
     """Creates an HDF5 dataset based on the provided dict.
 
@@ -50,7 +81,31 @@ def write_to_h5(
     if max_freq <= 0:
         max_freq = sr // 2
 
+    # Create worker init function with config baked in via partial
+    worker_init = partial(_worker_init_fn, quiet=quiet, log_file=log_file) if num_workers > 0 else None
+
     with h5.File(file_name, "a", libver="latest") as f, torch.no_grad():
+        # Check for parameter mismatch with existing file
+        if "sr" in f.attrs:
+            existing_sr = f.attrs["sr"]
+            existing_dtype = f.attrs.get("dtype", "unknown")
+            existing_codec = f.attrs.get("codec", "unknown")
+
+            mismatches = []
+            if existing_sr != sr:
+                mismatches.append(f"sr: {existing_sr} -> {sr}")
+            if existing_dtype != dtype:
+                mismatches.append(f"dtype: {existing_dtype} -> {dtype}")
+            if existing_codec != codec:
+                mismatches.append(f"codec: {existing_codec} -> {codec}")
+
+            if mismatches:
+                raise ValueError(
+                    f"Parameter mismatch with existing HDF5 file!\n"
+                    f"  Mismatches: {', '.join(mismatches)}\n"
+                    f"  Delete the file to start fresh: rm {file_name}"
+                )
+
         f.attrs["db_id"] = int(time.time())
         f.attrs["db_name"] = os.path.basename(file_name)
         f.attrs["max_freq"] = max_freq
@@ -59,15 +114,37 @@ def write_to_h5(
         f.attrs["codec"] = codec
 
         for key, data_dict in data.items():
+            working_dir = data_dict["working_dir"]
+
             try:
-                grp = f.create_group(key)
+                grp: Group = f.create_group(key)
+                existing_keys: set[str] = set()
             except ValueError:
                 logger.info(f"Found existing group {key}")
-                grp = f[key]
+                grp = cast("Group", f[key])
+                existing_keys = set(grp.keys())
+                logger.info(f"Found {len(existing_keys)} existing entries in group {key}")
+
+            def make_ds_key(fn: str) -> str:
+                """Generate HDF5 dataset key from filename (relative path with / -> _)."""
+                rel_path = os.path.relpath(fn, working_dir) if working_dir else fn
+                return rel_path.replace("/", "_")
+
+            # Filter out files that already exist in the HDF5
+            all_files = data_dict["files"]
+            files_to_process = [fn for fn in all_files if make_ds_key(fn) not in existing_keys]
+            skipped = len(all_files) - len(files_to_process)
+
+            if skipped > 0:
+                logger.info(f"Skipping {skipped} files already in HDF5, processing {len(files_to_process)} remaining")
+
+            if not files_to_process:
+                logger.info(f"All {len(all_files)} files already exist in group {key}, nothing to do.")
+                continue
 
             dataset = PreProcessingDataset(
                 sr=sr,
-                file_names=data_dict["files"],
+                file_names=files_to_process,
                 dtype=dtype,
                 codec=codec,
                 mono=mono,
@@ -78,36 +155,42 @@ def write_to_h5(
                 batch_size=1,
                 shuffle=False,
                 collate_fn=collate_audio,
+                worker_init_fn=worker_init,
             )
 
             n_samples = len(dataset)
-            for i, sample in enumerate(loader):
+            pbar = tqdm(
+                enumerate(loader),
+                total=n_samples,
+                desc=f"Writing {key}",
+                unit="files",
+                file=sys.stderr,
+            )
+            written = 0
+            for i, sample in pbar:
                 if sample is None:
                     continue
 
-                fn = os.path.relpath(sample["file_name"], data_dict["working_dir"])
+                fn = sample["file_name"]
+                ds_key = make_ds_key(fn)
                 audio: np.ndarray = sample["data"]
                 n_audio_samples = sample["n_samples"]
 
                 if n_audio_samples < sr // 100:  # Should be at least 10 ms
                     logger.warning(f"Short audio {fn}: {audio.shape}.")
 
-                progress = (i + 1) / n_samples * 100
-                logger.info(f"{progress:5.1f}% | Writing {fn} to {key} dataset.")
+                logger.debug(f"Writing {ds_key} to {key} dataset.")
 
                 if n_audio_samples == 0:
                     continue
 
-                ds_key = fn.replace("/", "_")
-                if ds_key in grp:
-                    logger.debug(f"Found dataset {ds_key}. Replacing.")
-                    del grp[ds_key]
-
                 ds = grp.create_dataset(ds_key, data=audio, compression=compression)
                 ds.attrs["n_samples"] = n_audio_samples
+                written += 1
                 del audio, sample
 
-            logger.info(f"Added {n_samples} samples to group {key}.")
+            pbar.close()
+            logger.info(f"Group {key}: {written} written, {skipped} skipped ({len(all_files)} total).")
 
 
 def collate_audio(batch):
@@ -283,14 +366,32 @@ def main():
         default=None,
         help="HDF5 compression filter (e.g., 'gzip').",
     )
+    parser.add_argument(
+        "--log-file",
+        type=str,
+        default=None,
+        help="Log file path. If not specified, logs to /tmp/prepare_data.log",
+    )
+    parser.add_argument(
+        "--quiet",
+        "-q",
+        action="store_true",
+        help="Suppress console output (logs still written to file).",
+    )
     args = parser.parse_args()
 
     if not args.hdf5_db.endswith(".hdf5"):
         args.hdf5_db += ".hdf5"
 
-    init_logger("/tmp/prepare_data.log")
+    log_file = args.log_file or "/tmp/prepare_data.log"
+    init_logger(log_file)
+    if args.quiet:
+        logger.remove()
+        logger.add(log_file, level="DEBUG")
+
     logger.info(f"Preparing {args.type} dataset: {args.audio_files} -> {args.hdf5_db}")
     logger.info(f"Settings: sr={args.sr}, dtype={args.dtype}, codec={args.codec}, mono={args.mono}")
+    logger.info(f"Log file: {log_file}")
 
     data = {
         args.type: {"working_dir": None, "files": []},
@@ -301,21 +402,21 @@ def main():
         data[args.type]["working_dir"] = working_dir
         logger.info(f"Using working directory: {working_dir}")
 
-        def _check_file(file: str) -> str:
-            file = file.strip()
-            if not file:
-                return ""
-            # Handle both absolute and relative paths
-            if os.path.isabs(file):
-                path = file
-            else:
-                path = os.path.join(working_dir, file)
-            if not os.path.isfile(path):
-                raise FileNotFoundError(f"File not found: {path}")
-            return path
+        # Read all lines first to get count for progress bar
+        lines = f.readlines()
+        logger.info(f"Found {len(lines)} entries in file list.")
 
+        validate_file_path = partial(_check_file, working_dir=working_dir)
         with Pool(max(args.num_workers, 1)) as p:
-            results = p.imap(_check_file, f, chunksize=100)
+            results = list(
+                tqdm(
+                    p.imap(validate_file_path, lines, chunksize=100),
+                    total=len(lines),
+                    desc="Validating files",
+                    unit="files",
+                    file=sys.stderr,
+                )
+            )
             files = [r for r in results if r]
 
         data[args.type]["files"] = files
@@ -331,6 +432,8 @@ def main():
         mono=args.mono,
         compression=args.compression,
         num_workers=args.num_workers,
+        quiet=args.quiet,
+        log_file=log_file,
     )
 
     logger.info(f"Done. Output: {args.hdf5_db}")

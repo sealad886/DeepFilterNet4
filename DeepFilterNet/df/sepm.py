@@ -142,7 +142,7 @@ def fwSNRseg(cleanSig, enhancedSig, fs, frameLen=0.03, overlap=0.75):
         nfft=n_fft,
         detrend=False,
         return_onesided=True,
-        boundary=None,
+        boundary=None,  # type: ignore[arg-type]
         padded=False,
     )
     clean_spec = np.abs(Zxx)
@@ -157,7 +157,7 @@ def fwSNRseg(cleanSig, enhancedSig, fs, frameLen=0.03, overlap=0.75):
         nfft=n_fft,
         detrend=False,
         return_onesided=True,
-        boundary=None,
+        boundary=None,  # type: ignore[arg-type]
         padded=False,
     )
     enh_spec = np.abs(Zxx)
@@ -418,7 +418,7 @@ def wss(clean_speech, processed_speech, fs, frameLen=0.03, overlap=0.75):
         nfft=n_fft,
         detrend=False,
         return_onesided=True,
-        boundary=None,
+        boundary=None,  # type: ignore[arg-type]
         padded=False,
     )
     clean_spec = np.power(np.abs(Zxx) / scale, 2)
@@ -433,7 +433,7 @@ def wss(clean_speech, processed_speech, fs, frameLen=0.03, overlap=0.75):
         nfft=n_fft,
         detrend=False,
         return_onesided=True,
-        boundary=None,
+        boundary=None,  # type: ignore[arg-type]
         padded=False,
     )
     proc_spec = np.power(np.abs(Zxx) / scale, 2)

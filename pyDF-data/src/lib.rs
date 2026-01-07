@@ -332,3 +332,32 @@ impl<T> ResultExt<T> for std::result::Result<T, DfDataloaderError> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use ndarray::ShapeError;
+
+    use super::*;
+
+    #[test]
+    fn test_shape_error_conversion() {
+        let err: Result<(), ShapeError> =
+            Err(ShapeError::from_kind(ndarray::ErrorKind::IncompatibleShape));
+        let py_result = err.to_py_err();
+        assert!(py_result.is_err());
+    }
+
+    #[test]
+    fn test_push_ret() {
+        let vec = vec![1, 2, 3];
+        let result = push_ret(vec, 4);
+        assert_eq!(result, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_push_ret_empty() {
+        let vec: Vec<i32> = vec![];
+        let result = push_ret(vec, 1);
+        assert_eq!(result, vec![1]);
+    }
+}

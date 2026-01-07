@@ -333,3 +333,25 @@ impl<T> ResultExt<T> for std::result::Result<T, TransformError> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use ndarray::ShapeError;
+
+    use super::*;
+
+    #[test]
+    fn test_shape_error_conversion() {
+        let err: Result<(), ShapeError> =
+            Err(ShapeError::from_kind(ndarray::ErrorKind::IncompatibleShape));
+        let py_result = err.to_py_err();
+        assert!(py_result.is_err());
+    }
+
+    #[test]
+    fn test_transform_error_conversion() {
+        let err: Result<(), TransformError> = Err(TransformError::DfError("test error".into()));
+        let py_result = err.to_py_err();
+        assert!(py_result.is_err());
+    }
+}

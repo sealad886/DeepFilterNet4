@@ -66,6 +66,12 @@ struct DfPlugin {
 
 const ID_MONO: u64 = 7843795;
 const ID_STEREO: u64 = 7843796;
+
+// SAFETY: MODEL is only written to once during initialization via init_df(),
+// and read (via clone) from a single thread context before spawning workers.
+// DfTract is not Send/Sync due to tract internals using Rc, but our usage
+// pattern is safe: initialize once, clone into worker threads.
+#[allow(static_mut_refs)]
 static mut MODEL: Option<DfTract> = None;
 
 fn log_format(buf: &mut env_logger::fmt::Formatter, record: &log::Record) -> io::Result<()> {
@@ -111,6 +117,9 @@ fn get_worker_fn(
     id: String,
 ) -> impl FnMut() {
     move || {
+        // SAFETY: MODEL is initialized before this is called, and we clone it
+        // into this thread's local scope before any concurrent access.
+        #[allow(static_mut_refs)]
         let mut df = unsafe { MODEL.clone().unwrap() };
         let mut inframe = Array2::zeros((df.ch, df.hop_size));
         let mut outframe = Array2::zeros((df.ch, df.hop_size));
@@ -171,6 +180,9 @@ fn get_worker_fn(
 
 /// Initialize DF model and returns sample rate and frame size
 fn init_df(channels: usize) -> (usize, usize) {
+    // SAFETY: This function is called from a single thread during plugin
+    // initialization. No concurrent reads/writes occur at this point.
+    #[allow(static_mut_refs)]
     unsafe {
         if let Some(m) = MODEL.as_ref() {
             if m.ch == channels {
@@ -183,7 +195,11 @@ fn init_df(channels: usize) -> (usize, usize) {
     let r_params = RuntimeParams::default_with_ch(channels);
     let df = DfTract::new(df_params, &r_params).expect("Could not initialize DeepFilter runtime");
     let (sr, frame_size) = (df.sr, df.hop_size);
-    unsafe { MODEL = Some(df) };
+    // SAFETY: Single-threaded initialization, no concurrent access.
+    #[allow(static_mut_refs)]
+    unsafe {
+        MODEL = Some(df);
+    }
     (sr, frame_size)
 }
 

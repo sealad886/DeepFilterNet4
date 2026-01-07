@@ -3,7 +3,7 @@ from df.utils import download_file
 
 if __name__ == "__main__":
     # Load default model
-    model, df_state, _ = init_df()
+    model, df_state, _, _ = init_df()
     # Download and open some audio file. You use your audio files here
     audio_path = download_file(
         "https://github.com/Rikorose/DeepFilterNet/raw/e031053/assets/noisy_snr0.wav",

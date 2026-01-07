@@ -20,7 +20,8 @@ default-model-ll = ["deep_filter/default-model-ll"]
 thresholds = []
 
 [dependencies]
-iced = { version = "0.14", features = [
+# Use iced 0.12.x which still supports the Application trait API used by this demo
+iced = { version = "0.12", features = [
   "image",
   "debug",
   "tokio",
@@ -37,7 +38,8 @@ deep_filter = { path = "../libDF/", default-features = false, features = [
   "use-jemalloc",
   "default-model",
 ] }
-ndarray = "^0.17"
+# Use workspace ndarray version for compatibility with libDF
+ndarray = { workspace = true }
 rubato = "0.15"
 ringbuf = "0.3"
 env_logger = "0.11"

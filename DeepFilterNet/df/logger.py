@@ -197,17 +197,23 @@ def log_model_summary(model: torch.nn.Module, verbose=False, force=False):
     feat_spec = torch.randn([b, 1, t, p.nb_df, 2]).to(device)
 
     warnings.filterwarnings("ignore", "RNN module weights", category=UserWarning, module="torch")
-    macs, params = ptflops.get_model_complexity_info(
-        deepcopy(model),
-        (t,),
-        input_constructor=lambda _: {"spec": spec, "feat_erb": feat_erb, "feat_spec": feat_spec},
-        as_strings=False,
-        print_per_layer_stat=verbose,
-        verbose=verbose,
-        custom_modules_hooks={
-            GroupedLinearEinsum: grouped_linear_flops_counter_hook,
-        },
-    )
+
+    # Suppress ptflops warning about positional inputs (we use kwargs via input_constructor)
+    import contextlib
+    import io
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        macs, params = ptflops.get_model_complexity_info(
+            deepcopy(model),
+            (t,),
+            input_constructor=lambda _: {"spec": spec, "feat_erb": feat_erb, "feat_spec": feat_spec},
+            as_strings=False,
+            print_per_layer_stat=verbose,
+            verbose=verbose,
+            custom_modules_hooks={
+                GroupedLinearEinsum: grouped_linear_flops_counter_hook,
+            },
+        )
     logger.info(f"Model complexity: {float(params) / 1e6:.3f}M #Params, {float(macs) / 1e6:.1f}M MACS")
 
 

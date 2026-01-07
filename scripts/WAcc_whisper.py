@@ -4,7 +4,7 @@ import os
 import string
 import sys
 from pathlib import Path
-from typing import List, Union
+from typing import List, Union, cast
 
 import editdistance
 import numpy as np
@@ -45,6 +45,7 @@ def normalize(input: str) -> List[str]:
 
 def eval_wacc(args):
     load_model()
+    assert BACKEND is not None
     audio_clips_list = glob.glob(os.path.join(args.testset_dir, "*.wav"))
     transcriptions_df = pd.read_csv(args.transcription_file, sep="\t", names=["filename", "transcription"])
     scores = []
@@ -63,13 +64,14 @@ def eval_wacc(args):
         mel = BACKEND.log_mel_spectrogram(audio)
         # Convert to torch tensor with proper device/dtype for decoding
         if BACKEND.backend_name == "pytorch":
-            mel = mel.to(device=BACKEND.device, dtype=DT)
+            mel = cast(torch.Tensor, mel).to(device=BACKEND.device, dtype=DT)
         else:
             # MLX backend returns mx.array, convert to numpy for decode
             mel = np.array(mel)
 
         result = BACKEND.decode(mel, WHISPER_OPT)
-        target = transcriptions_df["transcription"][idx].to_list()[0]
+        transcription_series = transcriptions_df["transcription"][idx]
+        target = str(transcription_series.to_list()[0])  # type: ignore[union-attr]
         if "<UNKNOWN" in target or "unknown" in target:
             # target may contain <UNKNOWN\>, <UNKNOWN>, or unknown
             fpath = os.path.basename(fpath)

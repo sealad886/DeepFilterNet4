@@ -1,6 +1,6 @@
 import warnings
 from collections import defaultdict
-from typing import Dict, Final, Iterable, List, Literal, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Dict, Final, Iterable, List, Literal, Optional, Tuple, Union, cast
 
 import torch
 import torch.nn.functional as F
@@ -13,6 +13,9 @@ from df.modules import LocalSnrTarget, Mask, erb_fb
 from df.stoi import stoi
 from df.utils import angle, as_complex, get_device
 from libdf import DF
+
+if TYPE_CHECKING:
+    from df.whisper_adapter import MLXWhisperBackend  # noqa: F401 (used by cast())
 
 
 def wg(S: Tensor, X: Tensor, eps: float = 1e-10) -> Tensor:
@@ -95,7 +98,7 @@ class Istft(nn.Module):
 class MultiResSpecLoss(nn.Module):
     gamma: Final[float]
     f: Final[float]
-    f_complex: Final[Optional[List[float]]]
+    f_complex: Optional[List[float]]  # Mutable during __init__, then treated as Final
 
     def __init__(
         self,
@@ -469,8 +472,9 @@ class ASRLoss(nn.Module):
     def forward(self, input: Tensor, target: Tensor) -> Tensor:
         # Use backend with automatic tensor conversion for gradient flow
         if self.backend.backend_name == "mlx":
-            features_i = self.backend.embed_audio_as_torch(self.preprocess(input), dtype=input.dtype)
-            features_t = self.backend.embed_audio_as_torch(self.preprocess(target), dtype=target.dtype)
+            mlx_backend = cast("MLXWhisperBackend", self.backend)
+            features_i = mlx_backend.embed_audio_as_torch(self.preprocess(input), dtype=input.dtype)
+            features_t = mlx_backend.embed_audio_as_torch(self.preprocess(target), dtype=target.dtype)
         else:
             features_i = self.backend.embed_audio(self.preprocess(input))
             features_t = self.backend.embed_audio(self.preprocess(target))
@@ -548,7 +552,8 @@ class ASRLoss(nn.Module):
         for i in range(self.sample_len):
             # Use backend with automatic tensor conversion for MLX
             if self.backend.backend_name == "mlx":
-                logit = self.backend.logits_as_torch(tokens, features, dtype=features.dtype)[:, -1]
+                mlx_backend = cast("MLXWhisperBackend", self.backend)
+                logit = mlx_backend.logits_as_torch(tokens, features, dtype=features.dtype)[:, -1]
             else:
                 logit = self.backend.logits(tokens, features)[:, -1]
             logits.append(logit)
@@ -793,6 +798,7 @@ class SpeakerContrastiveLoss(nn.Module):
             Speaker embedding [B, D]
         """
         # resemblyzer expects numpy arrays
+        assert self.speaker_encoder is not None, "Speaker encoder not loaded"
         audio_np = audio.detach().cpu().numpy()
         embeddings = []
         for i in range(audio_np.shape[0]):

@@ -424,13 +424,12 @@ fn push_spec(spec: ArrayView2<Complex32>, sender: &SendSpec) {
 pub fn log_format(buf: &mut env_logger::fmt::Formatter, record: &log::Record) -> io::Result<()> {
     let ts = buf.timestamp_millis();
     let module = record.module_path().unwrap_or("").to_string();
-    let level_style = buf.default_level_style(log::Level::Info);
 
     writeln!(
         buf,
-        "{} | {} | {} {}",
+        "{} | {:5} | {} {}",
         ts,
-        level_style.value(record.level()),
+        record.level(),
         module,
         record.args()
     )

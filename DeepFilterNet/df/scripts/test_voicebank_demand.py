@@ -10,7 +10,7 @@ from df.evaluation_utils import evaluation_loop
 
 
 def main(args):
-    model, df_state, suffix = init_df(
+    model, df_state, suffix, _ = init_df(
         args.model_base_dir,
         post_filter=args.pf,
         log_level=args.log_level,

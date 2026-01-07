@@ -23,7 +23,7 @@ import platform
 import subprocess
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, List, Literal, Optional, Protocol, Union
+from typing import TYPE_CHECKING, Any, List, Literal, Optional, Protocol, Union, cast
 
 import numpy as np
 import torch
@@ -375,8 +375,10 @@ class PyTorchWhisperBackend:
         download_root: Optional[str] = None,
     ):
         import whisper
+        from whisper.tokenizer import get_tokenizer as whisper_get_tokenizer
 
         self._whisper = whisper
+        self._get_tokenizer = whisper_get_tokenizer
 
         if device is None:
             if torch.cuda.is_available():
@@ -426,7 +428,7 @@ class PyTorchWhisperBackend:
         """
         if isinstance(mel, np.ndarray):
             mel = torch.from_numpy(mel)
-        mel = mel.to(self._device)
+        mel = cast(torch.Tensor, mel).to(self._device)
         return self._model.embed_audio(mel)
 
     def logits(self, tokens: ArrayLike, audio_features: ArrayLike) -> torch.Tensor:
@@ -444,8 +446,8 @@ class PyTorchWhisperBackend:
             tokens = torch.from_numpy(tokens)
         if isinstance(audio_features, np.ndarray):
             audio_features = torch.from_numpy(audio_features)
-        tokens = tokens.to(self._device)
-        audio_features = audio_features.to(self._device)
+        tokens = cast(torch.Tensor, tokens).to(self._device)
+        audio_features = cast(torch.Tensor, audio_features).to(self._device)
         return self._model.logits(tokens, audio_features)
 
     def decode(self, mel: ArrayLike, options: Any = None) -> WhisperDecodingResult:
@@ -463,8 +465,9 @@ class PyTorchWhisperBackend:
             options = self._whisper.DecodingOptions()
         if isinstance(mel, np.ndarray):
             mel = torch.from_numpy(mel)
-        mel = mel.to(self._device)
+        mel = cast(torch.Tensor, mel).to(self._device)
         result = self._whisper.decode(self._model, mel, options)
+        assert isinstance(result, self._whisper.DecodingResult)
         return WhisperDecodingResult(
             text=result.text,
             language=result.language,
@@ -485,7 +488,7 @@ class PyTorchWhisperBackend:
         Returns:
             Whisper tokenizer instance.
         """
-        return self._whisper.tokenizer.get_tokenizer(self._model.is_multilingual, language=language, task=task)
+        return self._get_tokenizer(self._model.is_multilingual, language=language, task=task)
 
     def get_decoder(self, temperature: float = 0.0) -> Any:
         """
@@ -529,7 +532,7 @@ class PyTorchWhisperBackend:
             return self._whisper.pad_or_trim(audio)  # type: ignore
         return self._whisper.pad_or_trim(audio, length)  # type: ignore
 
-    def log_mel_spectrogram(self, audio: ArrayLike, n_mels: Optional[int] = None) -> torch.Tensor:
+    def log_mel_spectrogram(self, audio: ArrayLike, n_mels: Optional[int] = None) -> torch.Tensor:  # type: ignore
         """
         Compute log mel spectrogram from audio.
 
@@ -540,11 +543,13 @@ class PyTorchWhisperBackend:
         Returns:
             Log mel spectrogram as PyTorch tensor.
         """
-        if isinstance(audio, np.ndarray):
-            audio = torch.from_numpy(audio)
+        # whisper.log_mel_spectrogram expects (str | np.ndarray | torch.Tensor).
+        # For the PyTorch backend we normalize to a torch.Tensor, converting
+        # MLX arrays (mx.array) and numpy arrays as needed.
+        audio_t: torch.Tensor = audio if isinstance(audio, torch.Tensor) else torch.from_numpy(to_numpy(audio))
         if n_mels is None:
             n_mels = self.dims.n_mels
-        return self._whisper.log_mel_spectrogram(audio, n_mels=n_mels)
+        return self._whisper.log_mel_spectrogram(audio_t, n_mels=n_mels)
 
     def load_audio(self, path: str) -> np.ndarray:
         """
@@ -738,9 +743,14 @@ class MLXWhisperBackend:
         if options is None:
             options = self._mlx_decoding.DecodingOptions()
         if isinstance(mel, (np.ndarray, torch.Tensor)):
-            mel = mx.array(to_numpy(mel))
+            mel_arr = mx.array(to_numpy(mel))
+        else:
+            mel_arr = mel
 
-        result = self._mlx_decoding.decode(self._model, mel, options)
+        result = self._mlx_decoding.decode(self._model, mel_arr, options)
+        # decode returns a list of DecodingResult, get the first one
+        if isinstance(result, list):
+            result = result[0]
         return WhisperDecodingResult(
             text=result.text,
             language=result.language,
@@ -822,12 +832,12 @@ class MLXWhisperBackend:
         Returns:
             Log mel spectrogram as MLX array.
         """
-        mx = _get_mx()
-        if isinstance(audio, (np.ndarray, torch.Tensor)):
-            audio = mx.array(to_numpy(audio))
+        # mlx_whisper.audio.log_mel_spectrogram expects (str | np.ndarray).
+        # Convert to numpy for compatibility.
+        audio_np: np.ndarray = audio if isinstance(audio, np.ndarray) else to_numpy(audio)
         if n_mels is None:
             n_mels = self.dims.n_mels
-        return self._mlx_audio.log_mel_spectrogram(audio, n_mels=n_mels)
+        return self._mlx_audio.log_mel_spectrogram(audio_np, n_mels=n_mels)
 
     def load_audio(self, path: str) -> np.ndarray:
         """

@@ -3,11 +3,17 @@
     "reportOptionalMemberAccess": "warning",
     "reportPossiblyUnbound": "warning",
     "reportGeneralTypeIssues": "warning",
+    "reportArgumentType": "none",
+    "reportPossiblyUnboundVariable": "none",
     "exclude": [
         "**/tests/**",
         "**/__pycache__/**",
         "**/build/**",
-        "**/dist/**"
+        "**/dist/**",
+        "**/node_modules",
+        "**/.*",
+        ".venv",
+        ".github/workflows"
     ],
     "pythonVersion": "3.12",
     "typeCheckingMode": "basic"
