@@ -1266,6 +1266,425 @@ class DfNet4Lite(DfNet4):
 
 
 # ============================================================================
+# Streaming Inference
+# ============================================================================
+
+
+class StreamingState:
+    """Container for streaming inference state.
+
+    Holds all state needed for frame-by-frame processing including
+    Mamba hidden states, STFT buffers, and overlap-add state.
+
+    Attributes:
+        mamba_states: List of Mamba layer hidden states
+        input_buffer: Buffer for STFT input samples
+        output_buffer: Buffer for iSTFT overlap-add synthesis
+        window_sum: Window sum buffer for iSTFT normalization
+        frame_count: Number of frames processed
+    """
+
+    def __init__(
+        self,
+        batch_size: int,
+        n_fft: int,
+        hop_length: int,
+        d_inner: int,
+        d_state: int,
+        num_layers: int,
+    ):
+        self.batch_size = batch_size
+        self.n_fft = n_fft
+        self.hop_length = hop_length
+
+        # Mamba state: list of (batch, d_inner, d_state) for each layer
+        self.mamba_states: Optional[mx.array] = None  # Will be (num_layers, batch, d_inner, d_state)
+
+        # STFT input buffer - stores last n_fft - hop_length samples
+        self.input_buffer = mx.zeros((batch_size, n_fft - hop_length))
+
+        # iSTFT output buffer and window sum
+        self.output_buffer = mx.zeros((batch_size, n_fft))
+        self.window_sum = mx.zeros((n_fft,))
+
+        # Frame counter
+        self.frame_count = 0
+
+
+class StreamingDfNet4(nn.Module):
+    """Streaming wrapper for frame-by-frame DeepFilterNet4 inference.
+
+    Enables real-time audio processing by maintaining state between
+    frames and processing audio in chunks of hop_length samples.
+
+    This wrapper handles:
+    - STFT frame buffering with proper overlap
+    - Mamba hidden state persistence across frames
+    - iSTFT overlap-add synthesis
+    - Automatic state management
+
+    Example:
+        >>> model = DfNet4()
+        >>> streaming = StreamingDfNet4(model)
+        >>> state = streaming.init_state(batch_size=1)
+        >>>
+        >>> # Process audio in chunks
+        >>> for chunk in audio_chunks:  # Each chunk is hop_length samples
+        ...     enhanced, state = streaming.process_frame(chunk, state)
+        ...     output_buffer.append(enhanced)
+        >>>
+        >>> # Flush remaining samples
+        >>> final, _ = streaming.flush(state)
+
+    Args:
+        model: Pre-initialized DfNet4 model
+    """
+
+    def __init__(self, model: DfNet4):
+        super().__init__()
+
+        self.model = model
+        self.p = model.p
+
+        # Audio parameters
+        self.n_fft = self.p.fft_size
+        self.hop_length = self.p.hop_size
+        self.sr = self.p.sr
+
+        # Model parameters for state sizing
+        self.emb_dim = self.p.emb_hidden_dim
+        self.num_backbone_layers = self.p.backbone.nb_layers
+        self.d_state = self.p.backbone.d_state
+        self.expand_factor = self.p.backbone.expand_factor
+        self.d_inner = self.emb_dim * self.expand_factor
+
+        # Get window for STFT/iSTFT
+        from .ops import get_window
+
+        self.window = get_window("sqrt_hann", self.n_fft)
+
+    def init_state(self, batch_size: int = 1) -> StreamingState:
+        """Initialize streaming state for a new audio stream.
+
+        Args:
+            batch_size: Number of audio streams to process in parallel
+
+        Returns:
+            Initialized StreamingState object
+        """
+        return StreamingState(
+            batch_size=batch_size,
+            n_fft=self.n_fft,
+            hop_length=self.hop_length,
+            d_inner=self.d_inner,
+            d_state=self.d_state,
+            num_layers=self.num_backbone_layers,
+        )
+
+    def _stft_frame(self, audio_frame: mx.array, state: StreamingState) -> Tuple[mx.array, mx.array]:
+        """Compute STFT for a single frame.
+
+        Args:
+            audio_frame: Audio samples (batch, hop_length)
+            state: Current streaming state
+
+        Returns:
+            Tuple of (real, imag) each (batch, 1, n_freqs)
+        """
+        # Concatenate buffer with new samples
+        full_frame = mx.concatenate([state.input_buffer, audio_frame], axis=1)
+
+        # Apply window
+        windowed = full_frame * self.window
+
+        # Compute FFT
+        fft_out = mx.fft.rfft(windowed, axis=-1)
+
+        # Extract real and imaginary, add time dimension
+        real = mx.expand_dims(mx.real(fft_out), axis=1)  # (batch, 1, n_freqs)
+        imag = mx.expand_dims(mx.imag(fft_out), axis=1)
+
+        return real, imag
+
+    def _istft_frame(
+        self,
+        spec_real: mx.array,
+        spec_imag: mx.array,
+        state: StreamingState,
+    ) -> mx.array:
+        """Compute iSTFT for a single frame with overlap-add.
+
+        Args:
+            spec_real: Real part (batch, 1, n_freqs)
+            spec_imag: Imaginary part (batch, 1, n_freqs)
+            state: Current streaming state
+
+        Returns:
+            Enhanced audio samples (batch, hop_length)
+        """
+        # Remove time dimension
+        spec_real = mx.squeeze(spec_real, axis=1)
+        spec_imag = mx.squeeze(spec_imag, axis=1)
+
+        # Construct complex spectrum and inverse FFT
+        complex_spec = spec_real + 1j * spec_imag
+        frame = mx.fft.irfft(complex_spec, n=self.n_fft, axis=-1)
+
+        # Apply synthesis window
+        frame = frame * self.window
+
+        # Overlap-add with previous buffer
+        output = state.output_buffer + frame
+
+        # Extract output samples (first hop_length samples are ready)
+        ready_samples = output[:, : self.hop_length]
+
+        # Shift buffer: keep samples that will overlap with next frame
+        new_buffer = mx.zeros_like(state.output_buffer)
+        new_buffer = new_buffer.at[:, : self.n_fft - self.hop_length].add(output[:, self.hop_length :])
+        state.output_buffer = new_buffer
+
+        # Update window sum for normalization
+        win_sq = self.window * self.window
+        new_window_sum = mx.zeros_like(state.window_sum)
+        new_window_sum = new_window_sum.at[: self.n_fft - self.hop_length].add(state.window_sum[self.hop_length :])
+        new_window_sum = new_window_sum + win_sq
+        state.window_sum = new_window_sum
+
+        # Normalize output (using first hop_length of window sum)
+        norm_factor = mx.maximum(state.window_sum[: self.hop_length], 1e-8)
+        ready_samples = ready_samples / norm_factor
+
+        return ready_samples
+
+    def _forward_with_state(
+        self,
+        spec: Tuple[mx.array, mx.array],
+        feat_erb: mx.array,
+        feat_spec: mx.array,
+        mamba_state: Optional[mx.array],
+    ) -> Tuple[Tuple[mx.array, mx.array], Optional[mx.array]]:
+        """Forward pass with explicit Mamba state threading.
+
+        Args:
+            spec: Input spectrum (real, imag) each (batch, time, freq)
+            feat_erb: ERB features (batch, time, erb_bands)
+            feat_spec: DF features (batch, time, df_bins, 2)
+            mamba_state: Previous Mamba states or None
+
+        Returns:
+            Tuple of (enhanced_spec, new_mamba_state)
+        """
+        model = self.model
+        spec_real, spec_imag = spec
+
+        # Apply feature lookahead padding if configured
+        if model.conv_lookahead > 0:
+            feat_erb = model._pad_features(feat_erb, model.conv_lookahead)
+            feat_spec = model._pad_features(feat_spec, model.conv_lookahead)
+
+        # Encode
+        emb, lsnr = model.encoder(feat_erb, feat_spec)
+
+        # Mamba backbone with state threading
+        new_state, emb = self._backbone_with_state(emb, mamba_state)
+
+        # Decode ERB mask
+        erb_mask = model.erb_decoder(emb)
+
+        # Expand ERB mask to full spectrum
+        mask = mx.matmul(erb_mask, mx.transpose(model._erb_fb))
+
+        # Apply mask
+        masked_real = spec_real * mask
+        masked_imag = spec_imag * mask
+
+        # Decode DF
+        df_out = model.df_decoder(emb)
+
+        # Apply deep filtering or complex gain
+        if model.df_output_mode == "coefficients":
+            assert model.df_op is not None
+            spec_out = model.df_op((masked_real, masked_imag), df_out)
+        else:
+            spec_out = model._apply_complex_gain((masked_real, masked_imag), df_out)
+
+        # Apply post-filter
+        spec_out = model._apply_post_filter(spec_out, spec)
+
+        return spec_out, new_state
+
+    def _backbone_with_state(
+        self,
+        emb: mx.array,
+        state: Optional[mx.array],
+    ) -> Tuple[Optional[mx.array], mx.array]:
+        """Process through Mamba backbone with explicit state.
+
+        Args:
+            emb: Embedding (batch, time, emb_dim)
+            state: Previous state (num_layers, batch, d_inner, d_state) or None
+
+        Returns:
+            Tuple of (new_state, output_emb)
+        """
+        backbone = self.model.backbone
+
+        # Input projection
+        x = emb
+        if backbone.input_proj is not None:
+            x = backbone.input_proj(x)
+
+        # Process through Mamba layers with state threading
+        new_states = []
+        for i, layer in enumerate(backbone.layers):
+            layer_state = state[i] if state is not None else None
+            x, new_layer_state = layer(x, layer_state)
+            new_states.append(new_layer_state)
+
+        # Output projection
+        if backbone.output_proj is not None:
+            x = backbone.output_proj(x)
+
+        # Stack states
+        new_state = mx.stack(new_states, axis=0) if new_states else None
+
+        return new_state, x
+
+    def process_frame(
+        self,
+        audio_frame: mx.array,
+        state: StreamingState,
+    ) -> Tuple[mx.array, StreamingState]:
+        """Process a single audio frame.
+
+        Args:
+            audio_frame: Input audio (batch, hop_length) or (hop_length,)
+            state: Current streaming state
+
+        Returns:
+            Tuple of (enhanced_audio, updated_state)
+        """
+        # Handle 1D input
+        input_1d = audio_frame.ndim == 1
+        if input_1d:
+            audio_frame = mx.expand_dims(audio_frame, axis=0)
+
+        # Compute STFT for this frame
+        spec_real, spec_imag = self._stft_frame(audio_frame, state)
+
+        # Update input buffer for next frame
+        state.input_buffer = mx.concatenate(
+            [state.input_buffer[:, self.hop_length :], audio_frame],
+            axis=1,
+        )
+
+        # Compute features
+        mag = mx.sqrt(spec_real**2 + spec_imag**2 + 1e-8)
+        feat_erb = mx.matmul(mag, self.model._erb_fb)  # (batch, 1, nb_erb)
+        feat_spec = mx.stack(
+            [spec_real[:, :, : self.p.nb_df], spec_imag[:, :, : self.p.nb_df]],
+            axis=-1,
+        )  # (batch, 1, nb_df, 2)
+
+        # Forward pass with state
+        spec_out, new_mamba_state = self._forward_with_state(
+            (spec_real, spec_imag),
+            feat_erb,
+            feat_spec,
+            state.mamba_states,
+        )
+
+        # Update Mamba state
+        state.mamba_states = new_mamba_state
+
+        # iSTFT for this frame
+        enhanced = self._istft_frame(spec_out[0], spec_out[1], state)
+
+        # Update frame count
+        state.frame_count += 1
+
+        # Handle 1D output
+        if input_1d:
+            enhanced = mx.squeeze(enhanced, axis=0)
+
+        return enhanced, state
+
+    def flush(self, state: StreamingState) -> Tuple[mx.array, StreamingState]:
+        """Flush remaining samples from the output buffer.
+
+        Call this after processing all input frames to get any
+        remaining samples that haven't been output yet.
+
+        Args:
+            state: Current streaming state
+
+        Returns:
+            Tuple of (remaining_samples, final_state)
+        """
+        # Get remaining samples from output buffer
+        remaining = state.output_buffer[:, : self.n_fft - self.hop_length]
+
+        # Normalize
+        norm_factor = mx.maximum(state.window_sum[: self.n_fft - self.hop_length], 1e-8)
+        remaining = remaining / norm_factor
+
+        return remaining, state
+
+    def process_audio(
+        self,
+        audio: mx.array,
+        state: Optional[StreamingState] = None,
+    ) -> mx.array:
+        """Process complete audio stream frame-by-frame.
+
+        Convenience method that processes entire audio using streaming
+        inference and verifies output matches batch processing.
+
+        Args:
+            audio: Input audio (samples,) or (batch, samples)
+            state: Optional pre-initialized state
+
+        Returns:
+            Enhanced audio
+        """
+        # Handle 1D input
+        input_1d = audio.ndim == 1
+        if input_1d:
+            audio = mx.expand_dims(audio, axis=0)
+
+        batch_size, num_samples = audio.shape
+
+        # Initialize state if not provided
+        if state is None:
+            state = self.init_state(batch_size)
+
+        # Process frame by frame
+        outputs = []
+        for start in range(0, num_samples, self.hop_length):
+            end = start + self.hop_length
+            if end > num_samples:
+                # Pad last frame if needed
+                frame = mx.pad(audio[:, start:], [(0, 0), (0, end - num_samples)])
+            else:
+                frame = audio[:, start:end]
+
+            enhanced_frame, state = self.process_frame(frame, state)
+            outputs.append(enhanced_frame)
+
+        # Concatenate all frames
+        enhanced = mx.concatenate(outputs, axis=-1)
+
+        # Trim to original length
+        enhanced = enhanced[:, :num_samples]
+
+        if input_1d:
+            enhanced = mx.squeeze(enhanced, axis=0)
+
+        return enhanced
+
+
+# ============================================================================
 # Model Initialization
 # ============================================================================
 

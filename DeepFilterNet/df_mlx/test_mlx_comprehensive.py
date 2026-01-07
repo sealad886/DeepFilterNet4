@@ -3507,6 +3507,349 @@ class TestNumericalEquivalence:
 
 
 # ============================================================================
+# Streaming Inference Tests
+# ============================================================================
+
+
+class TestStreaming:
+    """Tests for streaming/frame-by-frame inference mode."""
+
+    @pytest.fixture
+    def model(self):
+        """Create a model for streaming tests."""
+        from df_mlx.config import get_default_config
+        from df_mlx.model import DfNet4
+
+        p = get_default_config()
+        model = DfNet4(p)
+        mx.eval(model.parameters())
+        return model
+
+    @pytest.fixture
+    def streaming_model(self, model):
+        """Create streaming wrapper."""
+        from df_mlx.model import StreamingDfNet4
+
+        return StreamingDfNet4(model)
+
+    def test_streaming_init(self, streaming_model):
+        """Test StreamingDfNet4 initialization."""
+        # Verify parameters are correct
+        assert streaming_model.n_fft == 960
+        assert streaming_model.hop_length == 480
+        assert streaming_model.sr == 48000
+
+    def test_state_initialization(self, streaming_model):
+        """Test streaming state initialization."""
+        state = streaming_model.init_state(batch_size=1)
+
+        # Check state components
+        assert state.input_buffer.shape == (1, 480)  # n_fft - hop_length
+        assert state.output_buffer.shape == (1, 960)  # n_fft
+        assert state.window_sum.shape == (960,)  # n_fft
+        assert state.mamba_states is None  # Not initialized until first frame
+        assert state.frame_count == 0
+
+    def test_state_initialization_batch(self, streaming_model):
+        """Test streaming state initialization with batch."""
+        batch_size = 4
+        state = streaming_model.init_state(batch_size=batch_size)
+
+        assert state.input_buffer.shape == (batch_size, 480)
+        assert state.output_buffer.shape == (batch_size, 960)
+
+    def test_single_frame_processing(self, streaming_model):
+        """Test processing a single audio frame."""
+        state = streaming_model.init_state(batch_size=1)
+
+        # Create one frame of audio
+        hop_length = streaming_model.hop_length
+        audio_frame = mx.random.normal((1, hop_length)) * 0.1
+        mx.eval(audio_frame)
+
+        # Process frame
+        enhanced, new_state = streaming_model.process_frame(audio_frame, state)
+        mx.eval(enhanced)
+
+        # Check output shape
+        assert enhanced.shape == (1, hop_length)
+
+        # Check state was updated
+        assert new_state.frame_count == 1
+        assert new_state.mamba_states is not None
+
+    def test_multiple_frames_processing(self, streaming_model):
+        """Test processing multiple consecutive frames."""
+        state = streaming_model.init_state(batch_size=1)
+        hop_length = streaming_model.hop_length
+
+        outputs = []
+        for i in range(10):
+            audio_frame = mx.random.normal((1, hop_length)) * 0.1
+            mx.eval(audio_frame)
+
+            enhanced, state = streaming_model.process_frame(audio_frame, state)
+            mx.eval(enhanced)
+            outputs.append(enhanced)
+
+        # Verify all outputs have correct shape
+        assert len(outputs) == 10
+        assert all(o.shape == (1, hop_length) for o in outputs)
+
+        # Verify state was updated
+        assert state.frame_count == 10
+        assert state.mamba_states is not None
+
+    def test_1d_input_handling(self, streaming_model):
+        """Test that 1D input is handled correctly."""
+        state = streaming_model.init_state(batch_size=1)
+        hop_length = streaming_model.hop_length
+
+        # 1D input (no batch dimension)
+        audio_frame = mx.random.normal((hop_length,)) * 0.1
+        mx.eval(audio_frame)
+
+        enhanced, state = streaming_model.process_frame(audio_frame, state)
+        mx.eval(enhanced)
+
+        # Output should also be 1D
+        assert enhanced.ndim == 1
+        assert enhanced.shape[0] == hop_length
+
+    def test_batch_processing(self, streaming_model):
+        """Test streaming with batch processing."""
+        batch_size = 4
+        state = streaming_model.init_state(batch_size=batch_size)
+        hop_length = streaming_model.hop_length
+
+        # Batch input
+        audio_frame = mx.random.normal((batch_size, hop_length)) * 0.1
+        mx.eval(audio_frame)
+
+        enhanced, state = streaming_model.process_frame(audio_frame, state)
+        mx.eval(enhanced)
+
+        assert enhanced.shape == (batch_size, hop_length)
+
+    def test_mamba_state_persistence(self, streaming_model):
+        """Test that Mamba state persists correctly between frames."""
+        state = streaming_model.init_state(batch_size=1)
+        hop_length = streaming_model.hop_length
+
+        # Process first frame
+        audio_frame1 = mx.random.normal((1, hop_length)) * 0.1
+        mx.eval(audio_frame1)
+        _, state = streaming_model.process_frame(audio_frame1, state)
+        mx.eval(state.mamba_states)
+
+        # Capture first state
+        first_state = np.array(state.mamba_states)
+
+        # Process second frame
+        audio_frame2 = mx.random.normal((1, hop_length)) * 0.1
+        mx.eval(audio_frame2)
+        _, state = streaming_model.process_frame(audio_frame2, state)
+        mx.eval(state.mamba_states)
+
+        # State should have changed
+        second_state = np.array(state.mamba_states)
+        assert not np.allclose(first_state, second_state), "Mamba state should change between frames"
+
+    def test_state_reset(self, streaming_model):
+        """Test that reinitializing state resets everything."""
+        state = streaming_model.init_state(batch_size=1)
+        hop_length = streaming_model.hop_length
+
+        # Process some frames
+        for _ in range(5):
+            audio_frame = mx.random.normal((1, hop_length)) * 0.1
+            mx.eval(audio_frame)
+            _, state = streaming_model.process_frame(audio_frame, state)
+            mx.eval(state.mamba_states)
+
+        # Reinitialize state
+        new_state = streaming_model.init_state(batch_size=1)
+
+        # Should be reset
+        assert new_state.frame_count == 0
+        assert new_state.mamba_states is None
+
+    def test_process_audio_convenience_method(self, streaming_model):
+        """Test the process_audio convenience method."""
+        # Generate 0.5 seconds of audio
+        sr = streaming_model.sr
+        duration = 0.5
+        num_samples = int(sr * duration)
+
+        audio = mx.random.normal((num_samples,)) * 0.1
+        mx.eval(audio)
+
+        # Process full audio using streaming
+        enhanced = streaming_model.process_audio(audio)
+        mx.eval(enhanced)
+
+        # Output should have same length
+        assert enhanced.shape == audio.shape
+
+    def test_streaming_vs_batch_output_shape(self, model, streaming_model):
+        """Test that streaming and batch processing produce same output shape."""
+        # Generate 1 second of audio
+        sr = streaming_model.sr
+        num_samples = sr  # 1 second
+
+        audio = mx.random.normal((1, num_samples)) * 0.1
+        mx.eval(audio)
+
+        # Batch processing
+        batch_out = model.enhance(audio)
+        mx.eval(batch_out)
+
+        # Streaming processing
+        streaming_out = streaming_model.process_audio(mx.squeeze(audio, axis=0))
+        mx.eval(streaming_out)
+
+        # Shapes should match (allowing for slight differences due to different padding)
+        batch_len = batch_out.shape[-1] if batch_out.ndim > 1 else len(batch_out)
+        stream_len = streaming_out.shape[-1] if streaming_out.ndim > 1 else len(streaming_out)
+
+        # Allow for small difference due to different padding handling
+        assert abs(batch_len - stream_len) <= streaming_model.n_fft
+
+    def test_streaming_numerical_consistency(self, streaming_model):
+        """Test that streaming produces consistent output for same input."""
+        hop_length = streaming_model.hop_length
+        num_frames = 20
+
+        # Generate deterministic audio
+        np.random.seed(42)
+        audio_frames = [mx.array(np.random.randn(hop_length).astype(np.float32) * 0.1) for _ in range(num_frames)]
+
+        # First pass
+        state1 = streaming_model.init_state(batch_size=1)
+        outputs1 = []
+        for frame in audio_frames:
+            frame = mx.expand_dims(frame, axis=0)
+            out, state1 = streaming_model.process_frame(frame, state1)
+            mx.eval(out)
+            outputs1.append(np.array(out))
+
+        # Second pass with same input (new state)
+        state2 = streaming_model.init_state(batch_size=1)
+        outputs2 = []
+        for frame in audio_frames:
+            frame = mx.expand_dims(frame, axis=0)
+            out, state2 = streaming_model.process_frame(frame, state2)
+            mx.eval(out)
+            outputs2.append(np.array(out))
+
+        # Outputs should be identical
+        for o1, o2 in zip(outputs1, outputs2):
+            np.testing.assert_allclose(o1, o2, rtol=1e-5, atol=1e-6)
+
+    def test_flush_remaining_samples(self, streaming_model):
+        """Test flushing remaining samples from buffer."""
+        state = streaming_model.init_state(batch_size=1)
+        hop_length = streaming_model.hop_length
+
+        # Process a few frames
+        for _ in range(5):
+            audio_frame = mx.random.normal((1, hop_length)) * 0.1
+            mx.eval(audio_frame)
+            _, state = streaming_model.process_frame(audio_frame, state)
+
+        # Flush
+        remaining, final_state = streaming_model.flush(state)
+        mx.eval(remaining)
+
+        # Remaining should have some samples
+        assert remaining.shape[1] == streaming_model.n_fft - hop_length
+
+    def test_streaming_with_complex_gain_mode(self):
+        """Test streaming with complex gain output mode."""
+        from df_mlx.config import get_default_config
+        from df_mlx.model import DfNet4, StreamingDfNet4
+
+        p = get_default_config()
+        p.df.df_output_mode = "complex_gain"  # Set via df params
+        model = DfNet4(p)
+        mx.eval(model.parameters())
+
+        streaming = StreamingDfNet4(model)
+        state = streaming.init_state(batch_size=1)
+
+        # Process a frame
+        audio_frame = mx.random.normal((1, streaming.hop_length)) * 0.1
+        mx.eval(audio_frame)
+
+        enhanced, state = streaming.process_frame(audio_frame, state)
+        mx.eval(enhanced)
+
+        assert enhanced.shape == (1, streaming.hop_length)
+
+    def test_streaming_latency_properties(self, streaming_model):
+        """Test that streaming has expected latency characteristics."""
+        import time
+
+        state = streaming_model.init_state(batch_size=1)
+        hop_length = streaming_model.hop_length
+
+        # Warmup
+        for _ in range(3):
+            frame = mx.random.normal((1, hop_length)) * 0.1
+            mx.eval(frame)
+            _, state = streaming_model.process_frame(frame, state)
+
+        # Measure latency for multiple frames
+        latencies = []
+        for _ in range(20):
+            frame = mx.random.normal((1, hop_length)) * 0.1
+            mx.eval(frame)
+
+            start = time.perf_counter()
+            _, state = streaming_model.process_frame(frame, state)
+            mx.eval(state.mamba_states)  # Force synchronization
+            end = time.perf_counter()
+
+            latencies.append((end - start) * 1000)  # ms
+
+        avg_latency = np.mean(latencies)
+        max_latency = np.max(latencies)
+
+        # On M1/M2, should be well under 20ms per frame
+        # Note: First few frames might be slower due to JIT
+        assert avg_latency < 50, f"Average latency {avg_latency:.1f}ms too high"
+        # Max latency check is more lenient
+        assert max_latency < 100, f"Max latency {max_latency:.1f}ms too high"
+
+    def test_streaming_long_audio(self, streaming_model):
+        """Test streaming on longer audio without memory issues."""
+        # 10 seconds of audio
+        sr = streaming_model.sr
+        duration = 10.0
+        num_samples = int(sr * duration)
+        hop_length = streaming_model.hop_length
+
+        # Process in streaming fashion
+        state = streaming_model.init_state(batch_size=1)
+        num_frames = num_samples // hop_length
+
+        for i in range(num_frames):
+            # Generate frame on the fly to avoid memory issues
+            audio_frame = mx.random.normal((1, hop_length)) * 0.1
+            enhanced, state = streaming_model.process_frame(audio_frame, state)
+
+            # Periodically evaluate to avoid graph buildup
+            if i % 50 == 0:
+                mx.eval(enhanced)
+
+        # Final evaluation
+        mx.eval(state.mamba_states)
+
+        # Should complete without OOM
+        assert state.frame_count == num_frames
+
+
+# ============================================================================
 # Run Tests
 # ============================================================================
 
