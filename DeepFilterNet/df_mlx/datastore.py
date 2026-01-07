@@ -25,10 +25,13 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple, Union
 
 import mlx.core as mx
 import numpy as np
+
+# Type alias for batch dict returned by data loaders
+BatchDict = Dict[str, Union[mx.array, Tuple[mx.array, mx.array]]]
 
 # Global flag for graceful shutdown
 _shutdown_requested = False
@@ -546,20 +549,18 @@ class MLXDataLoader:
             "snr_db": data["snr_db"][sample_idx],
         }
 
-    def __getitem__(
-        self, index: int
-    ) -> Tuple[Tuple[mx.array, mx.array], mx.array, mx.array, Tuple[mx.array, mx.array]]:
+    def __getitem__(self, index: int) -> BatchDict:
         """Get a specific batch by index.
 
         Args:
             index: Batch index (0 to len(self) - 1)
 
         Returns:
-            Tuple of (spec, feat_erb, feat_spec, target) where:
-            - spec: (spec_real, spec_imag) tuple of mx.arrays
-            - feat_erb: ERB features mx.array
-            - feat_spec: DF-band features mx.array
-            - target: (clean_real, clean_imag) tuple of mx.arrays
+            Dict with keys:
+            - "spec": (spec_real, spec_imag) tuple of mx.arrays
+            - "feat_erb": ERB features mx.array
+            - "feat_spec": DF-band features mx.array
+            - "target": (clean_real, clean_imag) tuple of mx.arrays
         """
         if index < 0:
             index = len(self) + index
@@ -594,7 +595,7 @@ class MLXDataLoader:
             batch_clean_imag,
         )
 
-    def __iter__(self) -> Iterator[Tuple[Tuple[mx.array, mx.array], mx.array, mx.array, Tuple[mx.array, mx.array]]]:
+    def __iter__(self) -> Iterator[BatchDict]:
         """Iterate over batches."""
         indices = self._sample_indices.copy()
         if self.shuffle:
@@ -652,19 +653,28 @@ class MLXDataLoader:
         feat_spec: List[np.ndarray],
         clean_real: List[np.ndarray],
         clean_imag: List[np.ndarray],
-    ) -> Tuple[Tuple[mx.array, mx.array], mx.array, mx.array, Tuple[mx.array, mx.array]]:
-        """Convert lists to MLX batch tensors."""
-        spec = (
-            mx.array(np.stack(spec_real)),
-            mx.array(np.stack(spec_imag)),
-        )
-        erb = mx.array(np.stack(feat_erb))
-        df_spec = mx.array(np.stack(feat_spec))
-        target = (
-            mx.array(np.stack(clean_real)),
-            mx.array(np.stack(clean_imag)),
-        )
-        return spec, erb, df_spec, target
+    ) -> Dict[str, mx.array | Tuple[mx.array, mx.array]]:
+        """Convert lists to MLX batch tensors.
+
+        Returns:
+            Dict with keys matching train_with_data.py:
+            - "spec": (spec_real, spec_imag) tuple
+            - "feat_erb": ERB features array
+            - "feat_spec": DF-band features array
+            - "target": (clean_real, clean_imag) tuple
+        """
+        return {
+            "spec": (
+                mx.array(np.stack(spec_real)),
+                mx.array(np.stack(spec_imag)),
+            ),
+            "feat_erb": mx.array(np.stack(feat_erb)),
+            "feat_spec": mx.array(np.stack(feat_spec)),
+            "target": (
+                mx.array(np.stack(clean_real)),
+                mx.array(np.stack(clean_imag)),
+            ),
+        }
 
 
 class StreamingMLXDataLoader:
@@ -694,9 +704,7 @@ class StreamingMLXDataLoader:
         total = sum(s.num_samples for s in self.shards)
         return total // self.batch_size
 
-    def __getitem__(
-        self, index: int
-    ) -> Tuple[Tuple[mx.array, mx.array], mx.array, mx.array, Tuple[mx.array, mx.array]]:
+    def __getitem__(self, index: int) -> BatchDict:
         """Get a specific batch by index.
 
         Note: For streaming loader, this requires loading shards sequentially
@@ -706,11 +714,11 @@ class StreamingMLXDataLoader:
             index: Batch index (0 to len(self) - 1)
 
         Returns:
-            Tuple of (spec, feat_erb, feat_spec, target) where:
-            - spec: (spec_real, spec_imag) tuple of mx.arrays
-            - feat_erb: ERB features mx.array
-            - feat_spec: DF-band features mx.array
-            - target: (clean_real, clean_imag) tuple of mx.arrays
+            Dict with keys:
+            - "spec": (spec_real, spec_imag) tuple of mx.arrays
+            - "feat_erb": ERB features mx.array
+            - "feat_spec": DF-band features mx.array
+            - "target": (clean_real, clean_imag) tuple of mx.arrays
         """
         if index < 0:
             index = len(self) + index
@@ -763,7 +771,7 @@ class StreamingMLXDataLoader:
             batch_clean_imag,
         )
 
-    def __iter__(self) -> Iterator[Tuple[Tuple[mx.array, mx.array], mx.array, mx.array, Tuple[mx.array, mx.array]]]:
+    def __iter__(self) -> Iterator[BatchDict]:
         """Iterate over batches, streaming one shard at a time."""
         shard_order = list(range(len(self.shards)))
         if self.shuffle_shards:
@@ -817,16 +825,25 @@ class StreamingMLXDataLoader:
         feat_spec: List[np.ndarray],
         clean_real: List[np.ndarray],
         clean_imag: List[np.ndarray],
-    ) -> Tuple[Tuple[mx.array, mx.array], mx.array, mx.array, Tuple[mx.array, mx.array]]:
-        """Convert lists to MLX batch tensors."""
-        spec = (
-            mx.array(np.stack(spec_real)),
-            mx.array(np.stack(spec_imag)),
-        )
-        erb = mx.array(np.stack(feat_erb))
-        df_spec = mx.array(np.stack(feat_spec))
-        target = (
-            mx.array(np.stack(clean_real)),
-            mx.array(np.stack(clean_imag)),
-        )
-        return spec, erb, df_spec, target
+    ) -> BatchDict:
+        """Convert lists to MLX batch tensors.
+
+        Returns:
+            Dict with keys matching train_with_data.py:
+            - "spec": (spec_real, spec_imag) tuple
+            - "feat_erb": ERB features array
+            - "feat_spec": DF-band features array
+            - "target": (clean_real, clean_imag) tuple
+        """
+        return {
+            "spec": (
+                mx.array(np.stack(spec_real)),
+                mx.array(np.stack(spec_imag)),
+            ),
+            "feat_erb": mx.array(np.stack(feat_erb)),
+            "feat_spec": mx.array(np.stack(feat_spec)),
+            "target": (
+                mx.array(np.stack(clean_real)),
+                mx.array(np.stack(clean_imag)),
+            ),
+        }
