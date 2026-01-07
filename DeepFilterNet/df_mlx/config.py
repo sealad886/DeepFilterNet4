@@ -171,6 +171,31 @@ class ModelParams4:
 
 
 @dataclass
+class LossConfig:
+    """Loss function configuration.
+
+    Multi-resolution STFT loss parameters matching PyTorch implementation.
+    """
+
+    # Multi-resolution STFT loss
+    mrsl_enabled: bool = True  # Enable multi-resolution spectral loss
+    mrsl_fft_sizes: List[int] = field(default_factory=lambda: [512, 1024, 2048])
+    mrsl_hop_sizes: Optional[List[int]] = None  # Defaults to fft_size // 4
+    mrsl_gamma: float = 1.0  # Magnitude compression exponent
+    mrsl_factor: float = 1.0  # Magnitude loss weight
+    mrsl_f_complex: Optional[float] = None  # Complex loss weight (None = disabled)
+
+    # Spectral loss weights
+    spectral_mag_weight: float = 0.5  # Weight for magnitude loss
+    spectral_complex_weight: float = 0.5  # Weight for complex loss
+
+    # LSNR loss
+    lsnr_weight: float = 0.1  # Weight for LSNR prediction loss
+    lsnr_min: float = -15.0
+    lsnr_max: float = 40.0
+
+
+@dataclass
 class TrainConfig:
     """Training configuration."""
 

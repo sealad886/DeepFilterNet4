@@ -1751,6 +1751,211 @@ class TestLookaheadConfig:
 
 
 # ============================================================================
+# Multi-Resolution STFT Loss Tests
+# ============================================================================
+
+
+class TestMultiResolutionSTFTLoss:
+    """Tests for multi-resolution STFT loss."""
+
+    def test_loss_config_defaults(self):
+        """Test LossConfig has correct defaults."""
+        from df_mlx.config import LossConfig
+
+        config = LossConfig()
+
+        assert config.mrsl_enabled is True
+        assert config.mrsl_fft_sizes == [512, 1024, 2048]
+        assert config.mrsl_hop_sizes is None
+        assert config.mrsl_gamma == 1.0
+        assert config.mrsl_factor == 1.0
+        assert config.mrsl_f_complex is None
+
+    def test_loss_init_default_params(self):
+        """Test MultiResolutionSTFTLoss initialization with defaults."""
+        from df_mlx.train import MultiResolutionSTFTLoss
+
+        loss_fn = MultiResolutionSTFTLoss()
+
+        assert loss_fn.fft_sizes == (512, 1024, 2048)
+        assert loss_fn.hop_sizes == (128, 256, 512)
+        assert loss_fn.gamma == 1.0
+        assert loss_fn.factor == 1.0
+        assert loss_fn.f_complex is None
+
+    def test_loss_init_custom_params(self):
+        """Test MultiResolutionSTFTLoss with custom parameters."""
+        from df_mlx.train import MultiResolutionSTFTLoss
+
+        loss_fn = MultiResolutionSTFTLoss(
+            fft_sizes=(256, 512),
+            hop_sizes=(64, 128),
+            gamma=0.5,
+            factor=2.0,
+            f_complex=0.3,
+        )
+
+        assert loss_fn.fft_sizes == (256, 512)
+        assert loss_fn.hop_sizes == (64, 128)
+        assert loss_fn.gamma == 0.5
+        assert loss_fn.factor == 2.0
+        assert loss_fn.f_complex == 0.3
+
+    def test_loss_from_config(self):
+        """Test creating loss from LossConfig."""
+        from df_mlx.config import LossConfig
+        from df_mlx.train import MultiResolutionSTFTLoss
+
+        config = LossConfig()
+        config.mrsl_fft_sizes = [256, 512, 1024]
+        config.mrsl_gamma = 0.7
+        config.mrsl_f_complex = 0.5
+
+        loss_fn = MultiResolutionSTFTLoss.from_config(config)
+
+        assert loss_fn.fft_sizes == (256, 512, 1024)
+        assert loss_fn.gamma == 0.7
+        assert loss_fn.f_complex == 0.5
+
+    def test_loss_computation_basic(self):
+        """Test basic loss computation."""
+        from df_mlx.train import MultiResolutionSTFTLoss
+
+        loss_fn = MultiResolutionSTFTLoss(fft_sizes=(512,), hop_sizes=(128,))
+
+        # Create test signals
+        batch, samples = 2, 16000
+        pred = mx.random.normal(shape=(batch, samples))
+        target = mx.random.normal(shape=(batch, samples))
+
+        loss = loss_fn(pred, target)
+        mx.eval(loss)
+
+        assert loss.shape == ()
+        assert not mx.isnan(loss)
+        assert float(loss) > 0  # Loss should be positive for different signals
+
+    def test_loss_zero_for_identical_signals(self):
+        """Test loss is zero for identical signals."""
+        from df_mlx.train import MultiResolutionSTFTLoss
+
+        loss_fn = MultiResolutionSTFTLoss(fft_sizes=(512,), hop_sizes=(128,))
+
+        signal = mx.random.normal(shape=(1, 8000))
+        loss = loss_fn(signal, signal)
+        mx.eval(loss)
+
+        assert float(loss) < 1e-6  # Should be ~0 for identical signals
+
+    def test_loss_1d_input(self):
+        """Test loss accepts 1D input."""
+        from df_mlx.train import MultiResolutionSTFTLoss
+
+        loss_fn = MultiResolutionSTFTLoss(fft_sizes=(512,), hop_sizes=(128,))
+
+        pred = mx.random.normal(shape=(8000,))  # 1D
+        target = mx.random.normal(shape=(8000,))
+
+        loss = loss_fn(pred, target)
+        mx.eval(loss)
+
+        assert loss.shape == ()
+        assert not mx.isnan(loss)
+
+    def test_loss_multiple_resolutions(self):
+        """Test loss with multiple resolutions."""
+        from df_mlx.train import MultiResolutionSTFTLoss
+
+        loss_fn = MultiResolutionSTFTLoss(
+            fft_sizes=(512, 1024, 2048),
+            hop_sizes=(128, 256, 512),
+        )
+
+        batch, samples = 2, 24000
+        pred = mx.random.normal(shape=(batch, samples))
+        target = mx.random.normal(shape=(batch, samples))
+
+        loss = loss_fn(pred, target)
+        mx.eval(loss)
+
+        assert loss.shape == ()
+        assert not mx.isnan(loss)
+
+    def test_loss_gamma_compression(self):
+        """Test gamma compression affects loss."""
+        from df_mlx.train import MultiResolutionSTFTLoss
+
+        loss_fn_gamma1 = MultiResolutionSTFTLoss(fft_sizes=(512,), gamma=1.0)
+        loss_fn_gamma05 = MultiResolutionSTFTLoss(fft_sizes=(512,), gamma=0.5)
+
+        pred = mx.random.normal(shape=(1, 8000))
+        target = mx.random.normal(shape=(1, 8000))
+
+        loss1 = loss_fn_gamma1(pred, target)
+        loss05 = loss_fn_gamma05(pred, target)
+        mx.eval(loss1, loss05)
+
+        # Different gamma should produce different loss values
+        assert float(loss1) != float(loss05)
+
+    def test_loss_with_complex_component(self):
+        """Test loss with complex loss component enabled."""
+        from df_mlx.train import MultiResolutionSTFTLoss
+
+        loss_fn_no_complex = MultiResolutionSTFTLoss(fft_sizes=(512,), f_complex=None)
+        loss_fn_with_complex = MultiResolutionSTFTLoss(fft_sizes=(512,), f_complex=0.5)
+
+        pred = mx.random.normal(shape=(1, 8000))
+        target = mx.random.normal(shape=(1, 8000))
+
+        loss_no = loss_fn_no_complex(pred, target)
+        loss_with = loss_fn_with_complex(pred, target)
+        mx.eval(loss_no, loss_with)
+
+        # With complex loss should be different (and typically larger)
+        assert float(loss_no) != float(loss_with)
+
+    def test_loss_per_resolution_breakdown(self):
+        """Test per-resolution loss breakdown."""
+        from df_mlx.train import MultiResolutionSTFTLoss
+
+        loss_fn = MultiResolutionSTFTLoss(fft_sizes=(512, 1024, 2048))
+
+        pred = mx.random.normal(shape=(1, 24000))
+        target = mx.random.normal(shape=(1, 24000))
+
+        losses = loss_fn.compute_per_resolution(pred, target)
+        mx.eval(losses)
+
+        assert "mrsl_512" in losses
+        assert "mrsl_1024" in losses
+        assert "mrsl_2048" in losses
+        assert "mrsl_total" in losses
+
+        # Each resolution should have positive loss
+        for key in ["mrsl_512", "mrsl_1024", "mrsl_2048"]:
+            assert float(losses[key]) > 0
+
+    def test_loss_factor_scaling(self):
+        """Test factor parameter scales loss."""
+        from df_mlx.train import MultiResolutionSTFTLoss
+
+        loss_fn_1x = MultiResolutionSTFTLoss(fft_sizes=(512,), factor=1.0)
+        loss_fn_2x = MultiResolutionSTFTLoss(fft_sizes=(512,), factor=2.0)
+
+        pred = mx.random.normal(shape=(1, 8000))
+        target = mx.random.normal(shape=(1, 8000))
+
+        loss_1x = loss_fn_1x(pred, target)
+        loss_2x = loss_fn_2x(pred, target)
+        mx.eval(loss_1x, loss_2x)
+
+        # 2x factor should produce ~2x loss
+        ratio = float(loss_2x) / float(loss_1x)
+        assert abs(ratio - 2.0) < 0.01
+
+
+# ============================================================================
 # Post-Filter Tests
 # ============================================================================
 

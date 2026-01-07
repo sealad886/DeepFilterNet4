@@ -24,7 +24,7 @@ import mlx.nn as nn
 import mlx.optimizers as optim
 import numpy as np
 
-from .config import TrainConfig
+from .config import LossConfig, TrainConfig
 from .model import DfNet4, count_parameters
 
 # ============================================================================
@@ -95,6 +95,186 @@ def multi_resolution_stft_loss(
         total_loss = total_loss + spectral_loss(pred_spec, target_spec)
 
     return total_loss / len(fft_sizes)
+
+
+class MultiResolutionSTFTLoss:
+    """Multi-resolution STFT loss for speech enhancement training.
+
+    Computes spectral loss at multiple resolutions to capture both
+    fine-grained details and broader spectral structure. Matches the
+    PyTorch MultiResSpecLoss implementation.
+
+    The loss combines:
+    - Magnitude loss: MSE on (optionally compressed) magnitudes
+    - Complex loss (optional): MSE on real/imag components
+
+    Args:
+        fft_sizes: List of FFT sizes to use
+        hop_sizes: List of hop sizes (defaults to fft_size // 4)
+        gamma: Magnitude compression exponent (1.0 = no compression)
+        factor: Weight for magnitude loss
+        f_complex: Weight for complex loss (None to disable)
+        eps: Small constant for numerical stability
+
+    Example:
+        >>> loss_fn = MultiResolutionSTFTLoss(
+        ...     fft_sizes=[512, 1024, 2048],
+        ...     gamma=0.5,  # Compressed magnitude
+        ...     factor=1.0,
+        ...     f_complex=0.5,  # Enable complex loss
+        ... )
+        >>> loss = loss_fn(pred_waveform, target_waveform)
+    """
+
+    def __init__(
+        self,
+        fft_sizes: Tuple[int, ...] = (512, 1024, 2048),
+        hop_sizes: Optional[Tuple[int, ...]] = None,
+        gamma: float = 1.0,
+        factor: float = 1.0,
+        f_complex: Optional[float] = None,
+        eps: float = 1e-12,
+    ):
+        self.fft_sizes = fft_sizes
+        if hop_sizes is None:
+            self.hop_sizes = tuple(fft // 4 for fft in fft_sizes)
+        else:
+            self.hop_sizes = hop_sizes
+
+        assert len(self.fft_sizes) == len(
+            self.hop_sizes
+        ), f"fft_sizes ({len(fft_sizes)}) and hop_sizes ({len(hop_sizes)}) must have same length"
+
+        self.gamma = gamma
+        self.factor = factor
+        self.f_complex = f_complex
+        self.eps = eps
+
+    def __call__(self, pred: mx.array, target: mx.array) -> mx.array:
+        """Compute multi-resolution STFT loss.
+
+        Args:
+            pred: Predicted waveform (batch, samples) or (samples,)
+            target: Target waveform (batch, samples) or (samples,)
+
+        Returns:
+            Scalar loss value
+        """
+        from .ops import stft
+
+        # Handle 1D input
+        if pred.ndim == 1:
+            pred = mx.expand_dims(pred, axis=0)
+        if target.ndim == 1:
+            target = mx.expand_dims(target, axis=0)
+
+        total_loss = mx.array(0.0)
+
+        for fft_size, hop_size in zip(self.fft_sizes, self.hop_sizes):
+            # Compute STFTs
+            pred_real, pred_imag = stft(pred, n_fft=fft_size, hop_length=hop_size)
+            target_real, target_imag = stft(target, n_fft=fft_size, hop_length=hop_size)
+
+            # Compute magnitudes
+            pred_mag = mx.sqrt(pred_real**2 + pred_imag**2 + self.eps)
+            target_mag = mx.sqrt(target_real**2 + target_imag**2 + self.eps)
+
+            # Apply gamma compression if needed
+            if self.gamma != 1.0:
+                pred_mag_comp = mx.power(mx.maximum(pred_mag, self.eps), self.gamma)
+                target_mag_comp = mx.power(mx.maximum(target_mag, self.eps), self.gamma)
+            else:
+                pred_mag_comp = pred_mag
+                target_mag_comp = target_mag
+
+            # Magnitude loss (MSE)
+            mag_loss = mx.mean((pred_mag_comp - target_mag_comp) ** 2) * self.factor
+            total_loss = total_loss + mag_loss
+
+            # Complex loss (optional)
+            if self.f_complex is not None and self.f_complex > 0:
+                if self.gamma != 1.0:
+                    # Reconstruct complex with compressed magnitude
+                    # pred_complex = pred_mag_comp * exp(i * angle(pred))
+                    pred_angle = mx.arctan2(pred_imag, pred_real + self.eps)
+                    pred_real_comp = pred_mag_comp * mx.cos(pred_angle)
+                    pred_imag_comp = pred_mag_comp * mx.sin(pred_angle)
+
+                    target_angle = mx.arctan2(target_imag, target_real + self.eps)
+                    target_real_comp = target_mag_comp * mx.cos(target_angle)
+                    target_imag_comp = target_mag_comp * mx.sin(target_angle)
+                else:
+                    pred_real_comp = pred_real
+                    pred_imag_comp = pred_imag
+                    target_real_comp = target_real
+                    target_imag_comp = target_imag
+
+                # MSE on real/imag components
+                complex_loss = (
+                    mx.mean((pred_real_comp - target_real_comp) ** 2)
+                    + mx.mean((pred_imag_comp - target_imag_comp) ** 2)
+                ) * self.f_complex
+                total_loss = total_loss + complex_loss
+
+        # Average over resolutions
+        return total_loss / len(self.fft_sizes)
+
+    def compute_per_resolution(self, pred: mx.array, target: mx.array) -> Dict[str, mx.array]:
+        """Compute loss breakdown per resolution (for logging).
+
+        Args:
+            pred: Predicted waveform
+            target: Target waveform
+
+        Returns:
+            Dictionary with loss values per FFT size
+        """
+        from .ops import stft
+
+        if pred.ndim == 1:
+            pred = mx.expand_dims(pred, axis=0)
+        if target.ndim == 1:
+            target = mx.expand_dims(target, axis=0)
+
+        losses = {}
+
+        for fft_size, hop_size in zip(self.fft_sizes, self.hop_sizes):
+            pred_real, pred_imag = stft(pred, n_fft=fft_size, hop_length=hop_size)
+            target_real, target_imag = stft(target, n_fft=fft_size, hop_length=hop_size)
+
+            pred_mag = mx.sqrt(pred_real**2 + pred_imag**2 + self.eps)
+            target_mag = mx.sqrt(target_real**2 + target_imag**2 + self.eps)
+
+            if self.gamma != 1.0:
+                pred_mag = mx.power(mx.maximum(pred_mag, self.eps), self.gamma)
+                target_mag = mx.power(mx.maximum(target_mag, self.eps), self.gamma)
+
+            losses[f"mrsl_{fft_size}"] = mx.mean((pred_mag - target_mag) ** 2) * self.factor
+
+        losses["mrsl_total"] = sum(losses.values()) / len(self.fft_sizes)
+        return losses
+
+    @classmethod
+    def from_config(cls, config: LossConfig) -> "MultiResolutionSTFTLoss":
+        """Create loss from configuration.
+
+        Args:
+            config: LossConfig instance
+
+        Returns:
+            Configured MultiResolutionSTFTLoss instance
+        """
+        hop_sizes = config.mrsl_hop_sizes
+        if hop_sizes is not None:
+            hop_sizes = tuple(hop_sizes)
+
+        return cls(
+            fft_sizes=tuple(config.mrsl_fft_sizes),
+            hop_sizes=hop_sizes,
+            gamma=config.mrsl_gamma,
+            factor=config.mrsl_factor,
+            f_complex=config.mrsl_f_complex,
+        )
 
 
 def snr_loss(
