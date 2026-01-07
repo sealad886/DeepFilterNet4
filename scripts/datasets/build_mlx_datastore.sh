@@ -49,11 +49,6 @@ SEGMENT_LENGTH="${SEGMENT_LENGTH:-5.0}"
 TRAIN_SPLIT="${TRAIN_SPLIT:-0.9}"
 VALID_SPLIT="${VALID_SPLIT:-0.05}"
 
-# Performance tuning
-SAMPLES_PER_SHARD="${SAMPLES_PER_SHARD:-500}"
-NUM_WORKERS="${NUM_WORKERS:-2}"
-MAX_SAMPLES="${MAX_SAMPLES:-}"  # Empty = process all
-
 # File lists
 CLEAN_LIST="${CLEAN_LIST:-${LIST_DIR}/clean_all.txt}"
 NOISE_LIST="${NOISE_LIST:-${LIST_DIR}/noise_music.txt}"
@@ -70,20 +65,25 @@ case "${PROFILE}" in
   prototype)
     # Quick test build
     MAX_SAMPLES="${MAX_SAMPLES:-1000}"
-    SAMPLES_PER_SHARD=100
-    NUM_WORKERS=1
+    SAMPLES_PER_SHARD=${SAMPLES_PER_SHARD:-100}
+    NUM_WORKERS=${NUM_WORKERS:-1}
     ;;
   production)
     # Full dataset build
-    NUM_WORKERS=4
-    SAMPLES_PER_SHARD=1000
+    NUM_WORKERS=${NUM_WORKERS:-4}
+    SAMPLES_PER_SHARD=${SAMPLES_PER_SHARD:-1000}
     ;;
   apple)
     # Apple Silicon optimized (memory-friendly)
-    NUM_WORKERS=2
-    SAMPLES_PER_SHARD=500
+    NUM_WORKERS=${NUM_WORKERS:-2}
+    SAMPLES_PER_SHARD=${SAMPLES_PER_SHARD:-500}
     ;;
 esac
+
+# Performance tuning
+SAMPLES_PER_SHARD="${SAMPLES_PER_SHARD:-500}"
+NUM_WORKERS="${NUM_WORKERS:-2}"
+MAX_SAMPLES="${MAX_SAMPLES:-}"  # Empty = process all
 
 # ============================================================================
 # Validation
