@@ -86,7 +86,7 @@ def compute_stft(
     hop_size: int = 480,
     window: Optional[np.ndarray] = None,
 ) -> np.ndarray:
-    """Compute STFT of audio signal.
+    """Compute STFT of audio signal (optimized).
 
     Args:
         audio: Input audio (samples,)
@@ -104,17 +104,17 @@ def compute_stft(
     pad_len = fft_size - hop_size
     audio_padded = np.pad(audio, (pad_len, pad_len), mode="constant")
 
-    # Compute number of frames
+    # Use stride_tricks for efficient zero-copy frame extraction
     num_frames = (len(audio_padded) - fft_size) // hop_size + 1
 
-    # Extract frames
-    frames = np.zeros((num_frames, fft_size), dtype=np.float32)
-    for i in range(num_frames):
-        start = i * hop_size
-        frames[i] = audio_padded[start : start + fft_size] * window
+    # Create strided view (no copy)
+    shape = (num_frames, fft_size)
+    strides = (audio_padded.strides[0] * hop_size, audio_padded.strides[0])
+    frames = np.lib.stride_tricks.as_strided(audio_padded, shape=shape, strides=strides, writeable=False)
 
-    # Compute FFT
-    stft = np.fft.rfft(frames, n=fft_size, axis=-1)
+    # Apply window and compute FFT (copy happens here)
+    windowed = frames * window
+    stft = np.fft.rfft(windowed, n=fft_size, axis=-1)
     return stft
 
 
@@ -479,6 +479,11 @@ def main():
         action="store_true",
         help="Start fresh, ignoring any existing datastore",
     )
+    parser.add_argument(
+        "--compress",
+        action="store_true",
+        help="Use compressed .npz files (slower I/O but smaller files)",
+    )
 
     args = parser.parse_args()
 
@@ -537,6 +542,7 @@ def main():
         nb_erb=args.nb_erb,
         nb_df=args.nb_df,
         samples_per_shard=args.samples_per_shard,
+        compress=args.compress,
     )
 
     # Use context manager to ensure proper cleanup
@@ -571,6 +577,8 @@ def main():
                 noise_cache[nf] = load_audio(nf, args.sample_rate)
             except Exception as e:
                 print(f"  Warning: Failed to load {nf}: {e}")
+        # Pre-compute keys list to avoid repeated list() calls in hot loop
+        noise_cache_keys = list(noise_cache.keys())
 
         # Preload RIR files if available
         rir_cache = {}
@@ -581,6 +589,8 @@ def main():
                     rir_cache[rf] = load_audio(rf, args.sample_rate)
                 except Exception as e:
                     print(f"  Warning: Failed to load {rf}: {e}")
+        # Pre-compute keys list to avoid repeated list() calls in hot loop
+        rir_cache_keys = list(rir_cache.keys()) if rir_cache else []
 
         # Process each split
         interrupted = False
@@ -623,8 +633,8 @@ def main():
                             clean = clean[start : start + segment_samples]
 
                         # Select random noise
-                        if noise_cache:
-                            noise_path = random.choice(list(noise_cache.keys()))
+                        if noise_cache_keys:
+                            noise_path = random.choice(noise_cache_keys)
                             noise = noise_cache[noise_path]
                         else:
                             noise_path = random.choice(noise_files)
@@ -632,8 +642,8 @@ def main():
 
                         # Select random RIR (optional)
                         rir = None
-                        if rir_cache and random.random() < args.rir_prob:
-                            rir_path = random.choice(list(rir_cache.keys()))
+                        if rir_cache_keys and random.random() < args.rir_prob:
+                            rir_path = random.choice(rir_cache_keys)
                             rir = rir_cache[rir_path]
 
                         # Random SNR

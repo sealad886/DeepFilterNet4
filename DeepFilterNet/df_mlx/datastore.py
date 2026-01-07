@@ -71,6 +71,7 @@ class DatastoreConfig:
     samples_per_shard: int = 1000
     min_nb_freqs: int = 481  # FFT bins
     dtype: str = "float32"
+    compress: bool = False  # Use np.savez (fast) vs np.savez_compressed (slow but smaller)
 
 
 @dataclass
@@ -102,6 +103,7 @@ class DatastoreIndex:
                 "samples_per_shard": self.config.samples_per_shard,
                 "min_nb_freqs": self.config.min_nb_freqs,
                 "dtype": self.config.dtype,
+                "compress": self.config.compress,
             },
             "shards": [{"path": s.path, "num_samples": s.num_samples, "split": s.split} for s in self.shards],
             "total_samples": self.total_samples,
@@ -281,7 +283,9 @@ class MLXDatastoreWriter:
     ) -> None:
         """Write shard to disk (called from background thread)."""
         try:
-            np.savez_compressed(
+            # Use compressed or uncompressed based on config
+            save_fn = np.savez_compressed if self.config.compress else np.savez
+            save_fn(
                 shard_path,
                 spec_real=shard_data["spec_real"],
                 spec_imag=shard_data["spec_imag"],
