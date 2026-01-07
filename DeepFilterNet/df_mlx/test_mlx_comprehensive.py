@@ -2147,6 +2147,251 @@ class TestPostFilter:
 
 
 # ============================================================================
+# Complex Gain Output Mode Tests
+# ============================================================================
+
+
+class TestComplexGainOutputMode:
+    """Tests for DfDecoder4 complex gain output mode."""
+
+    def test_config_has_df_output_mode(self):
+        """Test that config has df_output_mode parameter."""
+        from df_mlx.config import DfParams, ModelParams4
+
+        df_params = DfParams()
+        assert hasattr(df_params, "df_output_mode")
+        assert df_params.df_output_mode == "coefficients"  # Default
+
+        model_params = ModelParams4()
+        assert hasattr(model_params, "df_output_mode")
+        assert model_params.df_output_mode == "coefficients"
+
+    def test_decoder_coefficients_mode_output_shape(self):
+        """Test decoder output shape in coefficients mode."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfDecoder4
+
+        params = ModelParams4()
+        params.df.df_output_mode = "coefficients"
+
+        decoder = DfDecoder4(params)
+        assert decoder.output_mode == "coefficients"
+        assert decoder.is_gain_mode is False
+
+        # Test forward pass
+        batch, time = 2, 10
+        emb = mx.random.normal(shape=(batch, time, params.emb_hidden_dim))
+        out = decoder(emb)
+        mx.eval(out)
+
+        # Shape should be (batch, time, nb_df, df_order, 2)
+        expected_shape = (batch, time, params.nb_df, params.df_order, 2)
+        assert out.shape == expected_shape
+
+    def test_decoder_complex_gain_mode_output_shape(self):
+        """Test decoder output shape in complex gain mode."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfDecoder4
+
+        params = ModelParams4()
+        params.df.df_output_mode = "complex_gain"
+
+        decoder = DfDecoder4(params)
+        assert decoder.output_mode == "complex_gain"
+        assert decoder.is_gain_mode is True
+
+        # Test forward pass
+        batch, time = 2, 10
+        emb = mx.random.normal(shape=(batch, time, params.emb_hidden_dim))
+        out = decoder(emb)
+        mx.eval(out)
+
+        # Shape should be (batch, time, nb_df, 2)
+        expected_shape = (batch, time, params.nb_df, 2)
+        assert out.shape == expected_shape
+
+    def test_decoder_invalid_mode_raises(self):
+        """Test that invalid output mode raises ValueError."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfDecoder4
+
+        params = ModelParams4()
+
+        with pytest.raises(ValueError, match="output_mode must be one of"):
+            DfDecoder4(params, output_mode="invalid_mode")
+
+    def test_decoder_explicit_mode_override(self):
+        """Test that explicit output_mode parameter overrides config."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfDecoder4
+
+        params = ModelParams4()
+        params.df.df_output_mode = "coefficients"
+
+        # Override with explicit parameter
+        decoder = DfDecoder4(params, output_mode="complex_gain")
+        assert decoder.output_mode == "complex_gain"
+        assert decoder.is_gain_mode is True
+
+    def test_dfnet4_coefficients_mode(self):
+        """Test DfNet4 in coefficients mode (default)."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        params = ModelParams4()
+        params.df.df_output_mode = "coefficients"
+
+        model = DfNet4(params)
+        assert model.df_output_mode == "coefficients"
+        assert model.df_op is not None
+        assert not model.df_decoder.is_gain_mode
+
+    def test_dfnet4_complex_gain_mode(self):
+        """Test DfNet4 in complex gain mode."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        params = ModelParams4()
+        params.df.df_output_mode = "complex_gain"
+
+        model = DfNet4(params)
+        assert model.df_output_mode == "complex_gain"
+        assert model.df_op is None  # No DfOp needed
+        assert model.df_decoder.is_gain_mode
+
+    def test_dfnet4_forward_coefficients_mode(self):
+        """Test DfNet4 forward pass in coefficients mode."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        params = ModelParams4()
+        params.df.df_output_mode = "coefficients"
+
+        model = DfNet4(params)
+
+        batch, time, n_freqs = 1, 20, 481
+        spec_real = mx.random.normal(shape=(batch, time, n_freqs))
+        spec_imag = mx.random.normal(shape=(batch, time, n_freqs))
+        feat_erb = mx.random.normal(shape=(batch, time, 32))
+        feat_spec = mx.random.normal(shape=(batch, time, 96, 2))
+
+        out = model((spec_real, spec_imag), feat_erb, feat_spec)
+        mx.eval(out)
+
+        assert out[0].shape == (batch, time, n_freqs)
+        assert out[1].shape == (batch, time, n_freqs)
+
+    def test_dfnet4_forward_complex_gain_mode(self):
+        """Test DfNet4 forward pass in complex gain mode."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        params = ModelParams4()
+        params.df.df_output_mode = "complex_gain"
+
+        model = DfNet4(params)
+
+        batch, time, n_freqs = 1, 20, 481
+        spec_real = mx.random.normal(shape=(batch, time, n_freqs))
+        spec_imag = mx.random.normal(shape=(batch, time, n_freqs))
+        feat_erb = mx.random.normal(shape=(batch, time, 32))
+        feat_spec = mx.random.normal(shape=(batch, time, 96, 2))
+
+        out = model((spec_real, spec_imag), feat_erb, feat_spec)
+        mx.eval(out)
+
+        assert out[0].shape == (batch, time, n_freqs)
+        assert out[1].shape == (batch, time, n_freqs)
+
+    def test_apply_complex_gain_correctness(self):
+        """Test that _apply_complex_gain computes correct complex multiplication."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        params = ModelParams4()
+        params.df.df_output_mode = "complex_gain"
+        model = DfNet4(params)
+
+        # Create simple test case
+        # Input: 1 + 1i for all DF bins
+        spec_real = mx.ones((1, 1, 100)) * 1.0
+        spec_imag = mx.ones((1, 1, 100)) * 1.0
+
+        # Gain: 0 + 1i (rotate by 90 degrees)
+        # Result should be: (1+i)(0+i) = -1 + i
+        nb_df = 96
+        gain = mx.zeros((1, 1, nb_df, 2))
+        gain = gain.at[:, :, :, 1].add(1.0)  # Set imag part to 1
+        mx.eval(gain)
+
+        result = model._apply_complex_gain((spec_real, spec_imag), gain)
+        mx.eval(result)
+
+        # For DF bins: (1+i)(0+i) = -1 + i
+        df_real = result[0][:, :, :nb_df]
+        df_imag = result[1][:, :, :nb_df]
+
+        np.testing.assert_array_almost_equal(np.array(df_real), -1.0, decimal=5)
+        np.testing.assert_array_almost_equal(np.array(df_imag), 1.0, decimal=5)
+
+        # Non-DF bins should be unchanged
+        non_df_real = result[0][:, :, nb_df:]
+        non_df_imag = result[1][:, :, nb_df:]
+
+        np.testing.assert_array_almost_equal(np.array(non_df_real), 1.0, decimal=5)
+        np.testing.assert_array_almost_equal(np.array(non_df_imag), 1.0, decimal=5)
+
+    def test_apply_complex_gain_unity_gain(self):
+        """Test that unity gain (1+0i) preserves spectrum."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        params = ModelParams4()
+        params.df.df_output_mode = "complex_gain"
+        model = DfNet4(params)
+
+        # Random spectrum
+        spec_real = mx.random.normal(shape=(2, 10, 100))
+        spec_imag = mx.random.normal(shape=(2, 10, 100))
+
+        # Unity gain: 1 + 0i
+        nb_df = 96
+        gain = mx.zeros((2, 10, nb_df, 2))
+        gain = gain.at[:, :, :, 0].add(1.0)  # Set real part to 1
+        mx.eval(gain)
+
+        result = model._apply_complex_gain((spec_real, spec_imag), gain)
+        mx.eval(result)
+
+        # Output should match input
+        np.testing.assert_array_almost_equal(np.array(result[0]), np.array(spec_real), decimal=5)
+        np.testing.assert_array_almost_equal(np.array(result[1]), np.array(spec_imag), decimal=5)
+
+    def test_forward_with_lsnr_complex_gain_mode(self):
+        """Test forward_with_lsnr in complex gain mode."""
+        from df_mlx.config import ModelParams4
+        from df_mlx.model import DfNet4
+
+        params = ModelParams4()
+        params.df.df_output_mode = "complex_gain"
+
+        model = DfNet4(params)
+
+        batch, time, n_freqs = 1, 20, 481
+        spec_real = mx.random.normal(shape=(batch, time, n_freqs))
+        spec_imag = mx.random.normal(shape=(batch, time, n_freqs))
+        feat_erb = mx.random.normal(shape=(batch, time, 32))
+        feat_spec = mx.random.normal(shape=(batch, time, 96, 2))
+
+        out, lsnr = model.forward_with_lsnr((spec_real, spec_imag), feat_erb, feat_spec)
+        mx.eval(out, lsnr)
+
+        assert out[0].shape == (batch, time, n_freqs)
+        assert out[1].shape == (batch, time, n_freqs)
+        assert lsnr.shape == (batch, time, 1)
+
+
+# ============================================================================
 # Hybrid Encoder Tests
 # ============================================================================
 

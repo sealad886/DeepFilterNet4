@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 import argparse
-import functools
-import inspect
 import os
 import shutil
 import sys
@@ -47,42 +45,19 @@ def call_load(name: str, root: str | None, version: str | None):
     target_root = root or os.getcwd()
     cleanup_tmp(target_root)
 
-    # Build kwargs for audb.load
-    load_kwargs = {"name": name}
+    # Build kwargs for audb.load_to (preferred) or audb.load
+    load_kwargs: dict[str, str] = {"name": name}
     if version:
         load_kwargs["version"] = version
 
-    # Check if audb.load_to or audb.load accepts root parameter
-    load_fn = getattr(audb, "load_to", None) or audb.load
-
-    # If load_fn is a partial with root already bound, don't pass it again
-    if isinstance(load_fn, functools.partial):
-        bound_keys = load_fn.keywords or {}
-        if "root" not in bound_keys:
-            load_kwargs["root"] = target_root
+    # Prefer load_to which accepts a root parameter
+    if hasattr(audb, "load_to"):
+        load_kwargs["root"] = target_root
+        load_fn = audb.load_to
     else:
-        # Check function signature for root parameter
-        sig = inspect.signature(load_fn)
-        params = list(sig.parameters.keys())
+        load_fn = audb.load
 
-        # Handle different audb API versions
-        if params and params[0] in ("root", "path"):
-            # Old API: load_to(root, name, ...)
-            try:
-                if version:
-                    return load_fn(target_root, name, version=version)
-                return load_fn(target_root, name)
-            except RuntimeError as e:
-                if "temporary directory" in str(e) or "audb~" in str(e):
-                    cleanup_tmp(target_root)
-                    if version:
-                        return load_fn(target_root, name, version=version)
-                    return load_fn(target_root, name)
-                raise
-        elif "root" in params:
-            load_kwargs["root"] = target_root
-
-    # Call the load function with appropriate kwargs
+    # Call the load function
     try:
         return load_fn(**load_kwargs)
     except RuntimeError as e:
@@ -90,11 +65,6 @@ def call_load(name: str, root: str | None, version: str | None):
             cleanup_tmp(target_root)
             return load_fn(**load_kwargs)
         raise
-    except TypeError:
-        # Fallback: try with positional arguments if kwargs fail
-        if version:
-            return load_fn(name, version=version)
-        return load_fn(name)
 
 
 def main() -> int:

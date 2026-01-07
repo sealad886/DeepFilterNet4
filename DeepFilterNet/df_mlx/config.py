@@ -23,6 +23,7 @@ class DfParams:
     df_resolutions: List[int] = field(default_factory=lambda: [1, 2, 4])
     mask_pf: bool = False  # Enable mask post-filter
     pf_beta: float = 0.02  # Post-filter beta parameter (attenuation strength)
+    df_output_mode: Literal["coefficients", "complex_gain"] = "coefficients"
 
 
 @dataclass
@@ -168,6 +169,10 @@ class ModelParams4:
     @property
     def pf_beta(self) -> float:
         return self.df.pf_beta
+
+    @property
+    def df_output_mode(self) -> str:
+        return self.df.df_output_mode
 
 
 @dataclass

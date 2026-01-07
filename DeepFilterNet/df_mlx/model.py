@@ -211,21 +211,38 @@ class ErbDecoder4(nn.Module):
 class DfDecoder4(nn.Module):
     """Deep Filter coefficient decoder.
 
-    Decodes embedding to complex filter coefficients for deep filtering.
+    Decodes embedding to complex filter coefficients or complex gains for deep filtering.
 
     Args:
         p: Model parameters
+        output_mode: Output mode - "coefficients" for FIR filter coefficients,
+                     "complex_gain" for multiplicative complex gains per frequency bin.
+                     Defaults to p.df_output_mode if not specified.
     """
 
-    def __init__(self, p: ModelParams4):
+    VALID_OUTPUT_MODES = ("coefficients", "complex_gain")
+
+    def __init__(self, p: ModelParams4, output_mode: str | None = None):
         super().__init__()
 
         self.p = p
         self.nb_df = p.nb_df
         self.df_order = p.df_order
 
-        # Output size: nb_df * df_order * 2 (real + imag)
-        self.out_dim = p.nb_df * p.df_order * 2
+        # Determine output mode
+        if output_mode is None:
+            output_mode = p.df_output_mode
+        if output_mode not in self.VALID_OUTPUT_MODES:
+            raise ValueError(f"output_mode must be one of {self.VALID_OUTPUT_MODES}, got '{output_mode}'")
+        self.output_mode = output_mode
+
+        # Output size depends on mode
+        if self.output_mode == "coefficients":
+            # nb_df * df_order * 2 (real + imag for each tap)
+            self.out_dim = p.nb_df * p.df_order * 2
+        else:  # complex_gain
+            # nb_df * 2 (one complex gain per frequency bin)
+            self.out_dim = p.nb_df * 2
 
         # Decoder layers
         self.layers = [
@@ -236,6 +253,11 @@ class DfDecoder4(nn.Module):
             nn.Linear(p.df_hidden_dim, self.out_dim),
         ]
 
+    @property
+    def is_gain_mode(self) -> bool:
+        """Check if decoder is in complex gain mode."""
+        return self.output_mode == "complex_gain"
+
     def __call__(self, emb: mx.array) -> mx.array:
         """Forward pass.
 
@@ -243,7 +265,8 @@ class DfDecoder4(nn.Module):
             emb: Embedding tensor (batch, time, emb_hidden_dim)
 
         Returns:
-            DF coefficients (batch, time, nb_df, df_order, 2)
+            If coefficients mode: (batch, time, nb_df, df_order, 2)
+            If complex_gain mode: (batch, time, nb_df, 2)
         """
         batch, time, _ = emb.shape
 
@@ -251,8 +274,13 @@ class DfDecoder4(nn.Module):
         for layer in self.layers:
             x = layer(x)
 
-        # Reshape to (batch, time, nb_df, df_order, 2)
-        x = x.reshape(batch, time, self.nb_df, self.df_order, 2)
+        # Reshape based on mode
+        if self.output_mode == "coefficients":
+            # (batch, time, nb_df, df_order, 2)
+            x = x.reshape(batch, time, self.nb_df, self.df_order, 2)
+        else:  # complex_gain
+            # (batch, time, nb_df, 2)
+            x = x.reshape(batch, time, self.nb_df, 2)
 
         return x
 
@@ -859,6 +887,9 @@ class DfNet4(nn.Module):
         self.post_filter = p.mask_pf
         self.post_filter_beta = p.pf_beta
 
+        # DF output mode
+        self.df_output_mode = p.df_output_mode
+
         # ERB filterbank (non-trainable)
         self._erb_fb = erb_fb(
             sr=p.sr,
@@ -882,14 +913,17 @@ class DfNet4(nn.Module):
 
         # Decoders
         self.erb_decoder = ErbDecoder4(p)
-        self.df_decoder = DfDecoder4(p)
+        self.df_decoder = DfDecoder4(p)  # Uses p.df_output_mode
 
-        # Deep filtering operation
-        self.df_op = DfOp(
-            nb_df=p.nb_df,
-            df_order=p.df_order,
-            df_lookahead=p.df_lookahead,
-        )
+        # Deep filtering operation (only needed for coefficients mode)
+        if self.df_output_mode == "coefficients":
+            self.df_op = DfOp(
+                nb_df=p.nb_df,
+                df_order=p.df_order,
+                df_lookahead=p.df_lookahead,
+            )
+        else:
+            self.df_op = None
 
     def _pad_features(self, x: mx.array, lookahead: int) -> mx.array:
         """Apply lookahead padding to features.
@@ -969,6 +1003,47 @@ class DfNet4(nn.Module):
 
         return (pf_real, pf_imag)
 
+    def _apply_complex_gain(
+        self,
+        spec: Tuple[mx.array, mx.array],
+        gain: mx.array,
+    ) -> Tuple[mx.array, mx.array]:
+        """Apply complex multiplicative gain to spectrum.
+
+        This is an alternative to DfOp for simpler frequency-domain filtering.
+        Instead of convolving with FIR filter coefficients, each frequency bin
+        is multiplied by a learned complex gain.
+
+        Args:
+            spec: Input spectrum as (real, imag), each (batch, time, freq)
+            gain: Complex gains (batch, time, nb_df, 2) where last dim is (real, imag)
+
+        Returns:
+            Filtered spectrum as (real, imag) with gains applied to DF bins
+        """
+        spec_real, spec_imag = spec
+        n_freqs = spec_real.shape[-1]
+        nb_df = gain.shape[2]
+
+        # Extract DF frequency bins
+        df_real = spec_real[:, :, :nb_df]
+        df_imag = spec_imag[:, :, :nb_df]
+
+        # Extract gain components
+        gain_real = gain[:, :, :, 0]  # (batch, time, nb_df)
+        gain_imag = gain[:, :, :, 1]
+
+        # Complex multiplication: (a+bi)(c+di) = (ac-bd) + (ad+bc)i
+        out_real = gain_real * df_real - gain_imag * df_imag
+        out_imag = gain_real * df_imag + gain_imag * df_real
+
+        # Combine with non-DF frequencies (pass-through)
+        if n_freqs > nb_df:
+            out_real = mx.concatenate([out_real, spec_real[:, :, nb_df:]], axis=-1)
+            out_imag = mx.concatenate([out_imag, spec_imag[:, :, nb_df:]], axis=-1)
+
+        return (out_real, out_imag)
+
     def __call__(
         self,
         spec: Tuple[mx.array, mx.array],
@@ -1020,14 +1095,20 @@ class DfNet4(nn.Module):
         masked_real = spec_real * mask
         masked_imag = spec_imag * mask
 
-        # Decode DF coefficients
-        df_coef = self.df_decoder(emb)  # (batch, time, nb_df, df_order, 2)
+        # Decode DF coefficients or complex gains
+        df_out = self.df_decoder(emb)
 
-        # Apply deep filtering (for low frequencies)
-        spec_out = self.df_op(
-            (masked_real, masked_imag),
-            df_coef,
-        )
+        # Apply deep filtering or complex gain (for low frequencies)
+        if self.df_output_mode == "coefficients":
+            # FIR filter convolution via DfOp
+            assert self.df_op is not None  # Type narrowing
+            spec_out = self.df_op(
+                (masked_real, masked_imag),
+                df_out,
+            )
+        else:
+            # Direct complex multiplication
+            spec_out = self._apply_complex_gain((masked_real, masked_imag), df_out)
 
         # Apply post-filter (optional, reduces musical noise)
         spec_out = self._apply_post_filter(spec_out, spec)
@@ -1082,11 +1163,15 @@ class DfNet4(nn.Module):
         masked_real = spec_real * mask
         masked_imag = spec_imag * mask
 
-        # Decode DF coefficients
-        df_coef = self.df_decoder(emb)
+        # Decode DF coefficients or complex gains
+        df_out = self.df_decoder(emb)
 
-        # Apply deep filtering
-        spec_out = self.df_op((masked_real, masked_imag), df_coef)
+        # Apply deep filtering or complex gain
+        if self.df_output_mode == "coefficients":
+            assert self.df_op is not None  # Type narrowing
+            spec_out = self.df_op((masked_real, masked_imag), df_out)
+        else:
+            spec_out = self._apply_complex_gain((masked_real, masked_imag), df_out)
 
         # Apply post-filter (optional, reduces musical noise)
         spec_out = self._apply_post_filter(spec_out, spec)
