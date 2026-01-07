@@ -546,8 +546,53 @@ class MLXDataLoader:
             "snr_db": data["snr_db"][sample_idx],
         }
 
-    def __getitm__(self, index: str) -> Tuple[Tuple[mx.array, mx.array], mx.array, mx.array, Tuple[mx.array, mx.array]]:
-        pass
+    def __getitem__(
+        self, index: int
+    ) -> Tuple[Tuple[mx.array, mx.array], mx.array, mx.array, Tuple[mx.array, mx.array]]:
+        """Get a specific batch by index.
+
+        Args:
+            index: Batch index (0 to len(self) - 1)
+
+        Returns:
+            Tuple of (spec, feat_erb, feat_spec, target) where:
+            - spec: (spec_real, spec_imag) tuple of mx.arrays
+            - feat_erb: ERB features mx.array
+            - feat_spec: DF-band features mx.array
+            - target: (clean_real, clean_imag) tuple of mx.arrays
+        """
+        if index < 0:
+            index = len(self) + index
+        if index < 0 or index >= len(self):
+            raise IndexError(f"Batch index {index} out of range [0, {len(self)})")
+
+        start_idx = index * self.batch_size
+        end_idx = start_idx + self.batch_size
+
+        batch_spec_real = []
+        batch_spec_imag = []
+        batch_feat_erb = []
+        batch_feat_spec = []
+        batch_clean_real = []
+        batch_clean_imag = []
+
+        for shard_idx, sample_idx in self._sample_indices[start_idx:end_idx]:
+            sample = self._get_sample(shard_idx, sample_idx)
+            batch_spec_real.append(sample["spec_real"])
+            batch_spec_imag.append(sample["spec_imag"])
+            batch_feat_erb.append(sample["feat_erb"])
+            batch_feat_spec.append(sample["feat_spec"])
+            batch_clean_real.append(sample["clean_real"])
+            batch_clean_imag.append(sample["clean_imag"])
+
+        return self._make_batch(
+            batch_spec_real,
+            batch_spec_imag,
+            batch_feat_erb,
+            batch_feat_spec,
+            batch_clean_real,
+            batch_clean_imag,
+        )
 
     def __iter__(self) -> Iterator[Tuple[Tuple[mx.array, mx.array], mx.array, mx.array, Tuple[mx.array, mx.array]]]:
         """Iterate over batches."""
@@ -648,6 +693,75 @@ class StreamingMLXDataLoader:
     def __len__(self) -> int:
         total = sum(s.num_samples for s in self.shards)
         return total // self.batch_size
+
+    def __getitem__(
+        self, index: int
+    ) -> Tuple[Tuple[mx.array, mx.array], mx.array, mx.array, Tuple[mx.array, mx.array]]:
+        """Get a specific batch by index.
+
+        Note: For streaming loader, this requires loading shards sequentially
+        until we reach the target batch. For random access, use MLXDataLoader.
+
+        Args:
+            index: Batch index (0 to len(self) - 1)
+
+        Returns:
+            Tuple of (spec, feat_erb, feat_spec, target) where:
+            - spec: (spec_real, spec_imag) tuple of mx.arrays
+            - feat_erb: ERB features mx.array
+            - feat_spec: DF-band features mx.array
+            - target: (clean_real, clean_imag) tuple of mx.arrays
+        """
+        if index < 0:
+            index = len(self) + index
+        if index < 0 or index >= len(self):
+            raise IndexError(f"Batch index {index} out of range [0, {len(self)})")
+
+        # Calculate which samples we need
+        start_sample = index * self.batch_size
+        end_sample = start_sample + self.batch_size
+
+        # Find which shard(s) contain these samples
+        batch_spec_real = []
+        batch_spec_imag = []
+        batch_feat_erb = []
+        batch_feat_spec = []
+        batch_clean_real = []
+        batch_clean_imag = []
+
+        current_sample = 0
+        for shard in self.shards:
+            shard_end = current_sample + shard.num_samples
+
+            # Check if this shard contains any samples we need
+            if shard_end > start_sample and current_sample < end_sample:
+                shard_path = self.datastore_dir / shard.path
+                data = dict(np.load(shard_path))
+
+                # Calculate which samples from this shard
+                local_start = max(0, start_sample - current_sample)
+                local_end = min(shard.num_samples, end_sample - current_sample)
+
+                for idx in range(local_start, local_end):
+                    batch_spec_real.append(data["spec_real"][idx])
+                    batch_spec_imag.append(data["spec_imag"][idx])
+                    batch_feat_erb.append(data["feat_erb"][idx])
+                    batch_feat_spec.append(data["feat_spec"][idx])
+                    batch_clean_real.append(data["clean_real"][idx])
+                    batch_clean_imag.append(data["clean_imag"][idx])
+
+            current_sample = shard_end
+            if current_sample >= end_sample:
+                break
+
+        return self._make_batch(
+            batch_spec_real,
+            batch_spec_imag,
+            batch_feat_erb,
+            batch_feat_spec,
+            batch_clean_real,
+            batch_clean_imag,
+        )
 
     def __iter__(self) -> Iterator[Tuple[Tuple[mx.array, mx.array], mx.array, mx.array, Tuple[mx.array, mx.array]]]:
         """Iterate over batches, streaming one shard at a time."""
