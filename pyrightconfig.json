@@ -13,7 +13,8 @@
         "**/node_modules",
         "**/.*",
         ".venv",
-        ".github/workflows"
+        ".github/**",
+        "**/.github/**"
     ],
     "pythonVersion": "3.12",
     "typeCheckingMode": "basic"

@@ -35,19 +35,27 @@ BatchDict = Dict[str, Union[mx.array, Tuple[mx.array, mx.array]]]
 
 # Global flag for graceful shutdown
 _shutdown_requested = False
+_shutdown_message_shown = False
 
 
 def _signal_handler(signum, frame):
     """Handle interrupt signals gracefully."""
-    global _shutdown_requested
+    global _shutdown_requested, _shutdown_message_shown
     _shutdown_requested = True
-    print("\n  Interrupt received, finishing current writes...")
+    if not _shutdown_message_shown:
+        _shutdown_message_shown = True
+        print("\n  Interrupt received, saving pending writes...")
 
 
 def _install_signal_handlers():
     """Install signal handlers for graceful shutdown."""
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
+
+
+def is_shutdown_requested() -> bool:
+    """Check if shutdown has been requested (for use by external code)."""
+    return _shutdown_requested
 
 
 @dataclass
@@ -263,7 +271,7 @@ class MLXDatastoreWriter:
         self._current_shard["snr_db"].append(np.float32(snr_db))
 
         if len(self._current_shard["spec_real"]) >= self.config.samples_per_shard:
-            self._flush_shard()
+            self._flush_shard(force=False)
 
     def _write_shard_async(
         self,
@@ -301,16 +309,18 @@ class MLXDatastoreWriter:
         )
         index.save(self.output_dir / "index.json")
 
-    def _flush_shard(self) -> None:
-        """Queue current shard for async writing."""
-        global _shutdown_requested
+    def _flush_shard(self, force: bool = False) -> None:
+        """Queue current shard for async writing.
 
+        Args:
+            force: If True, flush even during shutdown.
+        """
         if not self._current_shard or not self._current_shard.get("spec_real"):
             return
 
-        # Check for shutdown request
-        if _shutdown_requested or self._shutdown:
-            print("  Shutdown requested, skipping new shard writes")
+        # Only skip on shutdown if not forcing
+        if self._shutdown and not force:
+            print("  Shutdown in progress, skipping new shard writes")
             return
 
         shard_idx = self._shard_counts[self._current_split]
@@ -348,34 +358,37 @@ class MLXDatastoreWriter:
 
         print(f"  Queued shard: {shard_name} ({num_samples} samples)")
 
-    def wait_for_writes(self, timeout_per_future: float = 0.5) -> int:
-        """Wait for pending writes, returning count of completed writes.
+    def wait_for_writes(self, timeout: float = 30.0) -> int:
+        """Wait for pending writes to complete.
 
-        Uses timeouts to remain interruptible by Ctrl+C.
+        Args:
+            timeout: Maximum total time to wait in seconds.
+
+        Returns:
+            Number of completed writes.
         """
-        global _shutdown_requested
-        completed = 0
+        from concurrent.futures import TimeoutError as FuturesTimeoutError
+        from concurrent.futures import as_completed
 
-        # Use as_completed with timeout for interruptibility
+        completed = 0
         pending = list(self._pending_writes)
         self._pending_writes.clear()
 
-        for future in pending:
-            if _shutdown_requested or self._shutdown:
-                # Cancel remaining futures and exit
-                for f in pending:
-                    f.cancel()
-                break
+        if not pending:
+            return 0
 
-            try:
-                # Short timeout to stay responsive to interrupts
-                future.result(timeout=timeout_per_future)
-                completed += 1
-            except TimeoutError:
-                # Re-queue and continue
-                self._pending_writes.append(future)
-            except Exception as e:
-                print(f"  Warning: shard write failed: {e}")
+        try:
+            for future in as_completed(pending, timeout=timeout):
+                try:
+                    future.result()  # Raises if the write failed
+                    completed += 1
+                except Exception as e:
+                    print(f"  Warning: shard write failed: {e}")
+        except FuturesTimeoutError:
+            # Some futures didn't complete in time
+            for f in pending:
+                if not f.done():
+                    self._pending_writes.append(f)
 
         return completed
 
@@ -383,38 +396,36 @@ class MLXDatastoreWriter:
         """Finalize datastore and write index.
 
         Args:
-            force: If True, save index even if shutdown was requested.
+            force: If True, always save index (even on interrupt).
 
         Returns:
-            DatastoreIndex if successful, None if shutdown was requested.
+            DatastoreIndex if successful, None only if no data was written.
         """
         global _shutdown_requested
 
-        # Flush any remaining samples
-        if self._current_shard and not _shutdown_requested and not self._shutdown:
+        # Flush any remaining samples (unless already shutting down)
+        if self._current_shard and not self._shutdown:
+            # Allow flush even on interrupt - we want to save work
             self._flush_shard()
 
-        # Wait for pending writes with progress
+        # Always wait for pending writes - this is critical for data integrity
         if self._pending_writes:
-            print("  Waiting for pending writes...")
-            wait_count = 0
-            while self._pending_writes and not _shutdown_requested and not self._shutdown:
-                self.wait_for_writes(timeout_per_future=1.0)
-                wait_count += 1
-                if wait_count % 5 == 0 and self._pending_writes:
-                    print(f"    Still waiting for {len(self._pending_writes)} writes...")
+            num_pending = len(self._pending_writes)
+            print(f"  Waiting for {num_pending} pending write(s)...")
+            completed = self.wait_for_writes(timeout=60.0)  # Wait up to 60s
+            print(f"  Completed {completed} write(s).")
 
-        # Shutdown executor (non-blocking since we use daemon threads)
+        # Shutdown executor
+        self._shutdown = True
         try:
-            self._write_executor.shutdown(wait=False, cancel_futures=True)
+            self._write_executor.shutdown(wait=True, cancel_futures=False)
         except TypeError:
             # Python < 3.9 doesn't have cancel_futures
-            self._write_executor.shutdown(wait=False)
+            self._write_executor.shutdown(wait=True)
 
-        # Check if we should save index
-        if _shutdown_requested and not force:
-            print("\n  Shutdown requested, skipping final index save.")
-            print("  Note: Partially written shards may exist. Use --no-resume to rebuild.")
+        # Always save index if we have any shards
+        if not self._shards:
+            print("\n  No shards written.")
             return None
 
         # Save final index
@@ -425,10 +436,12 @@ class MLXDatastoreWriter:
         )
         index.save(self.output_dir / "index.json")
 
-        print("\nDatastore complete:")
+        print("\nDatastore finalized:")
         print(f"  Train samples: {self._sample_counts['train']:,}")
         print(f"  Valid samples: {self._sample_counts['valid']:,}")
         print(f"  Test samples:  {self._sample_counts['test']:,}")
+        if _shutdown_requested:
+            print("  (Interrupted - progress saved for resume)")
 
         return index
 
@@ -436,29 +449,14 @@ class MLXDatastoreWriter:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Ensure writes complete even on error, but don't block forever on interrupt."""
-        global _shutdown_requested
-
-        # If interrupted, just shut down quickly
-        if exc_type is KeyboardInterrupt or _shutdown_requested or self._shutdown:
-            self._shutdown = True
-            try:
-                self._write_executor.shutdown(wait=False, cancel_futures=True)
-            except TypeError:
-                self._write_executor.shutdown(wait=False)
-            return False
-
-        # Normal exit: wait for pending writes
+        """Ensure writes complete and index is saved, even on interrupt."""
+        # Always try to finalize and save work
         try:
-            self.wait_for_writes(timeout_per_future=2.0)
-        except KeyboardInterrupt:
-            self._shutdown = True
+            self.finalize(force=True)
+        except Exception as e:
+            print(f"  Warning: Error during finalize: {e}")
 
-        try:
-            self._write_executor.shutdown(wait=False, cancel_futures=True)
-        except TypeError:
-            self._write_executor.shutdown(wait=False)
-
+        # Don't suppress exceptions
         return False
 
 

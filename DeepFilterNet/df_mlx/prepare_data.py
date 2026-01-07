@@ -528,7 +528,7 @@ def main():
     segment_samples = int(args.segment_length * args.sample_rate)
 
     # Initialize datastore writer
-    from df_mlx.datastore import DatastoreConfig, MLXDatastoreWriter
+    from df_mlx.datastore import DatastoreConfig, MLXDatastoreWriter, is_shutdown_requested
 
     config = DatastoreConfig(
         sample_rate=args.sample_rate,
@@ -539,147 +539,149 @@ def main():
         samples_per_shard=args.samples_per_shard,
     )
 
-    writer = MLXDatastoreWriter(args.output_dir, config, resume=not args.no_resume)
+    # Use context manager to ensure proper cleanup
+    with MLXDatastoreWriter(args.output_dir, config, resume=not args.no_resume) as writer:
 
-    # Check if resuming
-    if writer.resumed:
-        print("\n*** Resuming from existing datastore ***")
+        # Check if resuming
+        if writer.resumed:
+            print("\n*** Resuming from existing datastore ***")
 
-    # Determine splits
-    num_speech = len(speech_files)
-    if args.max_samples:
-        num_speech = min(num_speech, args.max_samples)
+        # Determine splits
+        num_speech = len(speech_files)
+        if args.max_samples:
+            num_speech = min(num_speech, args.max_samples)
 
-    train_end = int(num_speech * args.train_split)
-    valid_end = train_end + int(num_speech * args.valid_split)
+        train_end = int(num_speech * args.train_split)
+        valid_end = train_end + int(num_speech * args.valid_split)
 
-    # Shuffle speech files
-    random.shuffle(speech_files)
+        # Shuffle speech files (use seed for reproducibility on resume)
+        random.shuffle(speech_files)
 
-    splits = [
-        ("train", speech_files[:train_end]),
-        ("valid", speech_files[train_end:valid_end]),
-        ("test", speech_files[valid_end:num_speech]),
-    ]
+        splits = [
+            ("train", speech_files[:train_end]),
+            ("valid", speech_files[train_end:valid_end]),
+            ("test", speech_files[valid_end:num_speech]),
+        ]
 
-    # Preload some noise files for efficiency
-    print("\nPreloading noise files...")
-    noise_cache = {}
-    for i, nf in enumerate(tqdm(noise_files[: min(100, len(noise_files))], desc="Loading noise")):
-        try:
-            noise_cache[nf] = load_audio(nf, args.sample_rate)
-        except Exception as e:
-            print(f"  Warning: Failed to load {nf}: {e}")
-
-    # Preload RIR files if available
-    rir_cache = {}
-    if rir_files:
-        print("Preloading RIR files...")
-        for rf in tqdm(rir_files[: min(50, len(rir_files))], desc="Loading RIRs"):
+        # Preload some noise files for efficiency
+        print("\nPreloading noise files...")
+        noise_cache = {}
+        for i, nf in enumerate(tqdm(noise_files[: min(100, len(noise_files))], desc="Loading noise")):
             try:
-                rir_cache[rf] = load_audio(rf, args.sample_rate)
+                noise_cache[nf] = load_audio(nf, args.sample_rate)
             except Exception as e:
-                print(f"  Warning: Failed to load {rf}: {e}")
+                print(f"  Warning: Failed to load {nf}: {e}")
 
-    # Process each split
-    interrupted = False
-    for split_name, split_files in splits:
-        if not split_files:
-            continue
-
-        if interrupted:
-            break
-
-        # Calculate how many samples to skip when resuming
-        existing_samples = writer.get_sample_count(split_name)
-        skip_count = existing_samples if writer.resumed else 0
-
-        if skip_count > 0:
-            print(f"\nSkipping {skip_count:,} existing {split_name} samples...")
-
-        print(f"\nProcessing {split_name} split ({len(split_files):,} files)...")
-        writer.set_split(split_name)
-
-        processed = 0
-        try:
-            for speech_path in tqdm(split_files, desc=split_name):
-                # Skip already-processed samples when resuming
-                if processed < skip_count:
-                    processed += 1
-                    continue
-
+        # Preload RIR files if available
+        rir_cache = {}
+        if rir_files:
+            print("Preloading RIR files...")
+            for rf in tqdm(rir_files[: min(50, len(rir_files))], desc="Loading RIRs"):
                 try:
-                    # Load speech
-                    clean = load_audio(speech_path, args.sample_rate)
+                    rir_cache[rf] = load_audio(rf, args.sample_rate)
+                except Exception as e:
+                    print(f"  Warning: Failed to load {rf}: {e}")
 
-                    # Skip if too short
-                    if len(clean) < segment_samples:
+        # Process each split
+        interrupted = False
+        for split_name, split_files in splits:
+            if not split_files:
+                continue
+
+            if interrupted or is_shutdown_requested():
+                break
+
+            # Get existing sample count for resume
+            existing_samples = writer.get_sample_count(split_name)
+
+            print(f"\nProcessing {split_name} split ({len(split_files):,} files)...")
+            if existing_samples > 0:
+                print(f"  Resuming: {existing_samples:,} samples already exist")
+
+            writer.set_split(split_name)
+
+            samples_added = 0
+            try:
+                pbar = tqdm(split_files, desc=split_name)
+                for speech_path in pbar:
+                    # Check for interrupt
+                    if is_shutdown_requested():
+                        interrupted = True
+                        break
+
+                    try:
+                        # Load speech
+                        clean = load_audio(speech_path, args.sample_rate)
+
+                        # Skip if too short
+                        if len(clean) < segment_samples:
+                            continue
+
+                        # Extract random segment
+                        if len(clean) > segment_samples:
+                            start = random.randint(0, len(clean) - segment_samples)
+                            clean = clean[start : start + segment_samples]
+
+                        # Select random noise
+                        if noise_cache:
+                            noise_path = random.choice(list(noise_cache.keys()))
+                            noise = noise_cache[noise_path]
+                        else:
+                            noise_path = random.choice(noise_files)
+                            noise = load_audio(noise_path, args.sample_rate)
+
+                        # Select random RIR (optional)
+                        rir = None
+                        if rir_cache and random.random() < args.rir_prob:
+                            rir_path = random.choice(list(rir_cache.keys()))
+                            rir = rir_cache[rir_path]
+
+                        # Random SNR
+                        snr_db = random.uniform(args.snr_min, args.snr_max)
+
+                        # Process sample
+                        result = process_sample(
+                            clean,
+                            noise,
+                            rir,
+                            snr_db,
+                            args.fft_size,
+                            args.hop_size,
+                            erb_fb,
+                            args.nb_df,
+                            window,
+                        )
+
+                        if result:
+                            writer.add_sample(**result)
+                            samples_added += 1
+                            pbar.set_postfix({"added": samples_added, "total": existing_samples + samples_added})
+
+                    except Exception as e:
+                        print(f"  Warning: Failed to process {speech_path}: {e}")
                         continue
 
-                    # Extract random segment
-                    if len(clean) > segment_samples:
-                        start = random.randint(0, len(clean) - segment_samples)
-                        clean = clean[start : start + segment_samples]
+            except KeyboardInterrupt:
+                print(f"\n\nInterrupted during {split_name} split.")
+                interrupted = True
 
-                    # Select random noise
-                    if noise_cache:
-                        noise_path = random.choice(list(noise_cache.keys()))
-                        noise = noise_cache[noise_path]
-                    else:
-                        noise_path = random.choice(noise_files)
-                        noise = load_audio(noise_path, args.sample_rate)
+            print(f"  Added {samples_added:,} samples to {split_name}")
 
-                    # Select random RIR (optional)
-                    rir = None
-                    if rir_cache and random.random() < args.rir_prob:
-                        rir_path = random.choice(list(rir_cache.keys()))
-                        rir = rir_cache[rir_path]
-
-                    # Random SNR
-                    snr_db = random.uniform(args.snr_min, args.snr_max)
-
-                    # Process sample
-                    result = process_sample(
-                        clean,
-                        noise,
-                        rir,
-                        snr_db,
-                        args.fft_size,
-                        args.hop_size,
-                        erb_fb,
-                        args.nb_df,
-                        window,
-                    )
-
-                    if result:
-                        writer.add_sample(**result)
-                        processed += 1
-
-                except Exception as e:
-                    print(f"  Warning: Failed to process {speech_path}: {e}")
-                    processed += 1  # Still count as processed to maintain position
-                    continue
-
-        except KeyboardInterrupt:
-            print(f"\n\nInterrupted during {split_name} split. Saving progress...")
-            interrupted = True
-
-    # Finalize
-    print("\nFinalizing datastore...")
-    index = writer.finalize(force=interrupted)  # Save index even on interrupt
-
-    if index is not None:
-        print("\n" + "=" * 60)
-        print("Build complete!" if not interrupted else "Build interrupted, progress saved!")
-        print("=" * 60)
-        print(f"Output directory: {args.output_dir}")
-        print(f"Index file:       {args.output_dir}/index.json")
+        # Context manager handles finalize
         if interrupted:
-            print("Resume with:      Same command (will skip processed samples)")
-        print("=" * 60)
+            print("\nSaving progress before exit...")
+
+    # After context manager exits
+    print("\n" + "=" * 60)
+    if not interrupted and not is_shutdown_requested():
+        print("Build complete!")
     else:
-        print("\nBuild interrupted. Partial shards may exist.")
-        print("Use --no-resume to start fresh, or retry to continue.")
+        print("Build interrupted - progress saved!")
+        print("Resume with: same command (will continue from saved progress)")
+    print("=" * 60)
+    print(f"Output directory: {args.output_dir}")
+    print(f"Index file:       {args.output_dir}/index.json")
+    print("=" * 60)
 
 
 if __name__ == "__main__":

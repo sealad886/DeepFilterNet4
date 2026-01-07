@@ -60,11 +60,11 @@ include = [
 deepfilterlib = { path = "../pyDF/" }
 deepfilterdataloader = { path = "../pyDF-data/", optional = true }
 python = ">=3.10,<3.15"
-numpy = ">=1.22,<3.0"
+numpy = ">=1.22,<2.0"
 loguru = ">=0.5"
 appdirs = "^1.4"
 requests = "^2.27"
-packaging = ">=23,<26"
+packaging = ">=23,<25"
 sympy = ">=1.6"
 soundfile = { version = ">=0.10,<0.14", optional = true }
 icecream = { version = ">=2,<3", optional = true }
