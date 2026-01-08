@@ -27,7 +27,7 @@ Requirements:
 import argparse
 import random
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional, Tuple, cast
 
 import numpy as np
@@ -700,8 +700,12 @@ def main():
 
             try:
                 if args.num_workers > 1:
-                    # Multi-threaded processing
+                    # Multi-threaded processing with bounded queue to prevent OOM
                     print(f"  Using {args.num_workers} worker threads")
+
+                    # Limit in-flight tasks to prevent memory explosion
+                    # Each worker can have 1 active + some buffer in queue
+                    max_in_flight = args.num_workers * 4
 
                     def submit_file(speech_path):
                         return process_file(
@@ -724,40 +728,79 @@ def main():
                         )
 
                     with ThreadPoolExecutor(max_workers=args.num_workers) as executor:
-                        # Submit all files
-                        future_to_idx = {}
-                        for file_idx, speech_path in files_to_process:
-                            if is_shutdown_requested():
-                                break
-                            future = executor.submit(submit_file, speech_path)
-                            future_to_idx[future] = file_idx
-
-                        # Process results as they complete
+                        # Use bounded submission: submit in batches, process results, repeat
+                        # This prevents OOM from unbounded future queue
                         pbar = tqdm(
-                            as_completed(future_to_idx),
-                            total=len(future_to_idx),
+                            total=len(split_files),
                             desc=split_name,
                             initial=files_already_processed,
                         )
-                        for future in pbar:
-                            if is_shutdown_requested():
-                                interrupted = True
-                                # Cancel pending futures
-                                for f in future_to_idx:
-                                    f.cancel()
+
+                        file_iter = iter(files_to_process)
+                        active_futures: dict = {}  # future -> file_idx
+                        files_exhausted = False
+
+                        # Initial batch submission
+                        for _ in range(min(max_in_flight, len(files_to_process))):
+                            try:
+                                file_idx, speech_path = next(file_iter)
+                                if is_shutdown_requested():
+                                    break
+                                future = executor.submit(submit_file, speech_path)
+                                active_futures[future] = file_idx
+                            except StopIteration:
+                                files_exhausted = True
                                 break
 
-                            # Track file as processed
-                            writer.increment_files_processed(split_name)
+                        # Process results and submit new tasks as slots become available
+                        while active_futures and not is_shutdown_requested():
+                            # Wait for any future to complete (with timeout to check shutdown)
+                            done_futures = []
+                            for future in list(active_futures.keys()):
+                                if future.done():
+                                    done_futures.append(future)
 
-                            try:
-                                result = future.result()
-                                if result:
-                                    writer.add_sample(**result)
-                                    samples_added += 1
-                                    pbar.set_postfix({"new": samples_added, "total": existing_samples + samples_added})
-                            except Exception:
-                                pass  # Silently skip failed files
+                            if not done_futures:
+                                # Brief sleep to avoid busy-waiting
+                                import time
+
+                                time.sleep(0.001)
+                                continue
+
+                            for future in done_futures:
+                                file_idx = active_futures.pop(future)
+
+                                # Track file as processed
+                                writer.increment_files_processed(split_name)
+                                pbar.update(1)
+
+                                try:
+                                    result = future.result()
+                                    if result:
+                                        writer.add_sample(**result)
+                                        samples_added += 1
+                                        pbar.set_postfix(
+                                            {"new": samples_added, "total": existing_samples + samples_added}
+                                        )
+                                except Exception:
+                                    pass  # Silently skip failed files
+
+                                # Submit next file if available
+                                if not files_exhausted and not is_shutdown_requested():
+                                    try:
+                                        next_idx, next_path = next(file_iter)
+                                        new_future = executor.submit(submit_file, next_path)
+                                        active_futures[new_future] = next_idx
+                                    except StopIteration:
+                                        files_exhausted = True
+
+                        if is_shutdown_requested():
+                            interrupted = True
+                            # Cancel remaining futures
+                            for f in active_futures:
+                                f.cancel()
+
+                        pbar.close()
 
                 else:
                     # Single-threaded processing (original behavior)
