@@ -115,10 +115,10 @@
 |------|------|------------|--------|
 | 6.1 Multi-frame processing module | `multiframe.py` | L | ⬜ |
 | 6.2 DFNetMF architecture | `deepfilternetmf.py` | L | ⬜ |
-| 6.3 MLX quantization support | `quantization.py` | L | ⬜ |
-| 6.4 Visualization utilities | `visualization.py` | M | ⬜ |
+| 6.3 MLX quantization support | `quantization.py` | L | ✅ |
+| 6.4 Visualization utilities | `visualization.py` | M | ✅ |
 | 6.5 Whisper adapter (ASR loss) | `whisper_adapter.py` | XL | ⬜ |
-| 6.6 Hardware detection/optimization | `hardware.py` | S | ⬜ |
+| 6.6 Hardware detection/optimization | `hardware.py` | S | ✅ |
 
 **Deliverable**: Feature-complete MLX implementation
 
