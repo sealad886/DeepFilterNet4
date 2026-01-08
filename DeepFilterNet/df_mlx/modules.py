@@ -168,9 +168,12 @@ class ConvTranspose2dNormAct(nn.Module):
             stride = (stride, stride)
         if isinstance(padding, int):
             padding = (padding, padding)
+        if isinstance(output_padding, int):
+            output_padding = (output_padding, output_padding)
 
         self.padding = padding
         self.stride = stride
+        self.output_padding = output_padding
 
         # Transposed convolution
         self.conv = nn.ConvTranspose2d(
@@ -179,6 +182,7 @@ class ConvTranspose2dNormAct(nn.Module):
             kernel_size=kernel_size,
             stride=stride,
             padding=padding,
+            output_padding=output_padding,
             bias=bias and norm is None,
         )
 

@@ -99,7 +99,7 @@
 |------|------|------------|--------|
 | 5.1 GroupedGRU module | `modules.py` | L | ✅ |
 | 5.2 SqueezedGRU module | `modules.py` | M | ✅ |
-| 5.3 DFNet3 architecture | `deepfilternet3.py` | L | ⬜ |
+| 5.3 DFNet3 architecture | `deepfilternet3.py` | L | ✅ |
 | 5.4 DFNet2 architecture | `deepfilternet2.py` | L | ⬜ |
 | 5.5 DFNet1 architecture | `deepfilternet.py` | M | ⬜ |
 | 5.6 PyTorch checkpoint conversion | `checkpoint.py` | M | ⬜ |
