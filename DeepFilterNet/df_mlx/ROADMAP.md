@@ -68,9 +68,9 @@
 |------|------|------------|--------|
 | 3.1 SI-SDR metric | `evaluation.py` | S | ✅ |
 | 3.2 STOI metric | `stoi.py` | M | ✅ |
-| 3.3 PESQ wrapper | `metrics.py` | S | ⬜ |
-| 3.4 Composite metrics (CSIG/CBAK/COVL) | `metrics.py` | M | ⬜ |
-| 3.5 DNSMOS integration | `dnsmos.py` | M | ⬜ |
+| 3.3 PESQ wrapper | `evaluation.py` | S | ✅ |
+| 3.4 Composite metrics (CSIG/CBAK/COVL) | `evaluation.py` | M | ✅ |
+| 3.5 DNSMOS integration | `dnsmos_proxy.py` | M | ✅ |
 | 3.6 Evaluation loop with parallel workers | `evaluation.py` | M | ✅ |
 
 **Deliverable**: Complete evaluation pipeline matching PyTorch

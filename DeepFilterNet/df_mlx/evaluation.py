@@ -390,6 +390,93 @@ class SegmentalSNRMetric(Metric):
         return float(result)
 
 
+class CompositeMetric(Metric):
+    """Composite speech quality metrics (CSIG, CBAK, COVL).
+
+    This metric computes all values from sepm.composite() and returns
+    one specific component. Use different metric_name values to get
+    different components:
+    - "csig": Signal quality
+    - "cbak": Background noise quality
+    - "covl": Overall quality (default)
+    - "pesq_composite": PESQ from composite calculation
+    - "ssnr_composite": Segmental SNR from composite calculation
+    """
+
+    def __init__(
+        self,
+        source_sr: Optional[int] = None,
+        metric_name: str = "covl",
+    ):
+        self.metric_name = metric_name.lower()
+        name = metric_name.upper()
+        # Composite requires 16kHz
+        super().__init__(name, source_sr=source_sr, target_sr=16000)
+        self._component_idx = {
+            "pesq_composite": 0,
+            "csig": 1,
+            "cbak": 2,
+            "covl": 3,
+            "ssnr_composite": 4,
+        }
+
+    def compute(self, clean: np.ndarray, degraded: np.ndarray) -> float:
+        try:
+            from df.sepm import composite
+
+            result = composite(clean, degraded, 16000)
+            idx = self._component_idx.get(self.metric_name, 3)  # default to COVL
+            return float(result[idx])
+        except ImportError:
+            logger.warning("sepm module not available, returning 0")
+            return 0.0
+        except Exception as e:
+            logger.warning(f"Composite metric computation failed: {e}")
+            return 0.0
+
+
+class AllCompositeMetrics:
+    """Helper to compute all composite metrics at once.
+
+    More efficient than calling CompositeMetric multiple times since
+    the underlying computation is shared.
+    """
+
+    def __init__(self, source_sr: Optional[int] = None):
+        self.source_sr = source_sr
+        self.target_sr = 16000
+        self.names = ["PESQ", "CSIG", "CBAK", "COVL", "SSNR"]
+
+    def compute(self, clean: np.ndarray, degraded: np.ndarray) -> Dict[str, float]:
+        """Compute all composite metrics.
+
+        Returns:
+            Dictionary with keys: PESQ, CSIG, CBAK, COVL, SSNR
+        """
+        # Resample if needed
+        if self.source_sr and self.source_sr != self.target_sr:
+            from scipy import signal
+
+            clean = signal.resample(  # type: ignore[assignment]
+                clean, int(len(clean) * self.target_sr / self.source_sr)
+            )
+            degraded = signal.resample(  # type: ignore[assignment]
+                degraded, int(len(degraded) * self.target_sr / self.source_sr)
+            )
+
+        try:
+            from df.sepm import composite
+
+            result = composite(clean, degraded, 16000)
+            return dict(zip(self.names, [float(r) for r in result]))
+        except ImportError:
+            logger.warning("sepm module not available, returning zeros")
+            return {name: 0.0 for name in self.names}
+        except Exception as e:
+            logger.warning(f"Composite metrics computation failed: {e}")
+            return {name: 0.0 for name in self.names}
+
+
 # ============================================================================
 # Evaluation Pipeline
 # ============================================================================
@@ -412,6 +499,9 @@ def get_metric_factory(sr: int) -> Dict[str, Callable[[], Metric]]:
         "pesq-nb": lambda: PESQMetric(sr, nb=True),
         "snr": lambda: SNRMetric(sr),
         "ssnr": lambda: SegmentalSNRMetric(sr),
+        "csig": lambda: CompositeMetric(sr, "csig"),
+        "cbak": lambda: CompositeMetric(sr, "cbak"),
+        "covl": lambda: CompositeMetric(sr, "covl"),
     }
 
 
