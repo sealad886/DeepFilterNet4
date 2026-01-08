@@ -86,6 +86,7 @@ class ShardWriter:
     category: str  # 'speech', 'noise', or 'rir'
     shard_size: int = 500  # Files per shard
     resume_from_shard: int = 0  # Starting shard index when resuming
+    base_dir: Optional[str] = None  # Base dir for relative paths in index
 
     def __post_init__(self):
         self.shard_dir = self.output_dir / self.category
@@ -94,6 +95,17 @@ class ShardWriter:
         self.current_shard_idx = self.resume_from_shard
         self.index: Dict[str, Tuple[str, str]] = {}  # path -> (shard_file, key)
         self._lock = threading.Lock()
+        self._base_path = Path(self.base_dir) if self.base_dir else None
+
+    def _get_index_key(self, original_path: str) -> str:
+        """Convert absolute path to index key (relative if base_dir set)."""
+        if self._base_path:
+            try:
+                return str(Path(original_path).relative_to(self._base_path))
+            except ValueError:
+                # Path not under base_dir, use as-is
+                return original_path
+        return original_path
 
     def add(self, original_path: str, audio: np.ndarray) -> None:
         """Add an audio array to the current shard."""
@@ -102,7 +114,8 @@ class ShardWriter:
             self.current_shard[key] = audio
             # Store relative path: category/shard_NNNN.npz
             shard_rel_path = f"{self.category}/shard_{self.current_shard_idx:04d}.npz"
-            self.index[original_path] = (shard_rel_path, key)
+            index_key = self._get_index_key(original_path)
+            self.index[index_key] = (shard_rel_path, key)
 
             if len(self.current_shard) >= self.shard_size:
                 self._flush_shard()
@@ -166,6 +179,7 @@ def build_cache_for_category(
     num_workers: int,
     normalize: bool = True,
     existing_index: Optional[Dict[str, Tuple[str, str]]] = None,
+    base_dir: Optional[str] = None,
 ) -> Tuple[Dict[str, Tuple[str, str]], Dict]:
     """Build cache for a single category (speech/noise/rir).
 
@@ -178,6 +192,7 @@ def build_cache_for_category(
         num_workers: Number of parallel workers
         normalize: Whether to normalize audio
         existing_index: Existing index from previous run (for resume)
+        base_dir: Base directory for computing relative paths (None = absolute)
 
     Returns:
         Tuple of (index dict, stats dict)
@@ -185,10 +200,22 @@ def build_cache_for_category(
     if not file_list:
         return existing_index or {}, {"total": 0, "cached": 0, "failed": 0, "skipped": 0}
 
+    # Helper to convert path to index key (same logic as ShardWriter)
+    base_path = Path(base_dir) if base_dir else None
+
+    def to_index_key(path: str) -> str:
+        if base_path:
+            try:
+                return str(Path(path).relative_to(base_path))
+            except ValueError:
+                return path
+        return path
+
     # Filter out already-processed files when resuming
     if existing_index:
         existing_paths = set(existing_index.keys())
-        files_to_process = [f for f in file_list if f not in existing_paths]
+        # Compare using index keys (relative paths if base_dir set)
+        files_to_process = [f for f in file_list if to_index_key(f) not in existing_paths]
         skipped_count = len(file_list) - len(files_to_process)
 
         # Find highest existing shard index for this category
@@ -218,7 +245,7 @@ def build_cache_for_category(
             "skipped": skipped_count,
         }
 
-    writer = ShardWriter(output_dir, category, shard_size, resume_from_shard=resume_from_shard)
+    writer = ShardWriter(output_dir, category, shard_size, resume_from_shard=resume_from_shard, base_dir=base_dir)
 
     # Stats
     total_files = len(files_to_process)
@@ -328,6 +355,13 @@ def main():
         help="Resume from existing index.json (skip already-cached files)",
     )
 
+    # Index path storage
+    parser.add_argument(
+        "--base-dir",
+        type=str,
+        help="Base directory for computing relative paths in index (default: use absolute paths)",
+    )
+
     # Audio parameters
     parser.add_argument(
         "--sample-rate",
@@ -420,6 +454,7 @@ def main():
         args.num_workers,
         normalize=True,
         existing_index=existing_indices.get("speech"),
+        base_dir=args.base_dir,
     )
     all_indices["speech"] = speech_index
     all_stats["speech"] = speech_stats
@@ -434,6 +469,7 @@ def main():
         args.num_workers,
         normalize=True,
         existing_index=existing_indices.get("noise"),
+        base_dir=args.base_dir,
     )
     all_indices["noise"] = noise_index
     all_stats["noise"] = noise_stats
@@ -449,6 +485,7 @@ def main():
             args.num_workers,
             normalize=False,
             existing_index=existing_indices.get("rir"),
+            base_dir=args.base_dir,
         )
         all_indices["rir"] = rir_index
         all_stats["rir"] = rir_stats
