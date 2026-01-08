@@ -35,11 +35,11 @@
 
 | Task | File | Complexity | Status |
 |------|------|------------|--------|
-| 1.1 LR Schedulers (cosine, warmup) | `lr.py` | S | ⬜ |
-| 1.2 DF Alpha Loss | `loss.py` | S | ⬜ |
-| 1.3 Early Stopping | `train.py` | S | ⬜ |
-| 1.4 Checkpoint patience tracking | `checkpoint.py` | S | ⬜ |
-| 1.5 Training config validation | `config.py` | S | ⬜ |
+| 1.1 LR Schedulers (cosine, warmup) | `lr.py` | S | ✅ |
+| 1.2 DF Alpha Loss | `loss.py` | S | ✅ |
+| 1.3 Early Stopping | `train.py` | S | ✅ |
+| 1.4 Checkpoint patience tracking | `checkpoint.py` | S | ✅ |
+| 1.5 Training config validation | `config.py` | S | ✅ |
 
 **Deliverable**: Training loop with proper LR scheduling and loss functions
 
@@ -50,12 +50,12 @@
 
 | Task | File | Complexity | Status |
 |------|------|------------|--------|
-| 2.1 PeriodDiscriminator | `discriminator.py` | M | ⬜ |
-| 2.2 ScaleDiscriminator | `discriminator.py` | M | ⬜ |
-| 2.3 MultiPeriodDiscriminator | `discriminator.py` | M | ⬜ |
-| 2.4 MultiScaleDiscriminator | `discriminator.py` | M | ⬜ |
-| 2.5 GAN losses (G/D/feature matching) | `loss.py` | M | ⬜ |
-| 2.6 Alternating GAN training loop | `train_gan.py` | L | ⬜ |
+| 2.1 PeriodDiscriminator | `discriminator.py` | M | ✅ |
+| 2.2 ScaleDiscriminator | `discriminator.py` | M | ✅ |
+| 2.3 MultiPeriodDiscriminator | `discriminator.py` | M | ✅ |
+| 2.4 MultiScaleDiscriminator | `discriminator.py` | M | ✅ |
+| 2.5 GAN losses (G/D/feature matching) | `loss.py` | M | ✅ |
+| 2.6 Alternating GAN training loop | `train_gan.py` | L | ✅ |
 
 **Deliverable**: Full GAN training capability matching PyTorch
 
@@ -66,12 +66,12 @@
 
 | Task | File | Complexity | Status |
 |------|------|------------|--------|
-| 3.1 SI-SDR metric | `metrics.py` | S | ⬜ |
-| 3.2 STOI metric | `metrics.py` | M | ⬜ |
+| 3.1 SI-SDR metric | `evaluation.py` | S | ✅ |
+| 3.2 STOI metric | `stoi.py` | M | ✅ |
 | 3.3 PESQ wrapper | `metrics.py` | S | ⬜ |
 | 3.4 Composite metrics (CSIG/CBAK/COVL) | `metrics.py` | M | ⬜ |
 | 3.5 DNSMOS integration | `dnsmos.py` | M | ⬜ |
-| 3.6 Evaluation loop with parallel workers | `evaluate.py` | M | ⬜ |
+| 3.6 Evaluation loop with parallel workers | `evaluation.py` | M | ✅ |
 
 **Deliverable**: Complete evaluation pipeline matching PyTorch
 
@@ -82,11 +82,11 @@
 
 | Task | File | Complexity | Status |
 |------|------|------------|--------|
-| 4.1 Model loading utilities | `model_utils.py` | S | ⬜ |
-| 4.2 Single-file enhancement | `enhance.py` | M | ⬜ |
-| 4.3 Batch enhancement | `enhance.py` | M | ⬜ |
-| 4.4 Streaming inference | `enhance.py` | L | ⬜ |
-| 4.5 Model download/caching | `model_utils.py` | M | ⬜ |
+| 4.1 Model loading utilities | `enhance.py` | S | ✅ |
+| 4.2 Single-file enhancement | `enhance.py` | M | ✅ |
+| 4.3 Batch enhancement | `enhance.py` | M | ✅ |
+| 4.4 Streaming inference | `enhance.py` | L | ✅ |
+| 4.5 Model download/caching | `enhance.py` | M | ✅ |
 
 **Deliverable**: CLI and programmatic enhancement interface
 

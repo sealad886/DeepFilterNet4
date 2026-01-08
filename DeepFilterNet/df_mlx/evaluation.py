@@ -287,7 +287,7 @@ class Metric:
         """Compute mean of all results."""
         if not self.results:
             return 0.0
-        return np.mean([r.enhanced for r in self.results])
+        return float(np.mean([r.enhanced for r in self.results]))
 
     def clear(self):
         """Clear results."""
