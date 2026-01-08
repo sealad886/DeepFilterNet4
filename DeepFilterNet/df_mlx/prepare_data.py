@@ -377,57 +377,85 @@ def process_file(
     erb_fb: np.ndarray,
     nb_df: int,
     window: np.ndarray,
-) -> Optional[dict]:
+    max_segments_per_file: int = 4,
+) -> List[dict]:
     """Process a single file end-to-end (thread-safe).
 
+    Extracts multiple non-overlapping segments from files longer than segment_samples.
+    This maximizes data utilization from long audio files.
+
+    Args:
+        max_segments_per_file: Maximum segments to extract from one file (default: 4)
+
     Returns:
-        Processed sample dict or None if failed/skipped.
+        List of processed sample dicts (may be empty if file is too short or fails).
     """
+    results = []
     try:
         # Load speech
-        clean = load_audio(speech_path, sample_rate)
+        clean_full = load_audio(speech_path, sample_rate)
 
         # Skip if too short
-        if len(clean) < segment_samples:
-            return None
+        if len(clean_full) < segment_samples:
+            return []
 
-        # Extract random segment
-        if len(clean) > segment_samples:
-            start = random.randint(0, len(clean) - segment_samples)
-            clean = clean[start : start + segment_samples]
+        # Calculate how many non-overlapping segments we can extract
+        num_possible = len(clean_full) // segment_samples
+        num_segments = min(num_possible, max_segments_per_file)
 
-        # Select random noise
-        if noise_cache_keys:
-            noise_path = random.choice(noise_cache_keys)
-            noise = noise_cache[noise_path]
-        else:
-            noise_path = random.choice(noise_files)
-            noise = load_audio(noise_path, sample_rate)
+        # Extract segments with some randomness in starting positions
+        # Use non-overlapping regions but with random offset within each region
+        for seg_idx in range(num_segments):
+            # Define the region for this segment
+            region_start = seg_idx * segment_samples
+            region_end = min((seg_idx + 1) * segment_samples, len(clean_full) - segment_samples + 1)
 
-        # Select random RIR (optional)
-        rir = None
-        if rir_cache_keys and random.random() < rir_prob:
-            rir_path = random.choice(rir_cache_keys)
-            rir = rir_cache[rir_path]
+            if region_end <= region_start:
+                # Not enough room for another segment
+                break
 
-        # Random SNR
-        snr_db = random.uniform(snr_min, snr_max)
+            # Random start within the region (allows slight variation)
+            max_offset = min(segment_samples // 4, region_end - region_start)
+            start = region_start + random.randint(0, max_offset)
+            clean = clean_full[start : start + segment_samples]
 
-        # Process sample
-        return process_sample(
-            clean,
-            noise,
-            rir,
-            snr_db,
-            fft_size,
-            hop_size,
-            erb_fb,
-            nb_df,
-            window,
-        )
+            # Select random noise (different for each segment)
+            if noise_cache_keys:
+                noise_path = random.choice(noise_cache_keys)
+                noise = noise_cache[noise_path]
+            else:
+                noise_path = random.choice(noise_files)
+                noise = load_audio(noise_path, sample_rate)
+
+            # Select random RIR (optional, different for each segment)
+            rir = None
+            if rir_cache_keys and random.random() < rir_prob:
+                rir_path = random.choice(rir_cache_keys)
+                rir = rir_cache[rir_path]
+
+            # Random SNR (different for each segment)
+            snr_db = random.uniform(snr_min, snr_max)
+
+            # Process sample
+            result = process_sample(
+                clean,
+                noise,
+                rir,
+                snr_db,
+                fft_size,
+                hop_size,
+                erb_fb,
+                nb_df,
+                window,
+            )
+            if result:
+                results.append(result)
+
     except Exception:
         # Silently skip failed files in threaded mode
-        return None
+        pass
+
+    return results
 
 
 def main():
@@ -775,10 +803,12 @@ def main():
                                 pbar.update(1)
 
                                 try:
-                                    result = future.result()
-                                    if result:
+                                    results = future.result()
+                                    # process_file now returns a list of samples
+                                    for result in results:
                                         writer.add_sample(**result)
                                         samples_added += 1
+                                    if results:
                                         pbar.set_postfix(
                                             {"new": samples_added, "total": existing_samples + samples_added}
                                         )
@@ -803,7 +833,7 @@ def main():
                         pbar.close()
 
                 else:
-                    # Single-threaded processing (original behavior)
+                    # Single-threaded processing - also uses process_file for consistency
                     pbar = tqdm(
                         files_to_process,
                         desc=split_name,
@@ -820,41 +850,19 @@ def main():
                         writer.increment_files_processed(split_name)
 
                         try:
-                            # Load speech
-                            clean = load_audio(speech_path, args.sample_rate)
-
-                            # Skip if too short
-                            if len(clean) < segment_samples:
-                                continue
-
-                            # Extract random segment
-                            if len(clean) > segment_samples:
-                                start = random.randint(0, len(clean) - segment_samples)
-                                clean = clean[start : start + segment_samples]
-
-                            # Select random noise
-                            if noise_cache_keys:
-                                noise_path = random.choice(noise_cache_keys)
-                                noise = noise_cache[noise_path]
-                            else:
-                                noise_path = random.choice(noise_files)
-                                noise = load_audio(noise_path, args.sample_rate)
-
-                            # Select random RIR (optional)
-                            rir = None
-                            if rir_cache_keys and random.random() < args.rir_prob:
-                                rir_path = random.choice(rir_cache_keys)
-                                rir = rir_cache[rir_path]
-
-                            # Random SNR
-                            snr_db = random.uniform(args.snr_min, args.snr_max)
-
-                            # Process sample
-                            result = process_sample(
-                                clean,
-                                noise,
-                                rir,
-                                snr_db,
+                            # Use process_file for consistency (extracts multiple segments)
+                            results = process_file(
+                                speech_path,
+                                noise_cache,
+                                noise_cache_keys,
+                                noise_files,
+                                rir_cache,
+                                rir_cache_keys,
+                                args.rir_prob,
+                                args.snr_min,
+                                args.snr_max,
+                                args.sample_rate,
+                                segment_samples,
                                 args.fft_size,
                                 args.hop_size,
                                 erb_fb,
@@ -862,9 +870,10 @@ def main():
                                 window,
                             )
 
-                            if result:
+                            for result in results:
                                 writer.add_sample(**result)
                                 samples_added += 1
+                            if results:
                                 pbar.set_postfix({"new": samples_added, "total": existing_samples + samples_added})
 
                         except Exception as e:
