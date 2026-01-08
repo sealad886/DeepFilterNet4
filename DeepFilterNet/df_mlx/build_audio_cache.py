@@ -85,12 +85,13 @@ class ShardWriter:
     output_dir: Path
     category: str  # 'speech', 'noise', or 'rir'
     shard_size: int = 500  # Files per shard
+    resume_from_shard: int = 0  # Starting shard index when resuming
 
     def __post_init__(self):
         self.shard_dir = self.output_dir / self.category
         self.shard_dir.mkdir(parents=True, exist_ok=True)
         self.current_shard: Dict[str, np.ndarray] = {}
-        self.current_shard_idx = 0
+        self.current_shard_idx = self.resume_from_shard
         self.index: Dict[str, Tuple[str, str]] = {}  # path -> (shard_file, key)
         self._lock = threading.Lock()
 
@@ -163,21 +164,62 @@ def build_cache_for_category(
     shard_size: int,
     num_workers: int,
     normalize: bool = True,
+    existing_index: Optional[Dict[str, Tuple[str, str]]] = None,
 ) -> Tuple[Dict[str, Tuple[str, str]], Dict]:
     """Build cache for a single category (speech/noise/rir).
+
+    Args:
+        file_list: List of file paths to process
+        category: Category name ('speech', 'noise', or 'rir')
+        output_dir: Output directory for cache
+        sample_rate: Target sample rate
+        shard_size: Files per shard
+        num_workers: Number of parallel workers
+        normalize: Whether to normalize audio
+        existing_index: Existing index from previous run (for resume)
 
     Returns:
         Tuple of (index dict, stats dict)
     """
     if not file_list:
-        return {}, {"total": 0, "cached": 0, "failed": 0}
+        return existing_index or {}, {"total": 0, "cached": 0, "failed": 0, "skipped": 0}
 
-    print(f"\nProcessing {category}: {len(file_list):,} files")
+    # Filter out already-processed files when resuming
+    if existing_index:
+        existing_paths = set(existing_index.keys())
+        files_to_process = [f for f in file_list if f not in existing_paths]
+        skipped_count = len(file_list) - len(files_to_process)
 
-    writer = ShardWriter(output_dir, category, shard_size)
+        # Find highest existing shard index
+        existing_shards = set()
+        for shard_file, _ in existing_index.values():
+            # shard_file format: "speech/shard_0000.npz"
+            shard_name = Path(shard_file).stem  # "shard_0000"
+            shard_num = int(shard_name.split("_")[1])
+            existing_shards.add(shard_num)
+
+        resume_from_shard = max(existing_shards) + 1 if existing_shards else 0
+        print(f"\nResuming {category}: {skipped_count:,} already cached, {len(files_to_process):,} remaining")
+        print(f"  Starting from shard index: {resume_from_shard}")
+    else:
+        files_to_process = file_list
+        skipped_count = 0
+        resume_from_shard = 0
+        print(f"\nProcessing {category}: {len(file_list):,} files")
+
+    if not files_to_process:
+        print("  All files already cached!")
+        return existing_index or {}, {
+            "total": len(file_list),
+            "cached": 0,
+            "failed": 0,
+            "skipped": skipped_count,
+        }
+
+    writer = ShardWriter(output_dir, category, shard_size, resume_from_shard=resume_from_shard)
 
     # Stats
-    total_files = len(file_list)
+    total_files = len(files_to_process)
     cached_count = 0
     failed_count = 0
     total_samples = 0
@@ -207,7 +249,7 @@ def build_cache_for_category(
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
         pbar = tqdm(total=total_files, desc=f"  {category}", unit="files")
 
-        for i, file_path in enumerate(file_list):
+        for i, file_path in enumerate(files_to_process):
             # If queue is full, process one completed task first
             if pending_futures.full():
                 process_completed()
@@ -222,22 +264,29 @@ def build_cache_for_category(
 
         pbar.close()
 
-    index = writer.finalize()
+    new_index = writer.finalize()
+
+    # Merge with existing index
+    if existing_index:
+        merged_index = {**existing_index, **new_index}
+    else:
+        merged_index = new_index
 
     stats = {
-        "total": total_files,
+        "total": len(file_list),
         "cached": cached_count,
         "failed": failed_count,
+        "skipped": skipped_count,
         "total_samples": total_samples,
         "total_duration_hours": total_duration / 3600,
         "num_shards": writer.current_shard_idx,
     }
 
-    print(f"  Cached: {cached_count:,} / {total_files:,} files")
+    print(f"  Newly cached: {cached_count:,} files")
     print(f"  Duration: {total_duration / 3600:.1f} hours")
-    print(f"  Shards: {writer.current_shard_idx}")
+    print(f"  Total in index: {len(merged_index):,} files")
 
-    return index, stats
+    return merged_index, stats
 
 
 def main():
@@ -268,6 +317,13 @@ def main():
         type=str,
         required=True,
         help="Directory to write audio cache",
+    )
+
+    # Resume support
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from existing index.json (skip already-cached files)",
     )
 
     # Audio parameters
@@ -317,6 +373,18 @@ def main():
     print(f"Shard size: {args.shard_size} files")
     print(f"Workers: {args.num_workers}")
 
+    # Load existing index for resume support
+    existing_indices: Dict[str, Dict[str, Tuple[str, str]]] = {}
+    index_path = output_dir / "index.json"
+    if args.resume and index_path.exists():
+        print(f"\nResume mode: Loading existing index from {index_path}")
+        with open(index_path) as f:
+            existing_indices = json.load(f)
+        for cat, idx in existing_indices.items():
+            print(f"  {cat}: {len(idx):,} files already cached")
+    elif args.resume:
+        print("\nResume mode: No existing index found, starting fresh")
+
     # Read file lists
     print("\nReading file lists...")
     speech_files = read_file_list(args.speech_list)
@@ -342,14 +410,28 @@ def main():
 
     # Speech cache
     speech_index, speech_stats = build_cache_for_category(
-        speech_files, "speech", output_dir, args.sample_rate, args.shard_size, args.num_workers, normalize=True
+        speech_files,
+        "speech",
+        output_dir,
+        args.sample_rate,
+        args.shard_size,
+        args.num_workers,
+        normalize=True,
+        existing_index=existing_indices.get("speech"),
     )
     all_indices["speech"] = speech_index
     all_stats["speech"] = speech_stats
 
     # Noise cache
     noise_index, noise_stats = build_cache_for_category(
-        noise_files, "noise", output_dir, args.sample_rate, args.shard_size, args.num_workers, normalize=True
+        noise_files,
+        "noise",
+        output_dir,
+        args.sample_rate,
+        args.shard_size,
+        args.num_workers,
+        normalize=True,
+        existing_index=existing_indices.get("noise"),
     )
     all_indices["noise"] = noise_index
     all_stats["noise"] = noise_stats
@@ -357,7 +439,14 @@ def main():
     # RIR cache (if provided)
     if rir_files:
         rir_index, rir_stats = build_cache_for_category(
-            rir_files, "rir", output_dir, args.sample_rate, args.shard_size, args.num_workers, normalize=False
+            rir_files,
+            "rir",
+            output_dir,
+            args.sample_rate,
+            args.shard_size,
+            args.num_workers,
+            normalize=False,
+            existing_index=existing_indices.get("rir"),
         )
         all_indices["rir"] = rir_index
         all_stats["rir"] = rir_stats

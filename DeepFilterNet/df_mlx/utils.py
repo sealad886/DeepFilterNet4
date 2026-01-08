@@ -48,7 +48,7 @@ def load_audio(
     # Resample if needed
     if file_sr != sr:
         try:
-            import resampy
+            import resampy  # type: ignore[import]
 
             audio = resampy.resample(audio, file_sr, sr)
         except ImportError:
@@ -345,7 +345,7 @@ def compute_pesq(
     # PESQ requires 16kHz
     if sr != 16000:
         try:
-            import resampy
+            import resampy  # type: ignore[import]
 
             clean_np = resampy.resample(clean_np, sr, 16000)
             enhanced_np = resampy.resample(enhanced_np, sr, 16000)

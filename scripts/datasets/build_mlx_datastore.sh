@@ -140,6 +140,8 @@ echo ""
 echo "The actual mixing (speech + noise + RIR @ random SNR) happens"
 echo "dynamically during training - giving full diversity each epoch."
 echo ""
+echo "Resume mode is enabled by default - will skip already-cached files."
+echo ""
 
 cd "${ROOT_DIR}/DeepFilterNet"
 
@@ -154,7 +156,8 @@ python -m df_mlx.build_audio_cache \
   --num-workers "${NUM_WORKERS}" \
   --snr-min "${SNR_MIN}" \
   --snr-max "${SNR_MAX}" \
-  --p-reverb "${RIR_PROB}"
+  --p-reverb "${RIR_PROB}" \
+  --resume
 
 echo ""
 echo "=============================================="
