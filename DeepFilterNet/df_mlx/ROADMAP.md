@@ -101,7 +101,7 @@
 | 5.2 SqueezedGRU module | `modules.py` | M | ✅ |
 | 5.3 DFNet3 architecture | `deepfilternet3.py` | L | ✅ |
 | 5.4 DFNet2 architecture | `deepfilternet2.py` | L | ✅ |
-| 5.5 DFNet1 architecture | `deepfilternet.py` | M | ⬜ |
+| 5.5 DFNet1 architecture | `deepfilternet.py` | M | ✅ |
 | 5.6 PyTorch checkpoint conversion | `checkpoint.py` | M | ⬜ |
 
 **Deliverable**: Support for loading/running all DFNet variants
@@ -134,11 +134,11 @@ df_mlx/
 │
 ├── # Models
 ├── model.py                      # ✅ DFNet4, DFNet4Lite
-├── deepfilternet.py              # ⬜ DFNet1
-├── deepfilternet2.py             # ⬜ DFNet2
-├── deepfilternet3.py             # ⬜ DFNet3
+├── deepfilternet.py              # ✅ DFNet1
+├── deepfilternet2.py             # ✅ DFNet2
+├── deepfilternet3.py             # ✅ DFNet3
 ├── deepfilternetmf.py            # ⬜ DFNetMF
-├── discriminator.py              # ⬜ MPD, MSD
+├── discriminator.py              # ✅ MPD, MSD
 │
 ├── # Core modules
 ├── modules.py                    # ✅ Conv2dNormAct, GroupedLinear, etc.

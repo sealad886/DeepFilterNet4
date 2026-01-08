@@ -71,6 +71,13 @@ if MLX_AVAILABLE:
     )
     from .config import ModelParams4, TrainConfig, get_default_config, load_config  # noqa: F401
     from .datastore import DatastoreConfig, MLXDataLoader, MLXDatastoreWriter, StreamingMLXDataLoader  # noqa: F401
+
+    # Legacy model architectures (GRU-based)
+    from .deepfilternet import DFNet1, ModelParams1  # noqa: F401
+    from .deepfilternet import init_model as init_dfnet1  # noqa: F401
+    from .deepfilternet2 import DFNet2, ModelParams2  # noqa: F401
+    from .deepfilternet2 import init_model as init_dfnet2  # noqa: F401
+    from .deepfilternet3 import DFNet3, ModelParams3, init_dfnet3  # noqa: F401
     from .discriminator import (  # noqa: F401
         CombinedDiscriminator,
         MultiPeriodDiscriminator,
@@ -124,9 +131,16 @@ if MLX_AVAILABLE:
     )
     from .mamba import BidirectionalMamba, GroupedLinear, Mamba, MambaBlock, SqueezedMamba  # noqa: F401
     from .model import DfNet4, DfNet4Lite, count_parameters, init_model, model_summary  # noqa: F401
-    from .modules import ComplexMask, Conv2dNormAct, ConvTranspose2dNormAct, DfOp, ErbFilterbank  # noqa: F401
+    from .modules import (  # noqa: F401
+        ComplexMask,
+        Conv2dNormAct,
+        ConvTranspose2dNormAct,
+        DfOp,
+        ErbFilterbank,
+        GroupedGRU,
+    )
     from .modules import GroupedLinear as GroupedLinearModule  # noqa: F401
-    from .modules import Mask, erb_fb  # noqa: F401
+    from .modules import Mask, SqueezedGRU, SqueezedGRU_S, erb_fb  # noqa: F401
     from .ops import erb_fb as make_erb_fb  # noqa: F401
     from .ops import erb_transform, istft, stft  # noqa: F401
     from .stoi import stoi, stoi_loss, stoi_numpy  # noqa: F401
@@ -156,6 +170,20 @@ if MLX_AVAILABLE:
         "init_model",
         "count_parameters",
         "model_summary",
+        # Legacy GRU models
+        "DFNet1",
+        "DFNet2",
+        "DFNet3",
+        "ModelParams1",
+        "ModelParams2",
+        "ModelParams3",
+        "init_dfnet1",
+        "init_dfnet2",
+        "init_dfnet3",
+        # GRU modules
+        "GroupedGRU",
+        "SqueezedGRU",
+        "SqueezedGRU_S",
         # Mamba
         "MambaBlock",
         "Mamba",
