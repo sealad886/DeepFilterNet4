@@ -19,7 +19,7 @@ try:
     import mlx.core as mx
     import mlx.nn as nn  # noqa: F401
 
-    print(f"✓ MLX version: {mx.__version__ if hasattr(mx, '__version__') else 'unknown'}")
+    print(f"✓ MLX version: {mx.__version__ if hasattr(mx, '__version__') else 'unknown'}")  # type: ignore
 except ImportError:
     print("✗ MLX not installed. Install with: pip install mlx")
     print("  Note: MLX only works on Apple Silicon Macs")

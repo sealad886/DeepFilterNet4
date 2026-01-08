@@ -49,6 +49,64 @@ enhanced = model.enhance(noisy_audio)
 
 ### Training
 
+There are two training approaches:
+
+#### Option 1: Pre-computed Datastore (Faster startup, limited diversity)
+
+Pre-compute spectral features once, then train:
+
+```bash
+# Build datastore (one-time)
+./scripts/datasets/build_mlx_datastore.sh
+
+# Train
+python -m df_mlx.train_with_data \
+    --datastore ./mlx_datastore \
+    --epochs 100 \
+    --batch-size 8
+```
+
+#### Option 2: Dynamic On-the-Fly Mixing (Full diversity, matches original training)
+
+This approach mirrors the original Rust DataLoader:
+- Dynamic speech + noise + RIR mixing each epoch
+- Same speech file sees different noise/SNR/RIR each epoch
+- Full dataset diversity (all files available)
+- Configurable augmentations (reverb, clipping, EQ)
+
+```bash
+# Generate file lists (from directories)
+python -m df_mlx.generate_file_lists \
+    --speech-dirs /path/to/speech \
+    --noise-dirs /path/to/noise \
+    --rir-dirs /path/to/rirs \
+    --output-dir ./file_lists \
+    --generate-config
+
+# Train with dynamic mixing
+python -m df_mlx.train_dynamic \
+    --config ./file_lists/config.json \
+    --epochs 100 \
+    --batch-size 8 \
+    --p-reverb 0.5
+```
+
+Or specify file lists directly:
+
+```bash
+python -m df_mlx.train_dynamic \
+    --speech-list speech_files.txt \
+    --noise-list noise_files.txt \
+    --rir-list rir_files.txt \
+    --epochs 100 \
+    --batch-size 8
+```
+
+The dynamic approach provides better model generalization due to the vastly
+larger effective training set (each epoch sees different combinations).
+
+### Basic Training API
+
 ```python
 from df_mlx.model import init_model
 from df_mlx.train import Trainer

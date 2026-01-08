@@ -1,6 +1,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from matplotlib.figure import Figure
 
 from df.utils import as_complex
 
@@ -18,7 +19,7 @@ def spec_figure(
     xlabels=False,
     ylabels=False,
     **kwargs,
-) -> plt.Figure:
+) -> Figure:
     spec = torch.as_tensor(spec).detach()
     if labels or xlabels:
         kwargs.setdefault("xlabel", "Time [s]")
