@@ -113,8 +113,8 @@
 
 | Task | File | Complexity | Status |
 |------|------|------------|--------|
-| 6.1 Multi-frame processing module | `multiframe.py` | L | ⬜ |
-| 6.2 DFNetMF architecture | `deepfilternetmf.py` | L | ⬜ |
+| 6.1 Multi-frame processing module | `multiframe.py` | L | ✅ |
+| 6.2 DFNetMF architecture | `deepfilternetmf.py` | L | ✅ |
 | 6.3 MLX quantization support | `quantization.py` | L | ✅ |
 | 6.4 Visualization utilities | `visualization.py` | M | ✅ |
 | 6.5 Whisper adapter (ASR loss) | `whisper_adapter.py` | XL | ⬜ |
@@ -137,14 +137,14 @@ df_mlx/
 ├── deepfilternet.py              # ✅ DFNet1
 ├── deepfilternet2.py             # ✅ DFNet2
 ├── deepfilternet3.py             # ✅ DFNet3
-├── deepfilternetmf.py            # ⬜ DFNetMF
+├── deepfilternetmf.py            # ✅ DFNetMF
 ├── discriminator.py              # ✅ MPD, MSD
 │
 ├── # Core modules
 ├── modules.py                    # ✅ Conv2dNormAct, GroupedLinear, etc.
 ├── mamba.py                      # ✅ Mamba, SqueezedMamba
 ├── ops.py                        # ✅ DfOp, ERB, Mask
-├── multiframe.py                 # ⬜ Multi-frame processing
+├── multiframe.py                 # ✅ Multi-frame processing
 │
 ├── # Training
 ├── train.py                      # ✅ Basic training (needs LR scheduler)

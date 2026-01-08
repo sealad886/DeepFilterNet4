@@ -86,6 +86,16 @@ if MLX_AVAILABLE:
     from .deepfilternet2 import DFNet2, ModelParams2  # noqa: F401
     from .deepfilternet2 import init_model as init_dfnet2  # noqa: F401
     from .deepfilternet3 import DFNet3, ModelParams3, init_dfnet3  # noqa: F401
+
+    # Multi-frame DFNet model
+    from .deepfilternetmf import (  # noqa: F401
+        DfDecoderMF,
+        DFNetMF,
+        EncoderMF,
+        ErbDecoderMF,
+        ModelParamsMF,
+        create_dfnetmf,
+    )
     from .discriminator import (  # noqa: F401
         CombinedDiscriminator,
         MultiPeriodDiscriminator,
@@ -149,8 +159,11 @@ if MLX_AVAILABLE:
     )
     from .modules import GroupedLinear as GroupedLinearModule  # noqa: F401
     from .modules import Mask, SqueezedGRU, SqueezedGRU_S, erb_fb  # noqa: F401
+
+    # Multi-frame processing modules
+    from .multiframe import CRM, DF, DFreal, MfMvdr, MfWf, MultiFrameModule, MultiResolutionDF  # noqa: F401
     from .ops import erb_fb as make_erb_fb  # noqa: F401
-    from .ops import erb_transform, istft, stft  # noqa: F401
+    from .ops import erb_fb_and_inverse, erb_transform, istft, stft  # noqa: F401
     from .stoi import stoi, stoi_loss, stoi_numpy  # noqa: F401
     from .train import (  # noqa: F401
         Trainer,
@@ -215,6 +228,7 @@ if MLX_AVAILABLE:
         "stft",
         "istft",
         "make_erb_fb",
+        "erb_fb_and_inverse",
         "erb_transform",
         # Training
         "Trainer",
@@ -305,6 +319,21 @@ if MLX_AVAILABLE:
         "GANConfig",
         "GANTrainer",
         "train_gan",
+        # Multi-frame processing (new)
+        "MultiFrameModule",
+        "DF",
+        "DFreal",
+        "MfWf",
+        "MfMvdr",
+        "MultiResolutionDF",
+        "CRM",
+        # Multi-frame DFNet model (new)
+        "DFNetMF",
+        "ModelParamsMF",
+        "create_dfnetmf",
+        "EncoderMF",
+        "ErbDecoderMF",
+        "DfDecoderMF",
         # Version
         "__version__",
         "MLX_AVAILABLE",

@@ -309,6 +309,39 @@ def erb_fb(
     return mx.array(fb)
 
 
+def erb_fb_and_inverse(
+    sr: int,
+    fft_size: int,
+    nb_bands: int = 32,
+    min_freq: float = 20.0,
+    max_freq: Optional[float] = None,
+    min_width: int = 2,
+    normalized: bool = True,
+) -> Tuple[mx.array, mx.array]:
+    """Generate ERB filterbank and its inverse (transpose).
+
+    Convenience function that returns both the forward and inverse
+    ERB filterbank matrices needed by DFNetMF and other models.
+
+    Args:
+        sr: Sample rate in Hz
+        fft_size: FFT size
+        nb_bands: Number of ERB bands
+        min_freq: Minimum frequency in Hz
+        max_freq: Maximum frequency in Hz (defaults to sr/2)
+        min_width: Minimum filter width in FFT bins
+        normalized: Whether to normalize each filter to sum to 1
+
+    Returns:
+        Tuple of (erb_fb, erb_inv_fb):
+            - erb_fb: Forward filterbank [n_freqs, nb_bands]
+            - erb_inv_fb: Inverse filterbank [nb_bands, n_freqs]
+    """
+    fb = erb_fb(sr, fft_size, nb_bands, min_freq, max_freq, min_width, normalized, as_numpy=False)
+    fb_mx = fb if isinstance(fb, mx.array) else mx.array(fb)
+    return fb_mx, mx.transpose(fb_mx)
+
+
 def erb_transform(spec: mx.array, fb: mx.array) -> mx.array:
     """Transform spectrogram to ERB bands.
 

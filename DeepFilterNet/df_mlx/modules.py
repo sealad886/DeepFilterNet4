@@ -11,6 +11,7 @@ DeepFilterNet4, including:
 All modules are optimized for Apple Silicon unified memory architecture.
 """
 
+import math
 from typing import Optional, Tuple, Union, cast
 
 import mlx.core as mx
@@ -41,6 +42,7 @@ class Conv2dNormAct(nn.Module):
         norm: Normalization type ("batch", "group", "layer", None)
         activation: Activation type ("relu", "gelu", "silu", "prelu", None)
         norm_groups: Number of groups for GroupNorm
+        separable: If True, use depthwise separable convolution (grouped conv + 1x1 pointwise)
     """
 
     def __init__(
@@ -56,6 +58,7 @@ class Conv2dNormAct(nn.Module):
         norm: Optional[str] = "batch",
         activation: Optional[str] = "relu",
         norm_groups: int = 8,
+        separable: bool = False,
     ):
         super().__init__()
 
@@ -78,6 +81,25 @@ class Conv2dNormAct(nn.Module):
 
         self.padding = padding
         self.stride = stride
+
+        # Handle separable convolution
+        # Separable: use groups = gcd(in, out), then add 1x1 pointwise conv
+        self.pointwise_conv = None
+        if separable:
+            groups = math.gcd(in_channels, out_channels)
+            # Disable separable if groups is 1 or kernel is 1x1
+            if groups == 1 or max(kernel_size) == 1:
+                separable = False
+            else:
+                # Will add pointwise conv after grouped conv
+                self.pointwise_conv = nn.Conv2d(
+                    in_channels=out_channels,
+                    out_channels=out_channels,
+                    kernel_size=(1, 1),
+                    stride=(1, 1),
+                    padding=(0, 0),
+                    bias=False,
+                )
 
         # Convolution
         self.conv = nn.Conv2d(
@@ -122,6 +144,10 @@ class Conv2dNormAct(nn.Module):
         """
         x = self.conv(x)
 
+        # Apply pointwise conv for separable convolution
+        if self.pointwise_conv is not None:
+            x = self.pointwise_conv(x)
+
         if self.norm_layer is not None:
             x = self.norm_layer(x)
 
@@ -145,6 +171,7 @@ class ConvTranspose2dNormAct(nn.Module):
         bias: Whether to use bias
         norm: Normalization type
         activation: Activation type
+        separable: If True, use depthwise separable convolution
     """
 
     def __init__(
@@ -159,6 +186,7 @@ class ConvTranspose2dNormAct(nn.Module):
         bias: bool = True,
         norm: Optional[str] = "batch",
         activation: Optional[str] = "relu",
+        separable: bool = False,
     ):
         super().__init__()
 
@@ -174,6 +202,22 @@ class ConvTranspose2dNormAct(nn.Module):
         self.padding = padding
         self.stride = stride
         self.output_padding = output_padding
+
+        # Handle separable convolution
+        self.pointwise_conv = None
+        if separable:
+            groups = math.gcd(in_channels, out_channels)
+            if groups == 1 or max(kernel_size) == 1:
+                separable = False
+            else:
+                self.pointwise_conv = nn.Conv2d(
+                    in_channels=out_channels,
+                    out_channels=out_channels,
+                    kernel_size=(1, 1),
+                    stride=(1, 1),
+                    padding=(0, 0),
+                    bias=False,
+                )
 
         # Transposed convolution
         self.conv = nn.ConvTranspose2d(
@@ -207,6 +251,9 @@ class ConvTranspose2dNormAct(nn.Module):
     def __call__(self, x: mx.array) -> mx.array:
         """Forward pass."""
         x = self.conv(x)
+
+        if self.pointwise_conv is not None:
+            x = self.pointwise_conv(x)
 
         if self.norm_layer is not None:
             x = self.norm_layer(x)
