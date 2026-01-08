@@ -59,8 +59,69 @@ except ImportError:
 
 if MLX_AVAILABLE:
     # Re-export public API - noqa for intentional re-exports
+    from .checkpoint import (  # noqa: F401
+        CheckpointManager,
+        CheckpointState,
+        PatienceState,
+        check_patience,
+        load_checkpoint,
+        read_patience,
+        save_checkpoint,
+        write_patience,
+    )
     from .config import ModelParams4, TrainConfig, get_default_config, load_config  # noqa: F401
     from .datastore import DatastoreConfig, MLXDataLoader, MLXDatastoreWriter, StreamingMLXDataLoader  # noqa: F401
+    from .discriminator import (  # noqa: F401
+        CombinedDiscriminator,
+        MultiPeriodDiscriminator,
+        MultiScaleDiscriminator,
+        PeriodDiscriminator,
+        ScaleDiscriminator,
+        SpectralDiscriminator,
+        compute_discriminator_loss,
+        compute_generator_loss,
+    )
+    from .evaluation import (  # noqa: F401
+        EvaluationResults,
+        Metric,
+        MetricResult,
+        PESQMetric,
+        SegmentalSNRMetric,
+        SiSDRMetric,
+        SNRMetric,
+        STOIMetric,
+        ValidationMetrics,
+        compare_before_after,
+        evaluate_batch,
+        evaluate_single,
+        get_metric_factory,
+        log_improvement,
+        quick_eval,
+        segmental_snr,
+        si_sdr,
+        snr,
+    )
+
+    # New modules for parity with df/
+    from .loss import (  # noqa: F401
+        CombinedLoss,
+        DfAlphaLoss,
+        FeatureMatchingLoss,
+        MaskLoss,
+        SegmentalSiSdrLoss,
+        SiSdrLoss,
+        SpectralLoss,
+        discriminator_loss,
+        generator_loss,
+    )
+    from .lr import (  # noqa: F401
+        CosineScheduler,
+        ExponentialDecayScheduler,
+        LinearDecayScheduler,
+        WarmupScheduler,
+        cosine_scheduler,
+        create_scheduler,
+    )
     from .mamba import BidirectionalMamba, GroupedLinear, Mamba, MambaBlock, SqueezedMamba  # noqa: F401
     from .model import DfNet4, DfNet4Lite, count_parameters, init_model, model_summary  # noqa: F401
     from .modules import ComplexMask, Conv2dNormAct, ConvTranspose2dNormAct, DfOp, ErbFilterbank  # noqa: F401
@@ -68,6 +129,7 @@ if MLX_AVAILABLE:
     from .modules import Mask, erb_fb  # noqa: F401
     from .ops import erb_fb as make_erb_fb  # noqa: F401
     from .ops import erb_transform, istft, stft  # noqa: F401
+    from .stoi import stoi, stoi_loss, stoi_numpy  # noqa: F401
     from .train import (  # noqa: F401
         Trainer,
         convert_pytorch_weights,
@@ -76,6 +138,7 @@ if MLX_AVAILABLE:
         spectral_loss,
         train,
     )
+    from .train_gan import GANConfig, GANTrainer, train_gan  # noqa: F401
     from .utils import (  # noqa: F401
         AudioDataset,
         benchmark_model,
@@ -137,6 +200,68 @@ if MLX_AVAILABLE:
         "MLXDataLoader",
         "MLXDatastoreWriter",
         "StreamingMLXDataLoader",
+        # Loss functions (new)
+        "SpectralLoss",
+        "MaskLoss",
+        "SiSdrLoss",
+        "SegmentalSiSdrLoss",
+        "DfAlphaLoss",
+        "FeatureMatchingLoss",
+        "CombinedLoss",
+        "discriminator_loss",
+        "generator_loss",
+        # LR Schedulers (new)
+        "cosine_scheduler",
+        "CosineScheduler",
+        "WarmupScheduler",
+        "LinearDecayScheduler",
+        "ExponentialDecayScheduler",
+        "create_scheduler",
+        # Checkpoint (new)
+        "PatienceState",
+        "CheckpointState",
+        "check_patience",
+        "read_patience",
+        "write_patience",
+        "save_checkpoint",
+        "load_checkpoint",
+        "CheckpointManager",
+        # Discriminators (new)
+        "PeriodDiscriminator",
+        "ScaleDiscriminator",
+        "MultiPeriodDiscriminator",
+        "MultiScaleDiscriminator",
+        "CombinedDiscriminator",
+        "SpectralDiscriminator",
+        "compute_discriminator_loss",
+        "compute_generator_loss",
+        # STOI (new)
+        "stoi",
+        "stoi_numpy",
+        "stoi_loss",
+        # Evaluation (new)
+        "si_sdr",
+        "snr",
+        "segmental_snr",
+        "MetricResult",
+        "EvaluationResults",
+        "Metric",
+        "SiSDRMetric",
+        "STOIMetric",
+        "PESQMetric",
+        "SNRMetric",
+        "SegmentalSNRMetric",
+        "get_metric_factory",
+        "evaluate_batch",
+        "evaluate_single",
+        "ValidationMetrics",
+        "quick_eval",
+        "compare_before_after",
+        "log_improvement",
+        # GAN Training (new)
+        "GANConfig",
+        "GANTrainer",
+        "train_gan",
         # Version
         "__version__",
         "MLX_AVAILABLE",
