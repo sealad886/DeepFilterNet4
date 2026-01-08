@@ -70,6 +70,14 @@ if MLX_AVAILABLE:
         write_patience,
     )
     from .config import ModelParams4, TrainConfig, get_default_config, load_config  # noqa: F401
+
+    # Checkpoint conversion utilities
+    from .convert import convert_and_save  # noqa: F401
+    from .convert import convert_dfnet3_checkpoint  # noqa: F401
+    from .convert import convert_generic_checkpoint  # noqa: F401
+    from .convert import load_mlx_checkpoint  # noqa: F401
+    from .convert import save_mlx_checkpoint  # noqa: F401
+    from .convert import load_pytorch_checkpoint as load_pytorch_ckpt  # noqa: F401
     from .datastore import DatastoreConfig, MLXDataLoader, MLXDatastoreWriter, StreamingMLXDataLoader  # noqa: F401
 
     # Legacy model architectures (GRU-based)
@@ -215,6 +223,13 @@ if MLX_AVAILABLE:
         "multi_resolution_stft_loss",
         "load_pytorch_checkpoint",
         "convert_pytorch_weights",
+        # Checkpoint conversion
+        "load_pytorch_ckpt",
+        "save_mlx_checkpoint",
+        "load_mlx_checkpoint",
+        "convert_and_save",
+        "convert_dfnet3_checkpoint",
+        "convert_generic_checkpoint",
         # Utils
         "load_audio",
         "save_audio",

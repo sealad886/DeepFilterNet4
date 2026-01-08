@@ -102,7 +102,7 @@
 | 5.3 DFNet3 architecture | `deepfilternet3.py` | L | ✅ |
 | 5.4 DFNet2 architecture | `deepfilternet2.py` | L | ✅ |
 | 5.5 DFNet1 architecture | `deepfilternet.py` | M | ✅ |
-| 5.6 PyTorch checkpoint conversion | `checkpoint.py` | M | ⬜ |
+| 5.6 PyTorch checkpoint conversion | `convert.py` | M | ✅ |
 
 **Deliverable**: Support for loading/running all DFNet variants
 
@@ -149,18 +149,18 @@ df_mlx/
 ├── # Training
 ├── train.py                      # ✅ Basic training (needs LR scheduler)
 ├── train_dynamic.py              # ✅ Dynamic mixing training
-├── train_gan.py                  # ⬜ GAN training loop
-├── loss.py                       # ⬜ All loss functions
-├── lr.py                         # ⬜ LR schedulers
+├── train_gan.py                  # ✅ GAN training loop
+├── loss.py                       # ✅ All loss functions
+├── lr.py                         # ✅ LR schedulers
 │
 ├── # Inference
 ├── enhance.py                    # ⬜ Enhancement utilities
 ├── model_utils.py                # ⬜ Model loading/downloading
 │
 ├── # Evaluation
-├── metrics.py                    # ⬜ STOI, PESQ, SI-SDR, etc.
+├── evaluation.py                 # ✅ Evaluation metrics/utilities
+├── stoi.py                       # ✅ STOI metric
 ├── dnsmos.py                     # ⬜ DNSMOS integration
-├── evaluate.py                   # ⬜ Evaluation loop
 │
 ├── # Data
 ├── datastore.py                  # ✅ Legacy datastore
@@ -172,7 +172,8 @@ df_mlx/
 ├── # Utilities
 ├── config.py                     # ✅ Configuration
 ├── utils.py                      # ✅ General utilities
-├── checkpoint.py                 # ⬜ Checkpoint management
+├── checkpoint.py                 # ✅ Checkpoint management
+├── convert.py                    # ✅ PyTorch checkpoint conversion
 ├── visualization.py              # ⬜ Visualization
 ├── quantization.py               # ⬜ MLX quantization
 ├── hardware.py                   # ⬜ Hardware detection
