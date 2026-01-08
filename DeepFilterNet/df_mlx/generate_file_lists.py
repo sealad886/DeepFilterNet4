@@ -159,6 +159,23 @@ def generate_config(
     print(f"  Wrote config to {config_path}")
 
 
+def read_file_list(file_path: str) -> List[str]:
+    """Read file list from text file."""
+    files = []
+    path = Path(file_path)
+    if not path.exists():
+        print(f"Warning: File list not found: {file_path}")
+        return files
+
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                files.append(line)
+
+    return files
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate file lists for dynamic dataset training")
 
@@ -180,6 +197,23 @@ def main():
         nargs="+",
         type=str,
         help="Directories containing RIR audio files",
+    )
+
+    # File list sources (e.g., from existing .txt file lists)
+    parser.add_argument(
+        "--speech-list",
+        type=str,
+        help="Text file containing speech audio file paths (one per line)",
+    )
+    parser.add_argument(
+        "--noise-list",
+        type=str,
+        help="Text file containing noise audio file paths (one per line)",
+    )
+    parser.add_argument(
+        "--rir-list",
+        type=str,
+        help="Text file containing RIR audio file paths (one per line)",
     )
 
     # HDF5 sources
@@ -247,7 +281,10 @@ def main():
 
     # Collect speech files
     speech_files = []
-    if args.speech_dirs:
+    if args.speech_list:
+        print(f"Reading speech file list: {args.speech_list}")
+        speech_files = read_file_list(args.speech_list)
+    elif args.speech_dirs:
         print(f"Scanning speech directories: {args.speech_dirs}")
         speech_files = find_audio_files(args.speech_dirs, recursive=not args.no_recursive)
     elif args.speech_hdf5:
@@ -256,7 +293,10 @@ def main():
 
     # Collect noise files
     noise_files = []
-    if args.noise_dirs:
+    if args.noise_list:
+        print(f"Reading noise file list: {args.noise_list}")
+        noise_files = read_file_list(args.noise_list)
+    elif args.noise_dirs:
         print(f"Scanning noise directories: {args.noise_dirs}")
         noise_files = find_audio_files(args.noise_dirs, recursive=not args.no_recursive)
     elif args.noise_hdf5:
@@ -265,7 +305,10 @@ def main():
 
     # Collect RIR files
     rir_files = []
-    if args.rir_dirs:
+    if args.rir_list:
+        print(f"Reading RIR file list: {args.rir_list}")
+        rir_files = read_file_list(args.rir_list)
+    elif args.rir_dirs:
         print(f"Scanning RIR directories: {args.rir_dirs}")
         rir_files = find_audio_files(args.rir_dirs, recursive=not args.no_recursive)
     elif args.rir_hdf5:
