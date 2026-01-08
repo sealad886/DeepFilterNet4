@@ -176,17 +176,21 @@ class ShardedAudioCache:
     def __len__(self) -> int:
         return len(self.files)
 
-    def _load_shard(self, shard_name: str) -> Dict[str, np.ndarray]:
-        """Load a shard from disk or cache."""
-        with self._lock:
-            if shard_name in self._shard_cache:
-                # Move to end (most recently used)
-                self._shard_access.remove(shard_name)
-                self._shard_access.append(shard_name)
-                return self._shard_cache[shard_name]
+    def _load_shard(self, shard_rel_path: str) -> Dict[str, np.ndarray]:
+        """Load a shard from disk or cache.
 
-        # Load from disk
-        shard_path = self.shard_dir / shard_name
+        Args:
+            shard_rel_path: Relative path from cache_dir (e.g., "speech/shard_0000.npz")
+        """
+        with self._lock:
+            if shard_rel_path in self._shard_cache:
+                # Move to end (most recently used)
+                self._shard_access.remove(shard_rel_path)
+                self._shard_access.append(shard_rel_path)
+                return self._shard_cache[shard_rel_path]
+
+        # Load from disk (shard_rel_path is relative to cache_dir)
+        shard_path = self.cache_dir / shard_rel_path
         shard_data = dict(np.load(shard_path))
 
         with self._lock:
@@ -195,8 +199,8 @@ class ShardedAudioCache:
                 oldest = self._shard_access.pop(0)
                 del self._shard_cache[oldest]
 
-            self._shard_cache[shard_name] = shard_data
-            self._shard_access.append(shard_name)
+            self._shard_cache[shard_rel_path] = shard_data
+            self._shard_access.append(shard_rel_path)
 
         return shard_data
 

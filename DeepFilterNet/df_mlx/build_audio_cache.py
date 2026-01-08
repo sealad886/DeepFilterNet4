@@ -100,8 +100,9 @@ class ShardWriter:
         with self._lock:
             key = f"audio_{len(self.current_shard):05d}"
             self.current_shard[key] = audio
-            shard_name = f"shard_{self.current_shard_idx:04d}.npz"
-            self.index[original_path] = (shard_name, key)
+            # Store relative path: category/shard_NNNN.npz
+            shard_rel_path = f"{self.category}/shard_{self.current_shard_idx:04d}.npz"
+            self.index[original_path] = (shard_rel_path, key)
 
             if len(self.current_shard) >= self.shard_size:
                 self._flush_shard()
@@ -190,13 +191,14 @@ def build_cache_for_category(
         files_to_process = [f for f in file_list if f not in existing_paths]
         skipped_count = len(file_list) - len(files_to_process)
 
-        # Find highest existing shard index
+        # Find highest existing shard index for this category
         existing_shards = set()
         for shard_file, _ in existing_index.values():
-            # shard_file format: "speech/shard_0000.npz"
-            shard_name = Path(shard_file).stem  # "shard_0000"
-            shard_num = int(shard_name.split("_")[1])
-            existing_shards.add(shard_num)
+            # shard_file format: "category/shard_0000.npz"
+            shard_path = Path(shard_file)
+            if shard_path.parent.name == category:
+                shard_num = int(shard_path.stem.split("_")[1])
+                existing_shards.add(shard_num)
 
         resume_from_shard = max(existing_shards) + 1 if existing_shards else 0
         print(f"\nResuming {category}: {skipped_count:,} already cached, {len(files_to_process):,} remaining")
