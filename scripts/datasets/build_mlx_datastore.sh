@@ -1,31 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build MLX datastore or generate file lists for DeepFilterNet training.
+# Build MLX audio cache for DeepFilterNet training.
 #
-# Two modes available:
-#   1. DYNAMIC (default): Generate file lists for on-the-fly mixing
-#      - Matches original Rust DataLoader behavior
-#      - Full dataset diversity each epoch
-#      - No pre-computation required
+# This creates a pre-processed audio cache that enables:
+# - FAST loading: Pre-resampled numpy arrays in sharded NPZ files
+# - DYNAMIC mixing: Speech + noise + RIR combined at training time
+# - FULL DIVERSITY: Different combinations each epoch (like original Rust)
 #
-#   2. PRECOMPUTE: Pre-compute spectral features in sharded format
-#      - Faster training startup
-#      - Fixed noise/SNR combinations
-#      - Limited diversity
+# The cache stores processed audio arrays, NOT pre-computed features.
+# Features (STFT, ERB, DF) are computed dynamically during training.
 #
 # Requirements:
 #   - Python environment with: numpy, scipy, soundfile, tqdm
 #   - Audio file lists (clean speech, noise, optional RIR)
 #
 # Usage:
-#   ./build_mlx_datastore.sh                    # Dynamic mode (default)
-#   MODE=precompute ./build_mlx_datastore.sh   # Pre-computed mode
+#   ./build_mlx_datastore.sh
 #
 # Environment variables:
-#   MODE          - Build mode: dynamic | precompute (default: dynamic)
 #   DATA_DIR      - Base data directory (default: /Volumes/TrainingData/datasets)
-#   OUTPUT_DIR    - Output directory for MLX datastore/file lists
+#   OUTPUT_DIR    - Output directory for audio cache
 #   LIST_DIR      - Directory containing file lists
 #   PROFILE       - Build profile: prototype | production | apple (default: apple)
 
@@ -35,12 +30,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # Configuration
 # ============================================================================
 
-# Build mode
-MODE="${MODE:-dynamic}"
-
 # Data paths
 DATA_DIR="${DATA_DIR:-/Volumes/TrainingData/datasets}"
-OUTPUT_DIR="${OUTPUT_DIR:-${DATA_DIR}/mlx_datastore}"
+OUTPUT_DIR="${OUTPUT_DIR:-${DATA_DIR}/mlx_audio_cache}"
 LIST_DIR="${LIST_DIR:-${DATA_DIR}/lists}"
 
 # Build profile
@@ -48,28 +40,17 @@ PROFILE="${PROFILE:-apple}"
 
 # Audio parameters
 SR="${SR:-48000}"
-FFT_SIZE="${FFT_SIZE:-960}"
-HOP_SIZE="${HOP_SIZE:-480}"
-NB_ERB="${NB_ERB:-32}"
-NB_DF="${NB_DF:-96}"
-
-# Training data parameters
-SNR_MIN="${SNR_MIN:--5}"
-SNR_MAX="${SNR_MAX:-25}"
-RIR_PROB="${RIR_PROB:-0.5}"
 SEGMENT_LENGTH="${SEGMENT_LENGTH:-5.0}"
 
-# Dataset splits
-TRAIN_SPLIT="${TRAIN_SPLIT:-0.9}"
-VALID_SPLIT="${VALID_SPLIT:-0.05}"
+# Mixing parameters (stored in config.json for training)
+SNR_MIN="${SNR_MIN:--5}"
+SNR_MAX="${SNR_MAX:-40}"
+RIR_PROB="${RIR_PROB:-0.5}"
 
 # File lists
 CLEAN_LIST="${CLEAN_LIST:-${LIST_DIR}/clean_all.txt}"
 NOISE_LIST="${NOISE_LIST:-${LIST_DIR}/noise_music.txt}"
 RIR_LIST="${RIR_LIST:-${LIST_DIR}/rir_all.txt}"
-
-# Random seed for reproducibility
-SEED="${SEED:-42}"
 
 # ============================================================================
 # Profile-specific settings
@@ -78,49 +59,42 @@ SEED="${SEED:-42}"
 case "${PROFILE}" in
   prototype)
     # Quick test build
-    MAX_SAMPLES="${MAX_SAMPLES:-1000}"
-    SAMPLES_PER_SHARD=${SAMPLES_PER_SHARD:-100}
     NUM_WORKERS=${NUM_WORKERS:-1}
+    SHARD_SIZE=${SHARD_SIZE:-100}
     ;;
   production)
     # Full dataset build
-    NUM_WORKERS=${NUM_WORKERS:-4}
-    SAMPLES_PER_SHARD=${SAMPLES_PER_SHARD:-1000}
+    NUM_WORKERS=${NUM_WORKERS:-8}
+    SHARD_SIZE=${SHARD_SIZE:-500}
     ;;
   apple)
     # Apple Silicon optimized (memory-friendly)
-    NUM_WORKERS=${NUM_WORKERS:-2}
-    SAMPLES_PER_SHARD=${SAMPLES_PER_SHARD:-500}
+    NUM_WORKERS=${NUM_WORKERS:-4}
+    SHARD_SIZE=${SHARD_SIZE:-500}
     ;;
 esac
 
 # Performance tuning
-SAMPLES_PER_SHARD="${SAMPLES_PER_SHARD:-500}"
-NUM_WORKERS="${NUM_WORKERS:-2}"
-MAX_SAMPLES="${MAX_SAMPLES:-}"  # Empty = process all
+SHARD_SIZE="${SHARD_SIZE:-500}"
+NUM_WORKERS="${NUM_WORKERS:-4}"
 
 # ============================================================================
 # Validation
 # ============================================================================
 
 echo "=============================================="
-echo "DeepFilterNet MLX Datastore Builder"
+echo "DeepFilterNet MLX Audio Cache Builder"
 echo "=============================================="
-echo "Mode:           ${MODE}"
 echo "Profile:        ${PROFILE}"
 echo "Data dir:       ${DATA_DIR}"
 echo "Output dir:     ${OUTPUT_DIR}"
 echo "List dir:       ${LIST_DIR}"
 echo "Sample rate:    ${SR} Hz"
-echo "FFT/Hop:        ${FFT_SIZE}/${HOP_SIZE}"
-echo "ERB/DF bands:   ${NB_ERB}/${NB_DF}"
-echo "SNR range:      [${SNR_MIN}, ${SNR_MAX}] dB"
 echo "Segment length: ${SEGMENT_LENGTH}s"
-echo "Train/Valid:    ${TRAIN_SPLIT}/${VALID_SPLIT}"
+echo "SNR range:      [${SNR_MIN}, ${SNR_MAX}] dB"
+echo "RIR prob:       ${RIR_PROB}"
 echo "Workers:        ${NUM_WORKERS}"
-if [[ -n "${MAX_SAMPLES}" ]]; then
-  echo "Max samples:    ${MAX_SAMPLES}"
-fi
+echo "Shard size:     ${SHARD_SIZE}"
 echo "=============================================="
 
 # Check file lists exist
@@ -152,114 +126,51 @@ else
 fi
 
 # ============================================================================
-# Build based on mode
+# Build audio cache
 # ============================================================================
 
 mkdir -p "${OUTPUT_DIR}"
 
 echo ""
-echo "Starting build..."
+echo "Starting audio cache build..."
+echo ""
+echo "This pre-processes all audio files (resample, normalize) and saves"
+echo "them in sharded NPZ format for efficient loading during training."
+echo ""
+echo "The actual mixing (speech + noise + RIR @ random SNR) happens"
+echo "dynamically during training - giving full diversity each epoch."
 echo ""
 
 cd "${ROOT_DIR}/DeepFilterNet"
 
-if [[ "${MODE}" == "dynamic" ]]; then
-  # ========================================================================
-  # DYNAMIC MODE: Generate file lists for on-the-fly mixing
-  # ========================================================================
-  echo "Mode: DYNAMIC (on-the-fly mixing)"
-  echo "  - Matches original Rust DataLoader behavior"
-  echo "  - Full dataset diversity each epoch"
-  echo "  - No pre-computation required"
-  echo ""
+python -m df_mlx.build_audio_cache \
+  --speech-list "${CLEAN_LIST}" \
+  --noise-list "${NOISE_LIST}" \
+  ${RIR_ARG} \
+  --output-dir "${OUTPUT_DIR}" \
+  --sample-rate "${SR}" \
+  --segment-length "${SEGMENT_LENGTH}" \
+  --shard-size "${SHARD_SIZE}" \
+  --num-workers "${NUM_WORKERS}" \
+  --snr-min "${SNR_MIN}" \
+  --snr-max "${SNR_MAX}" \
+  --p-reverb "${RIR_PROB}"
 
-  # Generate file lists and config
-  python -m df_mlx.generate_file_lists \
-    --speech-list "${CLEAN_LIST}" \
-    --noise-list "${NOISE_LIST}" \
-    ${RIR_ARG:+--rir-list "${RIR_LIST}"} \
-    --output-dir "${OUTPUT_DIR}" \
-    --sample-rate "${SR}" \
-    --segment-length "${SEGMENT_LENGTH}" \
-    --p-reverb "${RIR_PROB}" \
-    --generate-config
-
-  echo ""
-  echo "=============================================="
-  echo "Build complete!"
-  echo "=============================================="
-  echo "File lists:     ${OUTPUT_DIR}"
-  echo "Config:         ${OUTPUT_DIR}/config.json"
-  echo ""
-  echo "To start training with DYNAMIC on-the-fly mixing:"
-  echo "  python -m df_mlx.train_dynamic \\"
-  echo "    --config ${OUTPUT_DIR}/config.json \\"
-  echo "    --epochs 100 \\"
-  echo "    --batch-size 8 \\"
-  echo "    --p-reverb ${RIR_PROB}"
-  echo ""
-  echo "Or with file lists directly:"
-  echo "  python -m df_mlx.train_dynamic \\"
-  echo "    --speech-list ${OUTPUT_DIR}/speech_files.txt \\"
-  echo "    --noise-list ${OUTPUT_DIR}/noise_files.txt \\"
-  if [[ -f "${RIR_LIST}" ]]; then
-    echo "    --rir-list ${OUTPUT_DIR}/rir_files.txt \\"
-  fi
-  echo "    --epochs 100 \\"
-  echo "    --batch-size 8"
-  echo "=============================================="
-
-else
-  # ========================================================================
-  # PRECOMPUTE MODE: Pre-compute spectral features
-  # ========================================================================
-  echo "Mode: PRECOMPUTE (pre-computed features)"
-  echo "  - Faster training startup"
-  echo "  - Fixed noise/SNR combinations"
-  echo "  - Limited diversity"
-  echo ""
-
-  # Construct max samples argument
-  MAX_SAMPLES_ARG=""
-  if [[ -n "${MAX_SAMPLES}" ]]; then
-    MAX_SAMPLES_ARG="--max-samples ${MAX_SAMPLES}"
-  fi
-
-  python -m df_mlx.prepare_data \
-    --speech-list "${CLEAN_LIST}" \
-    --noise-list "${NOISE_LIST}" \
-    ${RIR_ARG} \
-    --output-dir "${OUTPUT_DIR}" \
-    --sample-rate "${SR}" \
-    --fft-size "${FFT_SIZE}" \
-    --hop-size "${HOP_SIZE}" \
-    --nb-erb "${NB_ERB}" \
-    --nb-df "${NB_DF}" \
-    --snr-min "${SNR_MIN}" \
-    --snr-max "${SNR_MAX}" \
-    --rir-prob "${RIR_PROB}" \
-    --train-split "${TRAIN_SPLIT}" \
-    --valid-split "${VALID_SPLIT}" \
-    --samples-per-shard "${SAMPLES_PER_SHARD}" \
-    --segment-length "${SEGMENT_LENGTH}" \
-    --seed "${SEED}" \
-    --num-workers "${NUM_WORKERS}" \
-    ${MAX_SAMPLES_ARG}
-
-  echo ""
-  echo "=============================================="
-  echo "Build complete!"
-  echo "=============================================="
-  echo "Datastore:  ${OUTPUT_DIR}"
-  echo "Index:      ${OUTPUT_DIR}/index.json"
-  echo ""
-  echo "To start training with PRE-COMPUTED datastore:"
-  echo "  python -m df_mlx.train_with_data \\"
-  echo "    --datastore ${OUTPUT_DIR} \\"
-  echo "    --epochs 100 \\"
-  echo "    --batch-size 8"
-  echo ""
-  echo "NOTE: For better diversity, consider using dynamic mode instead:"
-  echo "  MODE=dynamic ./build_mlx_datastore.sh"
-  echo "=============================================="
-fi
+echo ""
+echo "=============================================="
+echo "Build complete!"
+echo "=============================================="
+echo "Audio cache:  ${OUTPUT_DIR}"
+echo "Config:       ${OUTPUT_DIR}/config.json"
+echo ""
+echo "To start training with DYNAMIC mixing:"
+echo "  python -m df_mlx.train_dynamic \\"
+echo "    --cache-dir ${OUTPUT_DIR} \\"
+echo "    --epochs 100 \\"
+echo "    --batch-size 8"
+echo ""
+echo "Key advantages over pre-computed datastores:"
+echo "  - Full dataset diversity (all files available each epoch)"
+echo "  - Different noise/SNR/RIR combinations each epoch"
+echo "  - Matches original Rust DataLoader behavior"
+echo "=============================================="

@@ -36,6 +36,7 @@ import json
 import random
 import threading
 from dataclasses import dataclass, field
+from pathlib import Path
 from queue import Queue
 from typing import Dict, Iterator, List, Optional, Tuple
 
@@ -79,7 +80,10 @@ except ImportError:
 class DatasetConfig:
     """Configuration for dynamic dataset."""
 
-    # File lists
+    # Cache directory (preferred - from build_audio_cache.py)
+    cache_dir: Optional[str] = None
+
+    # File lists (used if cache_dir is None - slower, loads raw audio)
     speech_files: List[str] = field(default_factory=list)
     noise_files: List[str] = field(default_factory=list)
     rir_files: List[str] = field(default_factory=list)
@@ -121,7 +125,10 @@ class DatasetConfig:
         """Load config from JSON file."""
         with open(path) as f:
             data = json.load(f)
-        return cls(**data)
+        # Handle cache_dir from build_audio_cache.py
+        if "cache_dir" in data:
+            data["cache_dir"] = data["cache_dir"]
+        return cls(**{k: v for k, v in data.items() if hasattr(cls, k) or k == "cache_dir"})
 
     def to_json(self, path: str) -> None:
         """Save config to JSON file."""
@@ -129,11 +136,96 @@ class DatasetConfig:
             json.dump(self.__dict__, f, indent=2)
 
 
+class ShardedAudioCache:
+    """Load audio from pre-built sharded NPZ cache.
+
+    This is the efficient loader that reads from the cache created by
+    build_audio_cache.py. Audio is pre-processed (resampled, normalized)
+    so loading is just a numpy array read.
+    """
+
+    def __init__(self, cache_dir: str, category: str):
+        """Initialize cache loader.
+
+        Args:
+            cache_dir: Path to cache directory (containing index.json)
+            category: 'speech', 'noise', or 'rir'
+        """
+        self.cache_dir = Path(cache_dir)
+        self.category = category
+        self.shard_dir = self.cache_dir / category
+
+        # Load index
+        index_path = self.cache_dir / "index.json"
+        with open(index_path) as f:
+            all_indices = json.load(f)
+
+        self.index: Dict[str, Tuple[str, str]] = {}
+        if category in all_indices:
+            self.index = {k: tuple(v) for k, v in all_indices[category].items()}
+
+        # Get list of available files
+        self.files = list(self.index.keys())
+
+        # Cache for loaded shards (keep a few in memory)
+        self._shard_cache: Dict[str, Dict[str, np.ndarray]] = {}
+        self._shard_access: List[str] = []
+        self._max_shards = 10  # Keep up to 10 shards in memory
+        self._lock = threading.Lock()
+
+    def __len__(self) -> int:
+        return len(self.files)
+
+    def _load_shard(self, shard_name: str) -> Dict[str, np.ndarray]:
+        """Load a shard from disk or cache."""
+        with self._lock:
+            if shard_name in self._shard_cache:
+                # Move to end (most recently used)
+                self._shard_access.remove(shard_name)
+                self._shard_access.append(shard_name)
+                return self._shard_cache[shard_name]
+
+        # Load from disk
+        shard_path = self.shard_dir / shard_name
+        shard_data = dict(np.load(shard_path))
+
+        with self._lock:
+            # Evict oldest if at capacity
+            while len(self._shard_cache) >= self._max_shards:
+                oldest = self._shard_access.pop(0)
+                del self._shard_cache[oldest]
+
+            self._shard_cache[shard_name] = shard_data
+            self._shard_access.append(shard_name)
+
+        return shard_data
+
+    def load(self, path: str) -> np.ndarray:
+        """Load audio array by original file path."""
+        if path not in self.index:
+            raise KeyError(f"File not in cache: {path}")
+
+        shard_name, key = self.index[path]
+        shard_data = self._load_shard(shard_name)
+        return shard_data[key]
+
+    def load_random(self) -> np.ndarray:
+        """Load a random audio file from the cache."""
+        path = random.choice(self.files)
+        return self.load(path)
+
+    def clear(self) -> None:
+        """Clear the shard cache."""
+        with self._lock:
+            self._shard_cache.clear()
+            self._shard_access.clear()
+
+
 class AudioCache:
     """Thread-safe LRU cache for loaded audio files.
 
-    Caches recently used audio to avoid repeated disk reads while
-    maintaining memory bounds.
+    DEPRECATED: Use ShardedAudioCache with pre-built cache instead.
+    This class is kept for compatibility with raw audio file loading.
     """
 
     def __init__(self, max_size: int = 1000, sample_rate: int = 48000):
@@ -786,6 +878,10 @@ class DynamicDataset:
     - Full dataset diversity (no fixed cache)
     - Thread-safe prefetching
     - Configurable augmentations
+
+    Supports two modes:
+    1. Sharded cache (fast): Load from pre-built NPZ cache (build_audio_cache.py)
+    2. Raw files (slow): Load from raw audio files on disk
     """
 
     def __init__(self, config: DatasetConfig):
@@ -795,11 +891,34 @@ class DynamicDataset:
         self.fft_size = config.fft_size
         self.hop_size = config.hop_size
 
+        # Determine loading mode
+        self._use_cache = config.cache_dir is not None
+
+        if self._use_cache:
+            # Fast path: load from sharded NPZ cache
+            self.speech_cache = ShardedAudioCache(config.cache_dir, "speech")
+            self.noise_cache = ShardedAudioCache(config.cache_dir, "noise")
+
+            # RIR cache is optional
+            rir_cache_dir = Path(config.cache_dir) / "rir"
+            if rir_cache_dir.exists():
+                self.rir_cache = ShardedAudioCache(config.cache_dir, "rir")
+            else:
+                self.rir_cache = None
+
+            # Use files from cache index
+            config.speech_files = self.speech_cache.files
+            config.noise_files = self.noise_cache.files
+            if self.rir_cache:
+                config.rir_files = self.rir_cache.files
+        else:
+            # Slow path: load from raw audio files
+            self.audio_cache = AudioCache(max_size=2000, sample_rate=config.sample_rate)
+
         # Split files into train/valid/test
         self._split_files()
 
         # Initialize components
-        self.audio_cache = AudioCache(max_size=2000, sample_rate=config.sample_rate)
         self.noise_generator = NoiseGenerator(sample_rate=config.sample_rate)
         self.reverb = ReverbSimulator(
             sample_rate=config.sample_rate,
@@ -862,13 +981,29 @@ class DynamicDataset:
     def __len__(self) -> int:
         return len(self.splits[self._current_split])
 
+    def _load_audio(self, path: str, cache_type: str = "speech") -> np.ndarray:
+        """Load audio from cache or raw file.
+
+        Args:
+            path: File path (original path, used as key in cache)
+            cache_type: 'speech', 'noise', or 'rir'
+        """
+        if self._use_cache:
+            if cache_type == "speech":
+                return self.speech_cache.load(path)
+            elif cache_type == "noise":
+                return self.noise_cache.load(path)
+            elif cache_type == "rir" and self.rir_cache:
+                return self.rir_cache.load(path)
+        return self.audio_cache.load(path)
+
     def _load_speech(self, idx: int) -> Optional[np.ndarray]:
         """Load and prepare a speech sample."""
         files = self.splits[self._current_split]
         path = files[idx]
 
         try:
-            audio = self.audio_cache.load(path)
+            audio = self._load_audio(path, "speech")
 
             # Skip if too short
             if len(audio) < self.segment_samples:
@@ -899,7 +1034,7 @@ class DynamicDataset:
 
         path = self._rng.choice(noise_files)
         try:
-            noise = self.audio_cache.load(path)
+            noise = self._load_audio(path, "noise")
             gain = self._rng.uniform(*self.config.gain_range)
             return noise, gain
         except Exception:
@@ -914,7 +1049,7 @@ class DynamicDataset:
 
         path = self._rng.choice(rir_files)
         try:
-            return self.audio_cache.load(path)
+            return self._load_audio(path, "rir")
         except Exception:
             return None
 

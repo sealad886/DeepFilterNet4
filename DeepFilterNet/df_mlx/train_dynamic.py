@@ -136,6 +136,7 @@ def load_checkpoint(model: nn.Module, path: str | Path) -> dict:
 
 
 def train(
+    cache_dir: str | None = None,
     speech_list: str | None = None,
     noise_list: str | None = None,
     rir_list: str | None = None,
@@ -157,9 +158,10 @@ def train(
     """Train DfNet4 model with dynamic on-the-fly mixing.
 
     Args:
-        speech_list: Path to file containing speech file paths
-        noise_list: Path to file containing noise file paths
-        rir_list: Path to file containing RIR file paths
+        cache_dir: Path to pre-built audio cache (from build_audio_cache.py)
+        speech_list: Path to file containing speech file paths (if no cache)
+        noise_list: Path to file containing noise file paths (if no cache)
+        rir_list: Path to file containing RIR file paths (if no cache)
         config_path: Optional path to JSON config file
         epochs: Number of training epochs
         batch_size: Batch size
@@ -184,12 +186,22 @@ def train(
     print("=" * 60)
 
     # Load or create config
-    if config_path:
+    if cache_dir:
+        # Load config from pre-built audio cache
+        cache_path = Path(cache_dir)
+        config_file = cache_path / "config.json"
+        if config_file.exists():
+            config = DatasetConfig.from_json(str(config_file))
+            config.cache_dir = cache_dir
+            print(f"Loaded config from cache: {cache_dir}")
+        else:
+            raise ValueError(f"Cache config not found: {config_file}")
+    elif config_path:
         config = DatasetConfig.from_json(config_path)
         print(f"Loaded config from: {config_path}")
     else:
         if not speech_list:
-            raise ValueError("Either --config or --speech-list required")
+            raise ValueError("Either --cache-dir, --config, or --speech-list required")
 
         speech_files = read_file_list(speech_list)
         noise_files = read_file_list(noise_list) if noise_list else []
@@ -457,7 +469,12 @@ def train(
 def main():
     parser = argparse.ArgumentParser(description="Train DfNet4 with dynamic on-the-fly mixing")
 
-    # Data sources
+    # Data sources (priority: cache_dir > config > file lists)
+    parser.add_argument(
+        "--cache-dir",
+        type=str,
+        help="Path to pre-built audio cache (from build_audio_cache.py)",
+    )
     parser.add_argument(
         "--speech-list",
         type=str,
@@ -565,6 +582,7 @@ def main():
     args = parser.parse_args()
 
     train(
+        cache_dir=args.cache_dir,
         speech_list=args.speech_list,
         noise_list=args.noise_list,
         rir_list=args.rir_list,
