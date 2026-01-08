@@ -643,3 +643,439 @@ class Unsqueeze(nn.Module):
 
     def __call__(self, x: mx.array) -> mx.array:
         return mx.expand_dims(x, axis=self.dim)
+
+
+# ============================================================================
+# GRU-based Modules (for legacy DFNet1/2/3 support)
+# ============================================================================
+
+
+class GroupedGRULayer(nn.Module):
+    """Single layer of grouped GRU.
+
+    Splits input into groups and processes each group with a separate GRU.
+    This reduces parameters while maintaining capacity for sequence modeling.
+
+    Note: MLX's GRU is unidirectional only. Bidirectional support requires
+    manual implementation with sequence reversal.
+
+    Args:
+        input_size: Total input feature dimension
+        hidden_size: Total hidden state dimension
+        groups: Number of groups to split input/hidden
+        batch_first: If True, input is (batch, time, features)
+        bias: Whether to use bias in GRU
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: int,
+        groups: int = 4,
+        batch_first: bool = True,
+        bias: bool = True,
+    ):
+        super().__init__()
+
+        assert input_size % groups == 0, f"input_size {input_size} not divisible by {groups}"
+        assert hidden_size % groups == 0, f"hidden_size {hidden_size} not divisible by {groups}"
+
+        self.input_size_per_group = input_size // groups
+        self.hidden_size_per_group = hidden_size // groups
+        self.out_size = hidden_size
+        self.groups = groups
+        self.batch_first = batch_first
+
+        # Create GRU for each group
+        # MLX GRU: input_size, hidden_size, bias
+        self.grus = [
+            nn.GRU(
+                input_size=self.input_size_per_group,
+                hidden_size=self.hidden_size_per_group,
+                bias=bias,
+            )
+            for _ in range(groups)
+        ]
+
+    def get_h0(self, batch_size: int) -> mx.array:
+        """Get initial hidden state."""
+        return mx.zeros((self.groups, batch_size, self.hidden_size_per_group))
+
+    def __call__(self, x: mx.array, h0: Optional[mx.array] = None) -> Tuple[mx.array, mx.array]:
+        """Forward pass.
+
+        Args:
+            x: Input tensor (batch, time, features) if batch_first
+            h0: Initial hidden state (groups, batch, hidden_per_group)
+
+        Returns:
+            output: (batch, time, hidden_size)
+            hidden: (groups, batch, hidden_per_group)
+        """
+        if self.batch_first:
+            batch_size, seq_len, _ = x.shape
+        else:
+            seq_len, batch_size, _ = x.shape
+            x = mx.transpose(x, (1, 0, 2))  # Convert to batch first
+
+        if h0 is None:
+            h0 = self.get_h0(batch_size)
+
+        outputs = []
+        out_states = []
+
+        for i, gru in enumerate(self.grus):
+            # Extract group's input
+            start = i * self.input_size_per_group
+            end = (i + 1) * self.input_size_per_group
+            x_group = x[..., start:end]
+
+            # Get group's hidden state
+            h_group = h0[i]  # (batch, hidden)
+
+            # Process with GRU - MLX GRU returns output (all timesteps)
+            # Hidden state is last output timestep
+            out = gru(x_group, h_group)  # (batch, time, hidden)
+            h_out = out[:, -1, :]  # (batch, hidden) - last timestep
+            outputs.append(out)
+            out_states.append(mx.expand_dims(h_out, axis=0))
+
+        # Concatenate outputs along feature dimension
+        output = mx.concatenate(outputs, axis=-1)
+        hidden = mx.concatenate(out_states, axis=0)
+
+        if not self.batch_first:
+            output = mx.transpose(output, (1, 0, 2))
+
+        return output, hidden
+
+
+class GroupedGRU(nn.Module):
+    """Multi-layer grouped GRU with optional shuffling.
+
+    Note: MLX's GRU is unidirectional. For consistency with PyTorch API,
+    bidirectional parameter is accepted but must be False.
+
+    Args:
+        input_size: Input feature dimension
+        hidden_size: Hidden state dimension
+        num_layers: Number of GRU layers
+        groups: Number of groups
+        bias: Whether to use bias
+        batch_first: If True, input is (batch, time, features)
+        bidirectional: Must be False (MLX GRU is unidirectional)
+        shuffle: Whether to shuffle features between layers
+        add_outputs: If True, add layer outputs; else use last layer output
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: int,
+        num_layers: int = 1,
+        groups: int = 4,
+        bias: bool = True,
+        batch_first: bool = True,
+        bidirectional: bool = False,
+        shuffle: bool = True,
+        add_outputs: bool = False,
+    ):
+        super().__init__()
+
+        if bidirectional:
+            raise ValueError("MLX GRU does not support bidirectional. Use bidirectional=False.")
+
+        assert input_size % groups == 0
+        assert hidden_size % groups == 0
+        assert num_layers > 0
+
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.hidden_size_per_group = hidden_size // groups
+        self.num_layers = num_layers
+        self.groups = groups
+        self.batch_first = batch_first
+        self.shuffle = shuffle if groups > 1 else False
+        self.add_outputs = add_outputs
+
+        # Create layers
+        self.layers = []
+        self.layers.append(
+            GroupedGRULayer(
+                input_size=input_size,
+                hidden_size=hidden_size,
+                groups=groups,
+                batch_first=batch_first,
+                bias=bias,
+            )
+        )
+        for _ in range(1, num_layers):
+            self.layers.append(
+                GroupedGRULayer(
+                    input_size=hidden_size,
+                    hidden_size=hidden_size,
+                    groups=groups,
+                    batch_first=batch_first,
+                    bias=bias,
+                )
+            )
+
+    def get_h0(self, batch_size: int) -> mx.array:
+        """Get initial hidden state for all layers."""
+        return mx.zeros(
+            (
+                self.num_layers * self.groups,
+                batch_size,
+                self.hidden_size_per_group,
+            )
+        )
+
+    def _shuffle_features(self, x: mx.array) -> mx.array:
+        """Shuffle features between groups.
+
+        Reshapes to (batch, time, hidden_per_group, groups),
+        transposes groups and hidden, then flattens back.
+        """
+        shape = x.shape
+        x = x.reshape(shape[0], shape[1], self.groups, -1)
+        x = mx.transpose(x, (0, 1, 3, 2))
+        x = x.reshape(shape)
+        return x
+
+    def __call__(self, x: mx.array, state: Optional[mx.array] = None) -> Tuple[mx.array, mx.array]:
+        """Forward pass.
+
+        Args:
+            x: Input (batch, time, features) if batch_first
+            state: Hidden state for all layers
+
+        Returns:
+            output: (batch, time, hidden_size)
+            state: Updated hidden state
+        """
+        if self.batch_first:
+            batch_size, seq_len, _ = x.shape
+        else:
+            batch_size = x.shape[1]
+
+        if state is None:
+            state = self.get_h0(batch_size)
+
+        states_per_layer = self.groups
+        output = mx.zeros_like(x[..., : self.hidden_size])
+        out_states = []
+
+        for i, layer in enumerate(self.layers):
+            layer_state = state[i * states_per_layer : (i + 1) * states_per_layer]
+            x, s = layer(x, layer_state)
+            out_states.append(s)
+
+            # Shuffle between layers (except last)
+            if self.shuffle and i < self.num_layers - 1:
+                x = self._shuffle_features(x)
+
+            if self.add_outputs:
+                output = output + x
+            else:
+                output = x
+
+        out_state = mx.concatenate(out_states, axis=0)
+        return output, out_state
+
+
+class SqueezedGRU(nn.Module):
+    """GRU with input/output linear projections.
+
+    Compresses input through a linear layer, processes with GRU,
+    then expands through another linear layer. This is more efficient
+    than using a large GRU directly.
+
+    Args:
+        input_size: Input feature dimension
+        hidden_size: GRU hidden dimension
+        output_size: Output dimension (None = hidden_size)
+        num_layers: Number of GRU layers
+        linear_groups: Number of groups for linear projections
+        batch_first: If True, input is (batch, time, features)
+        gru_skip: If True, add skip connection around GRU
+        linear_act: Activation for linear layers ("relu", "gelu", None)
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: int,
+        output_size: Optional[int] = None,
+        num_layers: int = 1,
+        linear_groups: int = 8,
+        batch_first: bool = True,
+        gru_skip: bool = False,
+        linear_act: Optional[str] = None,
+    ):
+        super().__init__()
+
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.output_size = output_size or hidden_size
+        self.gru_skip = gru_skip
+
+        # Input projection
+        self.linear_in = GroupedLinear(input_size, hidden_size, linear_groups)
+
+        # Activation after input projection
+        if linear_act == "relu":
+            self.linear_act = nn.ReLU()
+        elif linear_act == "gelu":
+            self.linear_act = nn.GELU()
+        elif linear_act == "silu":
+            self.linear_act = nn.SiLU()
+        else:
+            self.linear_act = None
+
+        # GRU
+        self.gru = nn.GRU(
+            input_size=hidden_size,
+            hidden_size=hidden_size,
+            bias=True,
+        )
+
+        # Output projection
+        if output_size is not None and output_size != hidden_size:
+            self.linear_out = GroupedLinear(hidden_size, output_size, linear_groups)
+        else:
+            self.linear_out = None
+
+    def __call__(self, x: mx.array, h: Optional[mx.array] = None) -> Tuple[mx.array, mx.array]:
+        """Forward pass.
+
+        Args:
+            x: Input (batch, time, input_size)
+            h: Hidden state (batch, hidden_size)
+
+        Returns:
+            output: (batch, time, output_size)
+            hidden: (batch, hidden_size)
+        """
+        # Input projection
+        projected = self.linear_in(x)
+        if self.linear_act is not None:
+            projected = self.linear_act(projected)
+
+        # GRU - MLX GRU returns output, not tuple
+        out = self.gru(projected, h)  # (batch, time, hidden)
+        h_out = out[:, -1, :]  # (batch, hidden) - last timestep
+
+        # Skip connection
+        if self.gru_skip:
+            out = out + projected
+
+        # Output projection
+        if self.linear_out is not None:
+            out = self.linear_out(out)
+            if self.linear_act is not None:
+                out = self.linear_act(out)
+
+        return out, h_out
+
+
+class SqueezedGRU_S(nn.Module):
+    """SqueezedGRU with skip connection after output (variant S).
+
+    Unlike SqueezedGRU, the skip connection is added after the
+    output projection, connecting input directly to output.
+
+    Args:
+        input_size: Input feature dimension
+        hidden_size: GRU hidden dimension
+        output_size: Output dimension (None = hidden_size)
+        num_layers: Number of GRU layers
+        linear_groups: Number of groups for linear projections
+        batch_first: If True, input is (batch, time, features)
+        gru_skip: If True, add skip from input to output
+        linear_act: Activation for linear layers
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: int,
+        output_size: Optional[int] = None,
+        num_layers: int = 1,
+        linear_groups: int = 8,
+        batch_first: bool = True,
+        gru_skip: bool = False,
+        linear_act: Optional[str] = None,
+    ):
+        super().__init__()
+
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.output_size = output_size or hidden_size
+        self.gru_skip = gru_skip
+
+        # Input projection
+        self.linear_in = GroupedLinear(input_size, hidden_size, linear_groups)
+
+        # Activation
+        if linear_act == "relu":
+            self.linear_act = nn.ReLU()
+        elif linear_act == "gelu":
+            self.linear_act = nn.GELU()
+        elif linear_act == "silu":
+            self.linear_act = nn.SiLU()
+        else:
+            self.linear_act = None
+
+        # GRU
+        self.gru = nn.GRU(
+            input_size=hidden_size,
+            hidden_size=hidden_size,
+            bias=True,
+        )
+
+        # Output projection
+        if output_size is not None and output_size != hidden_size:
+            self.linear_out = GroupedLinear(hidden_size, output_size, linear_groups)
+        else:
+            self.linear_out = None
+
+        # Skip projection (if input/output sizes differ)
+        if gru_skip and input_size != self.output_size:
+            self.skip_proj = nn.Linear(input_size, self.output_size)
+        else:
+            self.skip_proj = None
+
+    def __call__(self, x: mx.array, h: Optional[mx.array] = None) -> Tuple[mx.array, mx.array]:
+        """Forward pass.
+
+        Args:
+            x: Input (batch, time, input_size)
+            h: Hidden state (batch, hidden_size)
+
+        Returns:
+            output: (batch, time, output_size)
+            hidden: (batch, hidden_size)
+        """
+        # Input projection
+        projected = self.linear_in(x)
+        if self.linear_act is not None:
+            projected = self.linear_act(projected)
+
+        # GRU - MLX GRU returns output, not tuple
+        out = self.gru(projected, h)  # (batch, time, hidden)
+        h_out = out[:, -1, :]  # (batch, hidden) - last timestep
+
+        # Output projection
+        if self.linear_out is not None:
+            out = self.linear_out(out)
+            if self.linear_act is not None:
+                out = self.linear_act(out)
+
+        # Skip connection (after output)
+        if self.gru_skip:
+            if self.skip_proj is not None:
+                out = out + self.skip_proj(x)
+            else:
+                out = out + x
+
+        return out, h_out
