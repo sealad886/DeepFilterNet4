@@ -123,7 +123,9 @@ class AsyncShardWriter:
         # Remove any existing temp file from previous failed run
         if self._temp_path.exists():
             self._temp_path.unlink()
-        self._zip_file = zipfile.ZipFile(self._temp_path, "w", compression=zipfile.ZIP_DEFLATED)
+        # Use ZIP_STORED (no compression) - audio data doesn't compress well
+        # and ZIP_DEFLATED is extremely slow for large float32 arrays
+        self._zip_file = zipfile.ZipFile(self._temp_path, "w", compression=zipfile.ZIP_STORED)
         self.current_paths = []
         self.current_count = 0
 
