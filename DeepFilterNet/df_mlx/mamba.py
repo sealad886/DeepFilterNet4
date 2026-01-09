@@ -183,7 +183,7 @@ class MambaBlock(nn.Module):
         D: mx.array,  # (d_inner,)
         state: Optional[mx.array] = None,
     ) -> Tuple[mx.array, mx.array]:
-        """Selective scan (S6) algorithm.
+        """Selective scan (S6) algorithm using parallel associative scan.
 
         This is the core of Mamba - a selective state space model that can
         filter information based on input content.
@@ -192,7 +192,12 @@ class MambaBlock(nn.Module):
             h_t = A_bar * h_{t-1} + B_bar * x_t
             y_t = C * h_t + D * x_t
 
-        Where A_bar, B_bar depend on delta (the input-dependent time step).
+        This implementation uses the parallel scan algorithm based on the
+        associative property of linear recurrences. The recurrence
+        h_t = A_t * h_{t-1} + b_t can be computed with the binary operator:
+            (a1, b1) ⊗ (a2, b2) = (a2 * a1, a2 * b1 + b2)
+
+        This reduces complexity from O(L) sequential steps to O(log L) parallel.
 
         Args:
             u: Input tensor (batch, seq_len, d_inner)
@@ -215,37 +220,87 @@ class MambaBlock(nn.Module):
 
         # Discretize A and B
         # A_bar = exp(delta * A) for each position
-        # delta: (batch, seq_len, d_inner)
-        # A: (d_inner, d_state)
-        # A_bar: (batch, seq_len, d_inner, d_state)
+        # deltaA: (batch, seq_len, d_inner, d_state)
         deltaA = mx.exp(delta[:, :, :, None] * A[None, None, :, :])
 
         # B_bar = delta * B (simplified Euler discretization)
-        # B: (batch, seq_len, d_state)
-        # B_bar: (batch, seq_len, d_inner, d_state)
+        # deltaB_u: (batch, seq_len, d_inner, d_state)
         deltaB_u = delta[:, :, :, None] * B[:, :, None, :] * u[:, :, :, None]
 
-        # Sequential scan (this is the bottleneck - could be optimized)
-        outputs = []
-        h = state
+        # Parallel associative scan using iterative doubling
+        # For recurrence h_t = A_t * h_{t-1} + b_t, we track cumulative (A_cum, b_cum)
+        # Binary operator: (a1, b1) ⊗ (a2, b2) = (a2*a1, a2*b1 + b2)
+        #
+        # After scan, element i contains the cumulative (A_cum[i], b_cum[i]) such that:
+        #   h_i = A_cum[i] * h_0 + b_cum[i]
 
-        for t in range(seq_len):
-            # State update: h = A_bar * h + B_bar * u
-            h = deltaA[:, t, :, :] * h + deltaB_u[:, t, :, :]
+        # Pad sequence length to next power of 2 for efficient parallel scan
+        log2_L = math.ceil(math.log2(max(seq_len, 1)))
+        padded_len = 2**log2_L
+        pad_amount = padded_len - seq_len
 
-            # Output: y = C * h
-            # C: (batch, d_state) at time t
-            # h: (batch, d_inner, d_state)
-            y_t = mx.sum(h * C[:, t, None, :], axis=-1)  # (batch, d_inner)
-            outputs.append(y_t)
+        if pad_amount > 0:
+            # Pad with identity elements: A=1, b=0
+            pad_shape_A = (batch, pad_amount, d_inner, d_state)
+            pad_shape_b = (batch, pad_amount, d_inner, d_state)
+            deltaA = mx.concatenate([deltaA, mx.ones(pad_shape_A)], axis=1)
+            deltaB_u = mx.concatenate([deltaB_u, mx.zeros(pad_shape_b)], axis=1)
 
-        # Stack outputs
-        y = mx.stack(outputs, axis=1)  # (batch, seq_len, d_inner)
+        # Also pad C for output computation later
+        if pad_amount > 0:
+            C_padded = mx.concatenate([C, mx.zeros((batch, pad_amount, d_state))], axis=1)
+        else:
+            C_padded = C
+
+        # Up-sweep phase: compute all prefix products/sums
+        # After log2_L iterations, we have cumulative A and b at each position
+        A_scan = deltaA  # (batch, padded_len, d_inner, d_state)
+        b_scan = deltaB_u  # (batch, padded_len, d_inner, d_state)
+
+        # Iterative doubling for parallel prefix scan
+        for d in range(log2_L):
+            stride = 2**d
+            # Split into left and right halves at this stride
+            # A_left = A_scan[:, :-stride]
+            # A_right = A_scan[:, stride:]
+            # New values: A_right * A_left, A_right * b_left + b_right
+
+            # Get the "source" values (offset by stride)
+            A_left = A_scan[:, :-stride, :, :]
+            b_left = b_scan[:, :-stride, :, :]
+            A_right = A_scan[:, stride:, :, :]
+            b_right = b_scan[:, stride:, :, :]
+
+            # Apply binary operator to overlapping region
+            new_A = A_right * A_left
+            new_b = A_right * b_left + b_right
+
+            # Update the right portion (indices stride onwards)
+            # Keep first 'stride' elements unchanged
+            A_scan = mx.concatenate([A_scan[:, :stride, :, :], new_A], axis=1)
+            b_scan = mx.concatenate([b_scan[:, :stride, :, :], new_b], axis=1)
+
+        # Truncate back to original sequence length
+        A_scan = A_scan[:, :seq_len, :, :]
+        b_scan = b_scan[:, :seq_len, :, :]
+        C_padded = C_padded[:, :seq_len, :]
+
+        # Compute all hidden states in parallel
+        # h_t = A_cum[t] * h_0 + b_cum[t]
+        # state: (batch, d_inner, d_state) -> expand to (batch, 1, d_inner, d_state)
+        h_all = A_scan * state[:, None, :, :] + b_scan  # (batch, seq_len, d_inner, d_state)
+
+        # Final hidden state
+        h_final = h_all[:, -1, :, :]  # (batch, d_inner, d_state)
+
+        # Compute outputs: y_t = sum(h_t * C_t, axis=-1)
+        # C_padded: (batch, seq_len, d_state) -> (batch, seq_len, 1, d_state)
+        y = mx.sum(h_all * C_padded[:, :, None, :], axis=-1)  # (batch, seq_len, d_inner)
 
         # Add skip connection
         y = y + D[None, None, :] * u
 
-        return y, h
+        return y, h_final
 
 
 class Mamba(nn.Module):
