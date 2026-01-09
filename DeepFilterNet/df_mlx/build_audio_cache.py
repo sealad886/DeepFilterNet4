@@ -145,6 +145,14 @@ class ShardWriter:
         shard_path = self.shard_dir / f"shard_{self.current_shard_idx:04d}.npz"
         temp_path = shard_path.with_suffix(".npz.tmp")
 
+        # Skip if shard already exists (from previous run that got further than index)
+        if shard_path.exists():
+            print(f"    Shard {shard_path.name} already exists, skipping to next")
+            self.current_shard = {}
+            self.current_paths = []
+            self.current_shard_idx += 1
+            return
+
         # Include paths array in shard for index reconstruction
         shard_data = dict(self.current_shard)
         shard_data["__paths__"] = np.array(self.current_paths, dtype=object)
@@ -154,13 +162,17 @@ class ShardWriter:
         # If interrupted after write but before rename, temp file is left
         # Either way, shard_NNNN.npz is never corrupt
         try:
+            # Ensure shard directory exists
+            self.shard_dir.mkdir(parents=True, exist_ok=True)
             np.savez_compressed(temp_path, **shard_data)
+            if not temp_path.exists():
+                raise RuntimeError(f"np.savez_compressed did not create {temp_path}")
             temp_path.rename(shard_path)  # Atomic on POSIX
-        except Exception:
+        except Exception as e:
             # Clean up temp file on failure
             if temp_path.exists():
                 temp_path.unlink()
-            raise
+            raise RuntimeError(f"Failed to write shard {shard_path}: {e}") from e
 
         self.current_shard = {}
         self.current_paths = []
@@ -253,24 +265,36 @@ def build_cache_for_category(
         # Compare using index keys (relative paths if base_dir set)
         files_to_process = [f for f in file_list if to_index_key(f) not in existing_paths]
         skipped_count = len(file_list) - len(files_to_process)
-
-        # Find highest existing shard index for this category
-        existing_shards = set()
-        for shard_file, _ in existing_index.values():
-            # shard_file format: "category/shard_0000.npz"
-            shard_path = Path(shard_file)
-            if shard_path.parent.name == category:
-                shard_num = int(shard_path.stem.split("_")[1])
-                existing_shards.add(shard_num)
-
-        resume_from_shard = max(existing_shards) + 1 if existing_shards else 0
-        print(f"\nResuming {category}: {skipped_count:,} already cached, {len(files_to_process):,} remaining")
-        print(f"  Starting from shard index: {resume_from_shard}")
     else:
         files_to_process = file_list
         skipped_count = 0
-        resume_from_shard = 0
-        print(f"\nProcessing {category}: {len(file_list):,} files")
+
+    # Find highest existing shard index by scanning ACTUAL FILES on disk
+    # This handles cases where shards exist beyond what the index knows about
+    # (e.g., previous run wrote shards but crashed before updating index)
+    shard_dir = output_dir / category
+    existing_shard_nums = set()
+    if shard_dir.exists():
+        for shard_file in shard_dir.glob("shard_*.npz"):
+            try:
+                shard_num = int(shard_file.stem.split("_")[1])
+                existing_shard_nums.add(shard_num)
+            except (IndexError, ValueError):
+                pass  # Skip malformed shard names
+
+    resume_from_shard = max(existing_shard_nums) + 1 if existing_shard_nums else 0
+
+    if existing_index:
+        print(f"\nResuming {category}: {skipped_count:,} already cached, {len(files_to_process):,} remaining")
+        print(f"  Found {len(existing_shard_nums)} existing shards on disk")
+        print(f"  Starting from shard index: {resume_from_shard}")
+    else:
+        if existing_shard_nums:
+            print(f"\nProcessing {category}: {len(file_list):,} files")
+            print(f"  Found {len(existing_shard_nums)} existing shards on disk (no index)")
+            print(f"  Starting from shard index: {resume_from_shard}")
+        else:
+            print(f"\nProcessing {category}: {len(file_list):,} files")
 
     if not files_to_process:
         print("  All files already cached!")
