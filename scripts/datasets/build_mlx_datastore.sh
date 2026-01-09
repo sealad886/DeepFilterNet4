@@ -77,6 +77,7 @@ esac
 # Performance tuning
 SHARD_SIZE="${SHARD_SIZE:-500}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
+MAX_PENDING_BYTES="${MAX_PENDING_BYTES:-8}"  # GB
 
 # ============================================================================
 # Validation
@@ -85,16 +86,17 @@ NUM_WORKERS="${NUM_WORKERS:-4}"
 echo "=============================================="
 echo "DeepFilterNet MLX Audio Cache Builder"
 echo "=============================================="
-echo "Profile:        ${PROFILE}"
-echo "Data dir:       ${DATA_DIR}"
-echo "Output dir:     ${OUTPUT_DIR}"
-echo "List dir:       ${LIST_DIR}"
-echo "Sample rate:    ${SR} Hz"
-echo "Segment length: ${SEGMENT_LENGTH}s"
-echo "SNR range:      [${SNR_MIN}, ${SNR_MAX}] dB"
-echo "RIR prob:       ${RIR_PROB}"
-echo "Workers:        ${NUM_WORKERS}"
-echo "Shard size:     ${SHARD_SIZE}"
+echo "Profile:          ${PROFILE}"
+echo "Data dir:         ${DATA_DIR}"
+echo "Output dir:       ${OUTPUT_DIR}"
+echo "List dir:         ${LIST_DIR}"
+echo "Sample rate:      ${SR} Hz"
+echo "Segment length:   ${SEGMENT_LENGTH}s"
+echo "SNR range:        [${SNR_MIN}, ${SNR_MAX}] dB"
+echo "RIR prob:         ${RIR_PROB}"
+echo "Workers:          ${NUM_WORKERS}"
+echo "Shard size:       ${SHARD_SIZE}"
+echo "Max pending (GB): ${MAX_PENDING_BYTES} GB"
 echo "=============================================="
 
 # Check file lists exist
@@ -157,7 +159,8 @@ python -m df_mlx.build_audio_cache \
   --snr-min "${SNR_MIN}" \
   --snr-max "${SNR_MAX}" \
   --p-reverb "${RIR_PROB}" \
-  --resume
+  --resume \
+  --max-pending-bytes "${MAX_PENDING_BYTES}"
 
 echo ""
 echo "=============================================="

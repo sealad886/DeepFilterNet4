@@ -97,7 +97,7 @@ class AsyncShardWriter:
     shard_size: int = 500  # Files per shard
     resume_from_shard: int = 0  # Starting shard index when resuming
     base_dir: Optional[str] = None  # Base dir for relative paths in index
-    max_pending_bytes: int = 2 * 1024 * 1024 * 1024  # 2GB max in-flight
+    max_pending_bytes: int = 8 * 1024 * 1024 * 1024  # 8GB max in-flight
 
     def __post_init__(self):
         self.shard_dir = self.output_dir / self.category
@@ -404,6 +404,7 @@ def build_cache_for_category(
     normalize: bool = True,
     existing_index: Optional[Dict[str, Tuple[str, str]]] = None,
     base_dir: Optional[str] = None,
+    max_writer_bytes: Optional[int] = None,
 ) -> Tuple[Dict[str, Tuple[str, str]], Dict]:
     """Build cache for a single category (speech/noise/rir).
 
@@ -481,7 +482,16 @@ def build_cache_for_category(
             "skipped": skipped_count,
         }
 
-    writer = AsyncShardWriter(output_dir, category, shard_size, resume_from_shard=resume_from_shard, base_dir=base_dir)
+    writer_kwargs = {
+        "output_dir": output_dir,
+        "category": category,
+        "shard_size": shard_size,
+        "resume_from_shard": resume_from_shard,
+        "base_dir": base_dir,
+    }
+    if max_writer_bytes is not None:
+        writer_kwargs["max_pending_bytes"] = max_writer_bytes
+    writer = AsyncShardWriter(**writer_kwargs)
 
     # Stats
     total_files = len(files_to_process)
@@ -512,7 +522,7 @@ def build_cache_for_category(
             failed_count += 1
 
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        pbar = tqdm(total=total_files, desc=f"  {category}", unit="files")
+        pbar = tqdm(total=total_files, desc=f"  {category}", unit="files", dynamic_ncols=True, smoothing=0.1)
 
         for i, file_path in enumerate(files_to_process):
             # If queue is full, process one completed task first
@@ -693,7 +703,7 @@ def rebuild_index_from_shards(output_dir: Path) -> Dict[str, Dict[str, Tuple[str
 
         print(f"  Indexing {category}: {len(shard_files)} shards...")
 
-        for shard_path in tqdm(shard_files, desc=f"  {category}", unit="shard"):
+        for shard_path in tqdm(shard_files, desc=f"  {category}", unit="shard", dynamic_ncols=True, smoothing=0.1):
             shard_rel_path = f"{category}/{shard_path.name}"
             try:
                 with np.load(shard_path, allow_pickle=True) as npz:
@@ -769,6 +779,14 @@ def main():
         "--base-dir",
         type=str,
         help="Base directory for computing relative paths in index (default: use absolute paths)",
+    )
+
+    # Max memory for async writer
+    parser.add_argument(
+        "--max-pending-bytes",
+        type=int,
+        default=8,
+        help="Max bytes in-flight for async writer (GB, default: 8)",
     )
 
     # Audio parameters
@@ -912,6 +930,9 @@ def main():
     all_indices = {}
     all_stats = {}
 
+    # Convert GB to bytes for async writer
+    max_writer_bytes = args.max_pending_bytes * 1024 * 1024 * 1024
+
     # Speech cache
     speech_index, speech_stats = build_cache_for_category(
         speech_files,
@@ -923,21 +944,7 @@ def main():
         normalize=True,
         existing_index=existing_indices.get("speech"),
         base_dir=args.base_dir,
-    )
-    all_indices["speech"] = speech_index
-    all_stats["speech"] = speech_stats
-
-    # Noise cache
-    noise_index, noise_stats = build_cache_for_category(
-        speech_files,
-        "speech",
-        output_dir,
-        args.sample_rate,
-        args.shard_size,
-        args.num_workers,
-        normalize=True,
-        existing_index=existing_indices.get("speech"),
-        base_dir=args.base_dir,
+        max_writer_bytes=max_writer_bytes,
     )
     all_indices["speech"] = speech_index
     all_stats["speech"] = speech_stats
@@ -953,6 +960,7 @@ def main():
         normalize=True,
         existing_index=existing_indices.get("noise"),
         base_dir=args.base_dir,
+        max_writer_bytes=max_writer_bytes,
     )
     all_indices["noise"] = noise_index
     all_stats["noise"] = noise_stats
@@ -969,6 +977,7 @@ def main():
             normalize=False,
             existing_index=existing_indices.get("rir"),
             base_dir=args.base_dir,
+            max_writer_bytes=max_writer_bytes,
         )
         all_indices["rir"] = rir_index
         all_stats["rir"] = rir_stats
