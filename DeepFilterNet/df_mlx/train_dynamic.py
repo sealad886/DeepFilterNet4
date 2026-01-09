@@ -35,6 +35,8 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -46,6 +48,108 @@ import mlx.optimizers as optim
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+
+def print_hardware_diagnostics():
+    """Print comprehensive hardware and MLX diagnostics."""
+    print("\n" + "=" * 70)
+    print("HARDWARE DIAGNOSTICS")
+    print("=" * 70)
+
+    # System info
+    import platform
+
+    print("\n[System]")
+    print(f"  Platform:     {platform.platform()}")
+    print(f"  Python:       {platform.python_version()}")
+    print(f"  Processor:    {platform.processor() or 'Unknown'}")
+
+    # MLX device info
+    print("\n[MLX]")
+    print(f"  Default device: {mx.default_device()}")
+    print(f"  MLX version:    {mx.__version__ if hasattr(mx, '__version__') else 'Unknown'}")
+
+    # Try to get Apple Silicon info
+    try:
+        result = subprocess.run(
+            ["sysctl", "-n", "machdep.cpu.brand_string"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            print(f"  CPU:            {result.stdout.strip()}")
+    except Exception:
+        pass
+
+    # Memory info
+    try:
+        result = subprocess.run(
+            ["sysctl", "-n", "hw.memsize"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            mem_bytes = int(result.stdout.strip())
+            mem_gb = mem_bytes / (1024**3)
+            print(f"  Total RAM:      {mem_gb:.1f} GB")
+    except Exception:
+        pass
+
+    # GPU cores (Apple Silicon)
+    try:
+        result = subprocess.run(
+            ["system_profiler", "SPDisplaysDataType"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.split("\n"):
+                if "Total Number of Cores" in line:
+                    print(f"  GPU Cores:      {line.split(':')[-1].strip()}")
+                    break
+    except Exception:
+        pass
+
+    # CPU core info
+    try:
+        perf_cores = subprocess.run(
+            ["sysctl", "-n", "hw.perflevel0.logicalcpu"],
+            capture_output=True,
+            text=True,
+        )
+        eff_cores = subprocess.run(
+            ["sysctl", "-n", "hw.perflevel1.logicalcpu"],
+            capture_output=True,
+            text=True,
+        )
+        if perf_cores.returncode == 0 and eff_cores.returncode == 0:
+            p = perf_cores.stdout.strip()
+            e = eff_cores.stdout.strip()
+            print(f"  CPU Cores:      {p} performance + {e} efficiency")
+    except Exception:
+        pass
+
+    # Current process CPU affinity / thread count
+    print("\n[Process]")
+    print(f"  PID:            {os.getpid()}")
+    import multiprocessing
+
+    print(f"  CPU count:      {multiprocessing.cpu_count()}")
+
+    # MLX memory (if available)
+    try:
+        # MLX doesn't have direct memory query, but we can check metal
+        result = subprocess.run(
+            ["sysctl", "-n", "iogpu.wired_limit_mb"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            print(f"  GPU Wired Limit: {result.stdout.strip()} MB")
+    except Exception:
+        pass
+
+    print("=" * 70 + "\n")
 
 
 def clip_grad_norm(grads, max_norm: float) -> Tuple[dict, float]:
@@ -161,6 +265,7 @@ def train(
     num_workers: int = 4,
     p_reverb: float = 0.5,
     p_clipping: float = 0.0,
+    verbose: bool = False,
 ) -> None:
     """Train DfNet4 model with dynamic on-the-fly mixing.
 
@@ -183,6 +288,7 @@ def train(
         num_workers: Number of data loading workers
         p_reverb: Probability of applying reverb
         p_clipping: Probability of clipping distortion
+        verbose: Enable detailed timing and diagnostic output
     """
     from df_mlx.dynamic_dataset import DatasetConfig, DynamicDataset, PrefetchDataLoader, read_file_list
     from df_mlx.model import count_parameters, init_model
@@ -191,6 +297,10 @@ def train(
     print("=" * 60)
     print("MLX DeepFilterNet4 Training - Dynamic On-the-Fly Mixing")
     print("=" * 60)
+
+    # Print hardware diagnostics in verbose mode
+    if verbose:
+        print_hardware_diagnostics()
 
     # Load or create config
     if cache_dir:
@@ -324,6 +434,13 @@ def train(
         samples_processed = 0
         grad_norm = 0.0
 
+        # Timing accumulators for verbose diagnostics
+        total_data_time = 0.0
+        total_forward_time = 0.0
+        total_backward_time = 0.0
+        total_update_time = 0.0
+        total_eval_time = 0.0
+
         data_loader = PrefetchDataLoader(
             dataset,
             batch_size=batch_size,
@@ -341,7 +458,10 @@ def train(
             leave=True,
         )
 
+        data_start = time.time()
         for batch_idx, batch in train_pbar:
+            data_time = time.time() - data_start
+            total_data_time += data_time
             step_start = time.time()
 
             # Unpack batch
@@ -354,7 +474,8 @@ def train(
 
             current_batch_size = noisy_real.shape[0]
 
-            # Forward and backward pass
+            # Forward and backward pass (timed together since value_and_grad)
+            fwd_start = time.time()
             loss, grads = loss_and_grad(
                 model,
                 noisy_real,
@@ -364,16 +485,29 @@ def train(
                 clean_real,
                 clean_imag,
             )
+            # Force evaluation to get accurate timing
+            mx.eval(loss)
+            fwd_time = time.time() - fwd_start
+            total_forward_time += fwd_time
 
             # Gradient clipping (returns clipped grads and norm)
+            clip_start = time.time()
             if max_grad_norm > 0:
                 grads, grad_norm = clip_grad_norm(grads, max_grad_norm)
+            clip_time = time.time() - clip_start
+            total_backward_time += clip_time
 
             # Update parameters
+            update_start = time.time()
             optimizer.update(model, grads)
+            update_time = time.time() - update_start
+            total_update_time += update_time
 
             # Force evaluation
+            eval_start = time.time()
             mx.eval(model.parameters(), optimizer.state)
+            eval_time = time.time() - eval_start
+            total_eval_time += eval_time
 
             step_time = time.time() - step_start
             loss_val = float(loss)
@@ -385,16 +519,46 @@ def train(
             # Update progress bar with real-time metrics
             lr = float(schedule(global_step))
             samples_per_sec = current_batch_size / step_time if step_time > 0 else 0
-            train_pbar.set_postfix(
-                loss=f"{loss_val:.4f}",
-                avg=f"{train_loss / num_train_batches:.4f}",
-                lr=f"{lr:.1e}",
-                grad=f"{grad_norm:.2f}",
-                speed=f"{samples_per_sec:.0f}s/s",
-            )
+
+            if verbose:
+                # Show timing breakdown in verbose mode
+                train_pbar.set_postfix(
+                    loss=f"{loss_val:.4f}",
+                    lr=f"{lr:.1e}",
+                    data=f"{data_time * 1000:.0f}ms",
+                    fwd=f"{fwd_time * 1000:.0f}ms",
+                    upd=f"{(update_time + eval_time) * 1000:.0f}ms",
+                    spd=f"{samples_per_sec:.0f}/s",
+                )
+            else:
+                train_pbar.set_postfix(
+                    loss=f"{loss_val:.4f}",
+                    avg=f"{train_loss / num_train_batches:.4f}",
+                    lr=f"{lr:.1e}",
+                    grad=f"{grad_norm:.2f}",
+                    speed=f"{samples_per_sec:.0f}s/s",
+                )
+
+            # Start timing for next data fetch
+            data_start = time.time()
 
         train_pbar.close()
         avg_train_loss = train_loss / max(num_train_batches, 1)
+
+        # Print detailed timing breakdown in verbose mode
+        if verbose and num_train_batches > 0:
+            total_time = (
+                total_data_time + total_forward_time + total_backward_time + total_update_time + total_eval_time
+            )
+            print(f"\\n  [Timing Breakdown - Epoch {epoch + 1}]")
+            print(f"    Data loading:    {total_data_time:6.1f}s ({100 * total_data_time / total_time:5.1f}%)")
+            print(f"    Forward+Backward:{total_forward_time:6.1f}s ({100 * total_forward_time / total_time:5.1f}%)")
+            print(f"    Gradient clip:   {total_backward_time:6.1f}s ({100 * total_backward_time / total_time:5.1f}%)")
+            print(f"    Optimizer update:{total_update_time:6.1f}s ({100 * total_update_time / total_time:5.1f}%)")
+            print(f"    mx.eval sync:    {total_eval_time:6.1f}s ({100 * total_eval_time / total_time:5.1f}%)")
+            print(f"    TOTAL:           {total_time:6.1f}s")
+            if total_data_time > total_forward_time:
+                print("    ⚠️  DATA LOADING IS BOTTLENECK - consider more workers or faster storage")
 
         # ====== Validation ======
         avg_valid_loss = float("inf")
@@ -628,6 +792,12 @@ def main():
         default=10,
         help="Early stopping patience",
     )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Enable detailed timing diagnostics and hardware info",
+    )
 
     args = parser.parse_args()
 
@@ -650,6 +820,7 @@ def main():
         num_workers=args.num_workers,
         p_reverb=args.p_reverb,
         p_clipping=args.p_clipping,
+        verbose=args.verbose,
     )
 
 
