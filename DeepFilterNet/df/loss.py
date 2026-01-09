@@ -549,18 +549,51 @@ class ASRLoss(nn.Module):
         sum_logprobs: Tensor = torch.zeros(n, device=features.device)
         tokens: Tensor = start_tokens or torch.tensor([self.initial_tokens], device=features.device).repeat(n, 1)
         logits: List[Tensor] = []
+
+        # For MLX backend, we need to use MLX arrays with the decoder
+        is_mlx = self.backend.backend_name == "mlx"
+        if is_mlx:
+            import mlx.core as mx
+
+            from df.whisper_adapter import mx_to_torch, torch_to_mx
+
         for i in range(self.sample_len):
             # Use backend with automatic tensor conversion for MLX
-            if self.backend.backend_name == "mlx":
+            if is_mlx:
                 mlx_backend = cast("MLXWhisperBackend", self.backend)
                 logit = mlx_backend.logits_as_torch(tokens, features, dtype=features.dtype)[:, -1]
             else:
                 logit = self.backend.logits(tokens, features)[:, -1]
             logits.append(logit)
-            tokens, completed = self.decoder.update(tokens, logits[-1], sum_logprobs)
+
+            # Decoder.update() requires MLX arrays for MLX backend
+            if is_mlx:
+                tokens_mx = torch_to_mx(tokens)
+                logits_mx = torch_to_mx(logits[-1])
+                sum_logprobs_mx = torch_to_mx(sum_logprobs)
+                tokens_mx, completed, sum_logprobs_mx = self.decoder.update(tokens_mx, logits_mx, sum_logprobs_mx)
+                tokens = mx_to_torch(tokens_mx, dtype=tokens.dtype).to(features.device)
+                sum_logprobs = mx_to_torch(sum_logprobs_mx, dtype=sum_logprobs.dtype).to(features.device)
+            else:
+                tokens, completed = self.decoder.update(tokens, logits[-1], sum_logprobs)
+
             if completed or tokens.shape[-1] > self.n_ctx:
                 break
-        tokens, _ = self.decoder.finalize(tokens, sum_logprobs)
+
+        # Decoder.finalize() also requires MLX arrays for MLX backend
+        # MLX finalize expects 3D tokens [batch, num_results, seq_len], we have 2D [batch, seq_len]
+        if is_mlx:
+            tokens_mx = torch_to_mx(tokens)
+            sum_logprobs_mx = torch_to_mx(sum_logprobs)
+            # Add middle dimension for num_results (always 1 for greedy decoding)
+            tokens_mx = mx.expand_dims(tokens_mx, axis=1)
+            tokens_mx, _ = self.decoder.finalize(tokens_mx, sum_logprobs_mx)
+            # Remove the num_results dimension and convert back to torch
+            tokens_mx = mx.squeeze(tokens_mx, axis=1)
+            tokens = mx_to_torch(tokens_mx, dtype=torch.long).to(features.device)
+        else:
+            tokens, _ = self.decoder.finalize(tokens, sum_logprobs)
+
         return torch.stack(logits, dim=1), tokens[:, self.sample_begin : -1]
 
     def preprocess(self, audio: Tensor) -> Tensor:

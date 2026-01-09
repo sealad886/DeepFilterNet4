@@ -184,6 +184,28 @@ if MLX_AVAILABLE:
         save_audio,
     )
 
+    # Whisper adapter for ASR-based evaluation and training
+    from .whisper_adapter import (  # noqa: F401
+        ArrayLike,
+        BackendType,
+        MLXWhisperBackend,
+        PyTorchWhisperBackend,
+        WhisperBackend,
+        WhisperDecodingResult,
+        compute_asr_features,
+        compute_whisper_loss,
+        compute_word_accuracy,
+        evaluate_transcription_batch,
+        get_whisper_backend,
+        is_apple_silicon,
+        load_whisper_model,
+        mx_to_numpy,
+        mx_to_torch,
+        numpy_to_mx,
+        to_numpy,
+        torch_to_mx,
+    )
+
     __all__ = [
         # Model
         "DfNet4",
@@ -334,6 +356,25 @@ if MLX_AVAILABLE:
         "EncoderMF",
         "ErbDecoderMF",
         "DfDecoderMF",
+        # Whisper adapter (new)
+        "is_apple_silicon",
+        "WhisperDecodingResult",
+        "WhisperBackend",
+        "ArrayLike",
+        "BackendType",
+        "mx_to_torch",
+        "torch_to_mx",
+        "mx_to_numpy",
+        "numpy_to_mx",
+        "to_numpy",
+        "MLXWhisperBackend",
+        "PyTorchWhisperBackend",
+        "get_whisper_backend",
+        "load_whisper_model",
+        "compute_asr_features",
+        "compute_whisper_loss",
+        "compute_word_accuracy",
+        "evaluate_transcription_batch",
         # Version
         "__version__",
         "MLX_AVAILABLE",

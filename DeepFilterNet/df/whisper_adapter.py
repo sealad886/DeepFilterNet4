@@ -578,6 +578,39 @@ class PyTorchWhisperBackend:
 # Task 1.5: MLXWhisperBackend Implementation
 # =============================================================================
 
+# Model name to HuggingFace repo ID mapping for mlx-whisper
+MLX_WHISPER_MODEL_MAP = {
+    "tiny": "mlx-community/whisper-tiny",
+    "tiny.en": "mlx-community/whisper-tiny.en",
+    "base": "mlx-community/whisper-base",
+    "base.en": "mlx-community/whisper-base.en",
+    "small": "mlx-community/whisper-small",
+    "small.en": "mlx-community/whisper-small.en",
+    "medium": "mlx-community/whisper-medium",
+    "medium.en": "mlx-community/whisper-medium.en",
+    "large": "mlx-community/whisper-large-v3",
+    "large-v1": "mlx-community/whisper-large-v1",
+    "large-v2": "mlx-community/whisper-large-v2",
+    "large-v3": "mlx-community/whisper-large-v3",
+    "turbo": "mlx-community/whisper-large-v3-turbo",
+}
+
+
+def _resolve_mlx_model_name(model_name: str) -> str:
+    """
+    Resolve a model name to HuggingFace repo ID for mlx-whisper.
+
+    Args:
+        model_name: Short model name ('tiny', 'base', etc.) or full HF repo ID.
+
+    Returns:
+        Full HuggingFace repo ID.
+    """
+    if "/" in model_name:
+        # Already a full repo ID
+        return model_name
+    return MLX_WHISPER_MODEL_MAP.get(model_name, f"mlx-community/whisper-{model_name}")
+
 
 class MLXWhisperBackend:
     """
@@ -624,12 +657,11 @@ class MLXWhisperBackend:
         self._mlx_get_tokenizer = mlx_get_tokenizer
         self._mlx_transcribe = mlx_transcribe
 
-        # Load model - download_root may not be supported in all mlx-whisper versions
-        try:
-            self._model = load_models.load_model(model_name, download_root=download_root)  # type: ignore
-        except TypeError:
-            # Fallback if download_root is not supported
-            self._model = load_models.load_model(model_name)
+        # Resolve model name to HuggingFace repo ID
+        repo_id = _resolve_mlx_model_name(model_name)
+        self._model = load_models.load_model(repo_id)
+        self._model_name = model_name
+        self._repo_id = repo_id
 
     @property
     def backend_name(self) -> str:
@@ -661,7 +693,8 @@ class MLXWhisperBackend:
         Extract audio embeddings from mel spectrogram.
 
         Args:
-            mel: Mel spectrogram tensor of shape [batch, n_mels, n_frames].
+            mel: Mel spectrogram tensor. Accepts both PyTorch format [batch, n_mels, n_frames]
+                 and MLX format [batch, n_frames, n_mels]. Will auto-transpose if needed.
 
         Returns:
             Audio embeddings as MLX array.
@@ -669,6 +702,18 @@ class MLXWhisperBackend:
         mx = _get_mx()
         if isinstance(mel, (np.ndarray, torch.Tensor)):
             mel = mx.array(to_numpy(mel))
+
+        # MLX whisper expects (batch, n_frames, n_mels), but we accept PyTorch format too
+        # PyTorch: (batch, n_mels=80, n_frames=3000)
+        # MLX: (batch, n_frames=3000, n_mels=80)
+        if len(mel.shape) == 3 and mel.shape[1] == 80:
+            # Input is in PyTorch format, transpose to MLX format
+            mel = mx.transpose(mel, (0, 2, 1))
+        elif len(mel.shape) == 2 and mel.shape[0] == 80:
+            # Single mel in PyTorch format (n_mels, n_frames)
+            mel = mx.transpose(mel, (1, 0))
+            mel = mx.expand_dims(mel, 0)
+
         return self._model.embed_audio(mel)
 
     def embed_audio_as_torch(self, mel: ArrayLike, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
@@ -741,7 +786,8 @@ class MLXWhisperBackend:
         """
         mx = _get_mx()
         if options is None:
-            options = self._mlx_decoding.DecodingOptions()
+            # Use fp16=False since model is loaded in float32 by default
+            options = self._mlx_decoding.DecodingOptions(fp16=False)
         if isinstance(mel, (np.ndarray, torch.Tensor)):
             mel_arr = mx.array(to_numpy(mel))
         else:

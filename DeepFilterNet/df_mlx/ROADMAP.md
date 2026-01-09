@@ -2,29 +2,32 @@
 
 > **Goal**: Achieve full feature parity between `df_mlx/` (MLX/Apple Silicon) and `df/` (PyTorch)
 
-## Current Status: ~35-40% Parity
+## Current Status: 100% Parity ✅
 
 ### What's Implemented ✅
 - DFNet4 + DFNet4Lite model architecture
+- DFNet1/2/3 architectures (GroupedGRU, SqueezedGRU)
+- DFNetMF multi-frame architecture
 - Mamba/SqueezedMamba backbone
 - HybridEncoder, LinearEncoder variants
 - Core modules (Conv2dNormAct, GroupedLinear, DfOp, ERB filterbank)
 - STFT/iSTFT signal processing
 - Basic training loop
-- Multi-resolution spectral loss, SI-SDR loss
-- Sharded NPZ data loading with dynamic mixing
-- Basic checkpointing
-
-### What's Missing ❌
 - GAN training (discriminators, adversarial losses)
-- DFNet1/2/3 architectures (require GRU)
-- Full evaluation pipeline (STOI, PESQ, DNSMOS, composite metrics)
+- Multi-resolution spectral loss, SI-SDR loss, GAN losses
+- Full evaluation pipeline (SI-SDR, STOI, PESQ, DNSMOS, composite metrics)
 - LR schedulers (cosine, warmup)
 - Multi-frame processing
-- Quantization support
+- MLX quantization support
 - Inference/enhancement utilities
-- Visualization
-- Whisper adapter (ASR loss)
+- Visualization utilities
+- Whisper adapter (ASR loss, transcription)
+- Hardware detection/optimization
+- Sharded NPZ data loading with dynamic mixing
+- Full checkpointing with patience tracking
+
+### What's Missing ❌
+- *(None - Full parity achieved!)*
 
 ---
 
@@ -117,7 +120,7 @@
 | 6.2 DFNetMF architecture | `deepfilternetmf.py` | L | ✅ |
 | 6.3 MLX quantization support | `quantization.py` | L | ✅ |
 | 6.4 Visualization utilities | `visualization.py` | M | ✅ |
-| 6.5 Whisper adapter (ASR loss) | `whisper_adapter.py` | XL | ⬜ |
+| 6.5 Whisper adapter (ASR loss) | `whisper_adapter.py` | XL | ✅ |
 | 6.6 Hardware detection/optimization | `hardware.py` | S | ✅ |
 
 **Deliverable**: Feature-complete MLX implementation
@@ -154,13 +157,13 @@ df_mlx/
 ├── lr.py                         # ✅ LR schedulers
 │
 ├── # Inference
-├── enhance.py                    # ⬜ Enhancement utilities
-├── model_utils.py                # ⬜ Model loading/downloading
+├── enhance.py                    # ✅ Enhancement utilities
+├── model_utils.py                # ✅ Model loading/downloading
 │
 ├── # Evaluation
 ├── evaluation.py                 # ✅ Evaluation metrics/utilities
 ├── stoi.py                       # ✅ STOI metric
-├── dnsmos.py                     # ⬜ DNSMOS integration
+├── dnsmos.py                     # ✅ DNSMOS integration
 │
 ├── # Data
 ├── datastore.py                  # ✅ Legacy datastore
@@ -174,10 +177,10 @@ df_mlx/
 ├── utils.py                      # ✅ General utilities
 ├── checkpoint.py                 # ✅ Checkpoint management
 ├── convert.py                    # ✅ PyTorch checkpoint conversion
-├── visualization.py              # ⬜ Visualization
-├── quantization.py               # ⬜ MLX quantization
-├── hardware.py                   # ⬜ Hardware detection
-├── whisper_adapter.py            # ⬜ Whisper integration
+├── visualization.py              # ✅ Visualization
+├── quantization.py               # ✅ MLX quantization
+├── hardware.py                   # ✅ Hardware detection
+├── whisper_adapter.py            # ✅ Whisper integration (MLX-first)
 │
 └── # Tests
     ├── test_mlx.py               # ✅ Basic tests
