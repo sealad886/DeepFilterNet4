@@ -590,6 +590,21 @@ def main():
     existing_indices: Dict[str, Dict[str, Tuple[str, str]]] = {}
     index_path = output_dir / "index.json"
 
+    # Helper to count shards on disk for a category
+    def count_shards_on_disk(category: str) -> int:
+        shard_dir = output_dir / category
+        if not shard_dir.exists():
+            return 0
+        return len(list(shard_dir.glob("shard_*.npz")))
+
+    # Helper to count shards referenced in index for a category
+    def count_shards_in_index(index: Dict[str, Tuple[str, str]], category: str) -> int:
+        shard_files = set()
+        for shard_file, _ in index.values():
+            if shard_file.startswith(f"{category}/"):
+                shard_files.add(shard_file)
+        return len(shard_files)
+
     # Rebuild index from shards if requested or if resuming without index
     if args.rebuild_index or (args.resume and not index_path.exists()):
         # Check if any shards exist
@@ -617,7 +632,28 @@ def main():
         with open(index_path) as f:
             existing_indices = json.load(f)
         for cat, idx in existing_indices.items():
-            print(f"  {cat}: {len(idx):,} files already cached")
+            print(f"  {cat}: {len(idx):,} files in index")
+
+        # Check if index is stale (more shards on disk than index knows about)
+        index_is_stale = False
+        for category in ["speech", "noise", "rir"]:
+            disk_count = count_shards_on_disk(category)
+            index_count = count_shards_in_index(existing_indices.get(category, {}), category)
+            if disk_count > index_count:
+                print(
+                    f"  WARNING: {category} has {disk_count} shards on disk "
+                    f"but index only knows about {index_count}"
+                )
+                index_is_stale = True
+
+        if index_is_stale:
+            print("\nIndex is stale - rebuilding from shards to get accurate file list...")
+            existing_indices = rebuild_index_from_shards(output_dir)
+            # Save the rebuilt index
+            if existing_indices:
+                with open(index_path, "w") as f:
+                    json.dump(existing_indices, f)
+                print(f"Saved rebuilt index to {index_path}")
     elif args.resume:
         print("\nResume mode: No existing index found, starting fresh")
 
