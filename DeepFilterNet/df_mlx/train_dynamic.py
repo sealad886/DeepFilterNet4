@@ -38,16 +38,22 @@ import json
 import sys
 import time
 from pathlib import Path
+from typing import Tuple
 
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
+from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
-def clip_grad_norm(grads, max_norm: float):
-    """Clip gradients by global norm."""
+def clip_grad_norm(grads, max_norm: float) -> Tuple[dict, float]:
+    """Clip gradients by global norm.
+
+    Returns:
+        Tuple of (clipped_grads, grad_norm) for monitoring.
+    """
     flat_grads = []
 
     def flatten(x):
@@ -63,10 +69,11 @@ def clip_grad_norm(grads, max_norm: float):
     flatten(grads)
 
     if not flat_grads:
-        return grads
+        return grads, 0.0
 
     total_norm_sq = sum(mx.sum(g**2) for g in flat_grads)
     total_norm = mx.sqrt(total_norm_sq)
+    grad_norm_val = float(total_norm)
 
     clip_coef = max_norm / (total_norm + 1e-6)
     clip_coef = mx.minimum(clip_coef, mx.array(1.0))
@@ -82,7 +89,7 @@ def clip_grad_norm(grads, max_norm: float):
             return tuple(apply_clip(v) for v in x)
         return x
 
-    return apply_clip(grads)
+    return apply_clip(grads), grad_norm_val
 
 
 def save_checkpoint(
@@ -314,6 +321,8 @@ def train(
         model.train()
         train_loss = 0.0
         num_train_batches = 0
+        samples_processed = 0
+        grad_norm = 0.0
 
         data_loader = PrefetchDataLoader(
             dataset,
@@ -322,7 +331,17 @@ def train(
             prefetch_factor=2,
         )
 
-        for batch_idx, batch in enumerate(data_loader):
+        # Training progress bar
+        train_pbar = tqdm(
+            enumerate(data_loader),
+            total=steps_per_epoch,
+            desc=f"Epoch {epoch + 1}/{epochs}",
+            unit="batch",
+            dynamic_ncols=True,
+            leave=True,
+        )
+
+        for batch_idx, batch in train_pbar:
             step_start = time.time()
 
             # Unpack batch
@@ -332,6 +351,8 @@ def train(
             clean_imag = batch["clean_imag"]
             feat_erb = batch["feat_erb"]
             feat_spec = batch["feat_spec"]
+
+            current_batch_size = noisy_real.shape[0]
 
             # Forward and backward pass
             loss, grads = loss_and_grad(
@@ -344,9 +365,9 @@ def train(
                 clean_imag,
             )
 
-            # Gradient clipping
+            # Gradient clipping (returns clipped grads and norm)
             if max_grad_norm > 0:
-                grads = clip_grad_norm(grads, max_grad_norm)
+                grads, grad_norm = clip_grad_norm(grads, max_grad_norm)
 
             # Update parameters
             optimizer.update(model, grads)
@@ -354,22 +375,25 @@ def train(
             # Force evaluation
             mx.eval(model.parameters(), optimizer.state)
 
-            train_loss += float(loss)
+            step_time = time.time() - step_start
+            loss_val = float(loss)
+            train_loss += loss_val
             num_train_batches += 1
+            samples_processed += current_batch_size
             global_step += 1
 
-            # Progress update
-            step_time = time.time() - step_start
-            if batch_idx % 50 == 0:
-                lr = schedule(global_step)
-                print(
-                    f"  Epoch {epoch + 1}/{epochs} | "
-                    f"Step {batch_idx}/{steps_per_epoch} | "
-                    f"Loss: {float(loss):.4f} | "
-                    f"LR: {float(lr):.2e} | "
-                    f"Time: {step_time * 1000:.0f}ms"
-                )
+            # Update progress bar with real-time metrics
+            lr = float(schedule(global_step))
+            samples_per_sec = current_batch_size / step_time if step_time > 0 else 0
+            train_pbar.set_postfix(
+                loss=f"{loss_val:.4f}",
+                avg=f"{train_loss / num_train_batches:.4f}",
+                lr=f"{lr:.1e}",
+                grad=f"{grad_norm:.2f}",
+                speed=f"{samples_per_sec:.0f}s/s",
+            )
 
+        train_pbar.close()
         avg_train_loss = train_loss / max(num_train_batches, 1)
 
         # ====== Validation ======
@@ -382,6 +406,7 @@ def train(
 
             valid_loss = 0.0
             num_valid_batches = 0
+            valid_steps = len(dataset) // batch_size
 
             valid_loader = PrefetchDataLoader(
                 dataset,
@@ -390,7 +415,17 @@ def train(
                 prefetch_factor=1,
             )
 
-            for batch in valid_loader:
+            # Validation progress bar
+            valid_pbar = tqdm(
+                valid_loader,
+                total=valid_steps,
+                desc="  Validating",
+                unit="batch",
+                dynamic_ncols=True,
+                leave=False,
+            )
+
+            for batch in valid_pbar:
                 noisy_real = batch["noisy_real"]
                 noisy_imag = batch["noisy_imag"]
                 clean_real = batch["clean_real"]
@@ -404,9 +439,17 @@ def train(
                 out = model(noisy_spec, feat_erb, feat_spec)
                 loss = spectral_loss(out, target_spec)
 
-                valid_loss += float(loss)
+                loss_val = float(loss)
+                valid_loss += loss_val
                 num_valid_batches += 1
 
+                # Update validation progress
+                valid_pbar.set_postfix(
+                    loss=f"{loss_val:.4f}",
+                    avg=f"{valid_loss / num_valid_batches:.4f}",
+                )
+
+            valid_pbar.close()
             avg_valid_loss = valid_loss / max(num_valid_batches, 1)
 
             # Early stopping check
@@ -429,12 +472,17 @@ def train(
 
         # ====== Epoch Summary ======
         epoch_time = time.time() - epoch_start
+        epoch_throughput = samples_processed / epoch_time if epoch_time > 0 else 0
+
+        # Improved epoch summary with throughput
+        improvement_marker = "★" if avg_valid_loss <= best_valid_loss else ""
         print(
-            f"Epoch {epoch + 1}/{epochs} | "
+            f"✓ Epoch {epoch + 1}/{epochs} complete | "
             f"Train: {avg_train_loss:.4f} | "
-            f"Valid: {avg_valid_loss:.4f} | "
+            f"Valid: {avg_valid_loss:.4f} {improvement_marker}| "
             f"Best: {best_valid_loss:.4f} | "
-            f"Time: {epoch_time:.1f}s"
+            f"{samples_processed:,} samples @ {epoch_throughput:.0f}/s | "
+            f"{epoch_time:.1f}s"
         )
 
         # ====== Checkpointing ======
