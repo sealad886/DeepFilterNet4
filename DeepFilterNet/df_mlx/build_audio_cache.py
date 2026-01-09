@@ -134,17 +134,34 @@ class ShardWriter:
                 self._flush_shard()
 
     def _flush_shard(self) -> None:
-        """Write current shard to disk with embedded paths."""
+        """Write current shard to disk with embedded paths.
+
+        Uses atomic write (temp file + rename) to prevent corrupt shards
+        if interrupted. Either the entire shard is written, or nothing is.
+        """
         if not self.current_shard:
             return
 
         shard_path = self.shard_dir / f"shard_{self.current_shard_idx:04d}.npz"
+        temp_path = shard_path.with_suffix(".npz.tmp")
 
         # Include paths array in shard for index reconstruction
         shard_data = dict(self.current_shard)
         shard_data["__paths__"] = np.array(self.current_paths, dtype=object)
 
-        np.savez_compressed(shard_path, **shard_data)
+        # Write to temp file first, then atomic rename
+        # If interrupted during write, temp file is left (will be cleaned up on retry)
+        # If interrupted after write but before rename, temp file is left
+        # Either way, shard_NNNN.npz is never corrupt
+        try:
+            np.savez_compressed(temp_path, **shard_data)
+            temp_path.rename(shard_path)  # Atomic on POSIX
+        except Exception:
+            # Clean up temp file on failure
+            if temp_path.exists():
+                temp_path.unlink()
+            raise
+
         self.current_shard = {}
         self.current_paths = []
         self.current_shard_idx += 1
@@ -337,6 +354,22 @@ def build_cache_for_category(
     return merged_index, stats
 
 
+def cleanup_temp_files(output_dir: Path) -> int:
+    """Remove leftover .npz.tmp files from interrupted writes.
+
+    Returns the number of temp files removed.
+    """
+    removed = 0
+    for category in ["speech", "noise", "rir"]:
+        shard_dir = output_dir / category
+        if not shard_dir.exists():
+            continue
+        for temp_file in shard_dir.glob("*.npz.tmp"):
+            temp_file.unlink()
+            removed += 1
+    return removed
+
+
 def rebuild_index_from_shards(output_dir: Path) -> Dict[str, Dict[str, Tuple[str, str]]]:
     """Reconstruct index.json from existing shard files.
 
@@ -345,10 +378,19 @@ def rebuild_index_from_shards(output_dir: Path) -> Dict[str, Dict[str, Tuple[str
 
     For shards without __paths__ (legacy format), falls back to counting
     audio arrays but warns that resume won't work.
+
+    Also validates that each path in __paths__ has a corresponding audio array.
     """
     print("Rebuilding index from existing shards...")
+
+    # Clean up any leftover temp files from interrupted writes
+    removed = cleanup_temp_files(output_dir)
+    if removed > 0:
+        print(f"  Cleaned up {removed} incomplete temp files from previous run")
+
     all_indices: Dict[str, Dict[str, Tuple[str, str]]] = {}
     legacy_shards = 0
+    corrupt_shards = 0
 
     for category in ["speech", "noise", "rir"]:
         shard_dir = output_dir / category
@@ -370,8 +412,21 @@ def rebuild_index_from_shards(output_dir: Path) -> Dict[str, Dict[str, Tuple[str
                     if "__paths__" in npz.files:
                         # New format: paths embedded in shard
                         paths = npz["__paths__"]
+                        audio_keys = {k for k in npz.files if k.startswith("audio_")}
+
+                        # Validate consistency: paths count should match audio count
+                        if len(paths) != len(audio_keys):
+                            print(
+                                f"    Warning: {shard_path.name} has {len(paths)} paths but {len(audio_keys)} audio arrays - skipping"
+                            )
+                            corrupt_shards += 1
+                            continue
+
                         for idx, path in enumerate(paths):
                             key = f"audio_{idx:05d}"
+                            if key not in audio_keys:
+                                print(f"    Warning: {shard_path.name} missing {key} for path {path}")
+                                continue
                             category_index[str(path)] = (shard_rel_path, key)
                     else:
                         # Legacy format: no paths, just count
@@ -385,15 +440,22 @@ def rebuild_index_from_shards(output_dir: Path) -> Dict[str, Dict[str, Tuple[str
                             category_index[placeholder] = (shard_rel_path, key)
             except Exception as e:
                 print(f"    Warning: Failed to read {shard_path}: {e}")
+                corrupt_shards += 1
 
         if category_index:
             all_indices[category] = category_index
             print(f"  {category}: {len(category_index):,} files indexed")
 
+    if corrupt_shards > 0:
+        print(f"\n  WARNING: {corrupt_shards} corrupt/inconsistent shards found and skipped.")
+        print("  These files will be reprocessed on next run.")
+
     if legacy_shards > 0:
         print(f"\n  WARNING: {legacy_shards} shards are in legacy format (no embedded paths).")
         print("  Resume will NOT skip these files - they will be reprocessed.")
         print("  To fix: delete the cache and rebuild with the latest version.")
+
+    return all_indices
 
     return all_indices
 
