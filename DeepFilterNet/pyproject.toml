@@ -48,7 +48,7 @@ deep-filter-py = "df.enhance:run"
 
 [tool.poetry]
 # Poetry 2.x: package metadata lives in `[project]`; keep only Poetry-specific config here.
-packages = [{ include = "df" }]
+packages = [{ include = "df" }, { include = "df_mlx" }]
 include = [
   { path = "pretrained_models/DeepFilterNet/config.ini" },
   { path = "pretrained_models/DeepFilterNet/checkpoints/*" },
