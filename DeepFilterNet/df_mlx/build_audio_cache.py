@@ -143,7 +143,8 @@ class ShardWriter:
             return
 
         shard_path = self.shard_dir / f"shard_{self.current_shard_idx:04d}.npz"
-        temp_path = shard_path.with_suffix(".npz.tmp")
+        # Use .tmp extension (not .npz.tmp) because np.savez_compressed auto-adds .npz
+        temp_path = self.shard_dir / f"shard_{self.current_shard_idx:04d}.tmp"
 
         # Skip if shard already exists (from previous run that got further than index)
         if shard_path.exists():
@@ -157,6 +158,9 @@ class ShardWriter:
         shard_data = dict(self.current_shard)
         shard_data["__paths__"] = np.array(self.current_paths, dtype=object)
 
+        # np.savez_compressed auto-appends .npz, so temp_path.tmp -> temp_path.tmp.npz
+        temp_path_with_npz = temp_path.with_suffix(".tmp.npz")
+
         # Write to temp file first, then atomic rename
         # If interrupted during write, temp file is left (will be cleaned up on retry)
         # If interrupted after write but before rename, temp file is left
@@ -165,13 +169,13 @@ class ShardWriter:
             # Ensure shard directory exists
             self.shard_dir.mkdir(parents=True, exist_ok=True)
             np.savez_compressed(temp_path, **shard_data)
-            if not temp_path.exists():
-                raise RuntimeError(f"np.savez_compressed did not create {temp_path}")
-            temp_path.rename(shard_path)  # Atomic on POSIX
+            if not temp_path_with_npz.exists():
+                raise RuntimeError(f"np.savez_compressed did not create {temp_path_with_npz}")
+            temp_path_with_npz.rename(shard_path)  # Atomic on POSIX
         except Exception as e:
             # Clean up temp file on failure
-            if temp_path.exists():
-                temp_path.unlink()
+            if temp_path_with_npz.exists():
+                temp_path_with_npz.unlink()
             raise RuntimeError(f"Failed to write shard {shard_path}: {e}") from e
 
         self.current_shard = {}
@@ -379,7 +383,7 @@ def build_cache_for_category(
 
 
 def cleanup_temp_files(output_dir: Path) -> int:
-    """Remove leftover .npz.tmp files from interrupted writes.
+    """Remove leftover temp files from interrupted writes.
 
     Returns the number of temp files removed.
     """
@@ -388,9 +392,11 @@ def cleanup_temp_files(output_dir: Path) -> int:
         shard_dir = output_dir / category
         if not shard_dir.exists():
             continue
-        for temp_file in shard_dir.glob("*.npz.tmp"):
-            temp_file.unlink()
-            removed += 1
+        # Match both old pattern (*.npz.tmp) and new pattern (*.tmp.npz)
+        for pattern in ["*.npz.tmp", "*.tmp.npz", "*.npz.tmp.npz"]:
+            for temp_file in shard_dir.glob(pattern):
+                temp_file.unlink()
+                removed += 1
     return removed
 
 
