@@ -400,16 +400,97 @@ def cleanup_temp_files(output_dir: Path) -> int:
     return removed
 
 
+def compact_shards(output_dir: Path) -> Dict[str, int]:
+    """Remove legacy/corrupt shards and renumber remaining shards sequentially.
+
+    This ensures the shard sequence has no gaps and all shards are in the
+    new format with embedded __paths__. Files from removed shards will be
+    reprocessed on the next run.
+
+    Returns dict mapping category -> number of shards removed.
+    """
+    print("Checking for legacy/corrupt shards to remove...")
+    removed_counts: Dict[str, int] = {}
+
+    for category in ["speech", "noise", "rir"]:
+        shard_dir = output_dir / category
+        if not shard_dir.exists():
+            continue
+
+        shard_files = sorted(shard_dir.glob("shard_*.npz"))
+        if not shard_files:
+            continue
+
+        # First pass: identify which shards to keep vs remove
+        shards_to_keep: List[Path] = []
+        shards_to_remove: List[Path] = []
+
+        for shard_path in shard_files:
+            try:
+                with np.load(shard_path, allow_pickle=True) as npz:
+                    if "__paths__" in npz.files:
+                        paths = npz["__paths__"]
+                        audio_keys = {k for k in npz.files if k.startswith("audio_")}
+                        # Validate consistency
+                        if len(paths) == len(audio_keys):
+                            shards_to_keep.append(shard_path)
+                        else:
+                            print(f"    {shard_path.name}: corrupt (path/audio mismatch) - removing")
+                            shards_to_remove.append(shard_path)
+                    else:
+                        print(f"    {shard_path.name}: legacy format (no __paths__) - removing")
+                        shards_to_remove.append(shard_path)
+            except Exception as e:
+                print(f"    {shard_path.name}: unreadable ({e}) - removing")
+                shards_to_remove.append(shard_path)
+
+        if not shards_to_remove:
+            continue
+
+        removed_counts[category] = len(shards_to_remove)
+        print(f"  {category}: removing {len(shards_to_remove)} invalid shards, keeping {len(shards_to_keep)}")
+
+        # Delete invalid shards
+        for shard_path in shards_to_remove:
+            shard_path.unlink()
+
+        # Renumber remaining shards to be sequential (0, 1, 2, ...)
+        # Sort by original index to maintain order
+        shards_to_keep.sort(key=lambda p: int(p.stem.split("_")[1]))
+
+        # Rename to sequential indices, using temp names first to avoid collisions
+        temp_names: List[Tuple[Path, Path, int]] = []
+        for new_idx, old_path in enumerate(shards_to_keep):
+            old_idx = int(old_path.stem.split("_")[1])
+            if old_idx != new_idx:
+                # Need to rename - use temp name first
+                temp_path = shard_dir / f"shard_{new_idx:04d}.npz.renaming"
+                temp_names.append((old_path, temp_path, new_idx))
+
+        # First pass: rename to temp names
+        for old_path, temp_path, _ in temp_names:
+            old_path.rename(temp_path)
+
+        # Second pass: rename temp to final names
+        for _, temp_path, new_idx in temp_names:
+            final_path = shard_dir / f"shard_{new_idx:04d}.npz"
+            temp_path.rename(final_path)
+
+        if temp_names:
+            print(f"    Renumbered {len(temp_names)} shards to maintain sequential order")
+
+    return removed_counts
+
+
 def rebuild_index_from_shards(output_dir: Path) -> Dict[str, Dict[str, Tuple[str, str]]]:
     """Reconstruct index.json from existing shard files.
 
     Reads the __paths__ array embedded in each shard to recover the
     original file path -> (shard_file, audio_key) mapping.
 
-    For shards without __paths__ (legacy format), falls back to counting
-    audio arrays but warns that resume won't work.
-
-    Also validates that each path in __paths__ has a corresponding audio array.
+    Legacy shards (without __paths__) and corrupt shards are automatically
+    removed and remaining shards are renumbered to maintain sequential order.
+    Files from removed shards will be reprocessed on the next run.
     """
     print("Rebuilding index from existing shards...")
 
@@ -418,9 +499,14 @@ def rebuild_index_from_shards(output_dir: Path) -> Dict[str, Dict[str, Tuple[str
     if removed > 0:
         print(f"  Cleaned up {removed} incomplete temp files from previous run")
 
+    # Remove legacy/corrupt shards and compact the sequence
+    removed_shards = compact_shards(output_dir)
+    total_removed = sum(removed_shards.values())
+    if total_removed > 0:
+        print(f"  Removed {total_removed} legacy/corrupt shards total")
+        print("  Files from these shards will be reprocessed")
+
     all_indices: Dict[str, Dict[str, Tuple[str, str]]] = {}
-    legacy_shards = 0
-    corrupt_shards = 0
 
     for category in ["speech", "noise", "rir"]:
         shard_dir = output_dir / category
@@ -433,59 +519,33 @@ def rebuild_index_from_shards(output_dir: Path) -> Dict[str, Dict[str, Tuple[str
         if not shard_files:
             continue
 
-        print(f"  Scanning {category}: {len(shard_files)} shards...")
+        print(f"  Indexing {category}: {len(shard_files)} shards...")
 
         for shard_path in tqdm(shard_files, desc=f"  {category}", unit="shard"):
             shard_rel_path = f"{category}/{shard_path.name}"
             try:
                 with np.load(shard_path, allow_pickle=True) as npz:
-                    if "__paths__" in npz.files:
-                        # New format: paths embedded in shard
-                        paths = npz["__paths__"]
-                        audio_keys = {k for k in npz.files if k.startswith("audio_")}
+                    # All shards should now have __paths__ after compaction
+                    if "__paths__" not in npz.files:
+                        # This shouldn't happen after compact_shards, but handle it
+                        print(f"    Warning: {shard_path.name} missing __paths__ - skipping")
+                        continue
 
-                        # Validate consistency: paths count should match audio count
-                        if len(paths) != len(audio_keys):
-                            print(
-                                f"    Warning: {shard_path.name} has {len(paths)} paths but {len(audio_keys)} audio arrays - skipping"
-                            )
-                            corrupt_shards += 1
+                    paths = npz["__paths__"]
+                    audio_keys = {k for k in npz.files if k.startswith("audio_")}
+
+                    for idx, path in enumerate(paths):
+                        key = f"audio_{idx:05d}"
+                        if key not in audio_keys:
+                            print(f"    Warning: {shard_path.name} missing {key} for path {path}")
                             continue
-
-                        for idx, path in enumerate(paths):
-                            key = f"audio_{idx:05d}"
-                            if key not in audio_keys:
-                                print(f"    Warning: {shard_path.name} missing {key} for path {path}")
-                                continue
-                            category_index[str(path)] = (shard_rel_path, key)
-                    else:
-                        # Legacy format: no paths, just count
-                        legacy_shards += 1
-                        audio_count = len([k for k in npz.files if k.startswith("audio_")])
-                        # Can't recover paths, just note how many files
-                        for idx in range(audio_count):
-                            key = f"audio_{idx:05d}"
-                            # Use shard+key as placeholder path (won't match input files)
-                            placeholder = f"__legacy__/{shard_rel_path}/{key}"
-                            category_index[placeholder] = (shard_rel_path, key)
+                        category_index[str(path)] = (shard_rel_path, key)
             except Exception as e:
                 print(f"    Warning: Failed to read {shard_path}: {e}")
-                corrupt_shards += 1
 
         if category_index:
             all_indices[category] = category_index
             print(f"  {category}: {len(category_index):,} files indexed")
-
-    if corrupt_shards > 0:
-        print(f"\n  WARNING: {corrupt_shards} corrupt/inconsistent shards found and skipped.")
-        print("  These files will be reprocessed on next run.")
-
-    if legacy_shards > 0:
-        print(f"\n  WARNING: {legacy_shards} shards are in legacy format (no embedded paths).")
-        print("  Resume will NOT skip these files - they will be reprocessed.")
-        print("  To fix: delete the cache and rebuild with the latest version.")
-
-    return all_indices
 
     return all_indices
 
