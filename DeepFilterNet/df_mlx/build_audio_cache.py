@@ -80,7 +80,14 @@ except ImportError:
 
 @dataclass
 class ShardWriter:
-    """Writes audio arrays to sharded NPZ files."""
+    """Writes audio arrays to sharded NPZ files.
+
+    Each shard contains:
+    - __paths__: numpy array of original file paths (string)
+    - audio_00000, audio_00001, ...: audio arrays
+
+    This makes shards self-contained and allows index reconstruction.
+    """
 
     output_dir: Path
     category: str  # 'speech', 'noise', or 'rir'
@@ -92,6 +99,7 @@ class ShardWriter:
         self.shard_dir = self.output_dir / self.category
         self.shard_dir.mkdir(parents=True, exist_ok=True)
         self.current_shard: Dict[str, np.ndarray] = {}
+        self.current_paths: List[str] = []  # Paths for current shard
         self.current_shard_idx = self.resume_from_shard
         self.index: Dict[str, Tuple[str, str]] = {}  # path -> (shard_file, key)
         self._lock = threading.Lock()
@@ -110,24 +118,35 @@ class ShardWriter:
     def add(self, original_path: str, audio: np.ndarray) -> None:
         """Add an audio array to the current shard."""
         with self._lock:
-            key = f"audio_{len(self.current_shard):05d}"
+            idx = len(self.current_shard)
+            key = f"audio_{idx:05d}"
             self.current_shard[key] = audio
-            # Store relative path: category/shard_NNNN.npz
-            shard_rel_path = f"{self.category}/shard_{self.current_shard_idx:04d}.npz"
+
+            # Store path for embedding in shard
             index_key = self._get_index_key(original_path)
+            self.current_paths.append(index_key)
+
+            # Update in-memory index
+            shard_rel_path = f"{self.category}/shard_{self.current_shard_idx:04d}.npz"
             self.index[index_key] = (shard_rel_path, key)
 
             if len(self.current_shard) >= self.shard_size:
                 self._flush_shard()
 
     def _flush_shard(self) -> None:
-        """Write current shard to disk."""
+        """Write current shard to disk with embedded paths."""
         if not self.current_shard:
             return
 
         shard_path = self.shard_dir / f"shard_{self.current_shard_idx:04d}.npz"
-        np.savez_compressed(shard_path, **self.current_shard)
+
+        # Include paths array in shard for index reconstruction
+        shard_data = dict(self.current_shard)
+        shard_data["__paths__"] = np.array(self.current_paths, dtype=object)
+
+        np.savez_compressed(shard_path, **shard_data)
         self.current_shard = {}
+        self.current_paths = []
         self.current_shard_idx += 1
 
     def finalize(self) -> Dict[str, Tuple[str, str]]:
@@ -318,6 +337,67 @@ def build_cache_for_category(
     return merged_index, stats
 
 
+def rebuild_index_from_shards(output_dir: Path) -> Dict[str, Dict[str, Tuple[str, str]]]:
+    """Reconstruct index.json from existing shard files.
+
+    Reads the __paths__ array embedded in each shard to recover the
+    original file path -> (shard_file, audio_key) mapping.
+
+    For shards without __paths__ (legacy format), falls back to counting
+    audio arrays but warns that resume won't work.
+    """
+    print("Rebuilding index from existing shards...")
+    all_indices: Dict[str, Dict[str, Tuple[str, str]]] = {}
+    legacy_shards = 0
+
+    for category in ["speech", "noise", "rir"]:
+        shard_dir = output_dir / category
+        if not shard_dir.exists():
+            continue
+
+        category_index: Dict[str, Tuple[str, str]] = {}
+        shard_files = sorted(shard_dir.glob("shard_*.npz"))
+
+        if not shard_files:
+            continue
+
+        print(f"  Scanning {category}: {len(shard_files)} shards...")
+
+        for shard_path in tqdm(shard_files, desc=f"  {category}", unit="shard"):
+            shard_rel_path = f"{category}/{shard_path.name}"
+            try:
+                with np.load(shard_path, allow_pickle=True) as npz:
+                    if "__paths__" in npz.files:
+                        # New format: paths embedded in shard
+                        paths = npz["__paths__"]
+                        for idx, path in enumerate(paths):
+                            key = f"audio_{idx:05d}"
+                            category_index[str(path)] = (shard_rel_path, key)
+                    else:
+                        # Legacy format: no paths, just count
+                        legacy_shards += 1
+                        audio_count = len([k for k in npz.files if k.startswith("audio_")])
+                        # Can't recover paths, just note how many files
+                        for idx in range(audio_count):
+                            key = f"audio_{idx:05d}"
+                            # Use shard+key as placeholder path (won't match input files)
+                            placeholder = f"__legacy__/{shard_rel_path}/{key}"
+                            category_index[placeholder] = (shard_rel_path, key)
+            except Exception as e:
+                print(f"    Warning: Failed to read {shard_path}: {e}")
+
+        if category_index:
+            all_indices[category] = category_index
+            print(f"  {category}: {len(category_index):,} files indexed")
+
+    if legacy_shards > 0:
+        print(f"\n  WARNING: {legacy_shards} shards are in legacy format (no embedded paths).")
+        print("  Resume will NOT skip these files - they will be reprocessed.")
+        print("  To fix: delete the cache and rebuild with the latest version.")
+
+    return all_indices
+
+
 def main():
     parser = argparse.ArgumentParser(description="Build pre-processed audio cache for MLX training")
 
@@ -353,6 +433,11 @@ def main():
         "--resume",
         action="store_true",
         help="Resume from existing index.json (skip already-cached files)",
+    )
+    parser.add_argument(
+        "--rebuild-index",
+        action="store_true",
+        help="Rebuild index.json from existing shard files (use if previous run was interrupted)",
     )
 
     # Index path storage
@@ -412,7 +497,30 @@ def main():
     # Load existing index for resume support
     existing_indices: Dict[str, Dict[str, Tuple[str, str]]] = {}
     index_path = output_dir / "index.json"
-    if args.resume and index_path.exists():
+
+    # Rebuild index from shards if requested or if resuming without index
+    if args.rebuild_index or (args.resume and not index_path.exists()):
+        # Check if any shards exist
+        has_shards = any((output_dir / cat).exists() for cat in ["speech", "noise", "rir"])
+        if has_shards:
+            if not args.rebuild_index:
+                print("\nResume mode: No index.json found but shards exist - rebuilding index...")
+            existing_indices = rebuild_index_from_shards(output_dir)
+            # Save the rebuilt index immediately
+            if existing_indices:
+                with open(index_path, "w") as f:
+                    json.dump(existing_indices, f)
+                print(f"Saved rebuilt index to {index_path}")
+                if args.rebuild_index:
+                    print("\nIndex rebuild complete. Exiting.")
+                    print(f"Total indexed: {sum(len(idx) for idx in existing_indices.values()):,} files")
+                    return
+        elif args.rebuild_index:
+            print("\nNo existing shards found to rebuild index from.")
+            return
+        else:
+            print("\nResume mode: No existing index or shards found, starting fresh")
+    elif args.resume and index_path.exists():
         print(f"\nResume mode: Loading existing index from {index_path}")
         with open(index_path) as f:
             existing_indices = json.load(f)
@@ -461,6 +569,21 @@ def main():
 
     # Noise cache
     noise_index, noise_stats = build_cache_for_category(
+        speech_files,
+        "speech",
+        output_dir,
+        args.sample_rate,
+        args.shard_size,
+        args.num_workers,
+        normalize=True,
+        existing_index=existing_indices.get("speech"),
+        base_dir=args.base_dir,
+    )
+    all_indices["speech"] = speech_index
+    all_stats["speech"] = speech_stats
+
+    # Noise cache
+    noise_index, noise_stats = build_cache_for_category(
         noise_files,
         "noise",
         output_dir,
@@ -492,7 +615,7 @@ def main():
 
     elapsed = time.time() - start_time
 
-    # Write index file
+    # Write index file (can be reconstructed from shards if lost)
     index_path = output_dir / "index.json"
     with open(index_path, "w") as f:
         json.dump(all_indices, f)
