@@ -216,6 +216,11 @@ def train(
             num_workers=num_workers,
         )
 
+    # Create dataset (this populates config.*_files from cache index if using cache)
+    print("\nInitializing dynamic dataset...")
+    dataset = DynamicDataset(config)
+
+    # Print file counts after dataset init (so cache files are included)
     print(f"Speech files:   {len(config.speech_files):,}")
     print(f"Noise files:    {len(config.noise_files):,}")
     print(f"RIR files:      {len(config.rir_files):,}")
@@ -227,9 +232,6 @@ def train(
     print(f"P(clipping):    {config.p_clipping}")
     print("=" * 60)
 
-    # Create dataset
-    print("\nInitializing dynamic dataset...")
-    dataset = DynamicDataset(config)
     dataset.set_split("train")
 
     print(f"  Train samples: {len(dataset):,}")
