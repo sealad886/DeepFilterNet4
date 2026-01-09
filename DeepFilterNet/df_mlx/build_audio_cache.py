@@ -47,7 +47,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from queue import Queue
+from queue import Empty, Queue
 from typing import Dict, List, Optional, Tuple, cast
 
 import numpy as np
@@ -79,8 +79,180 @@ except ImportError:
 
 
 @dataclass
+class AsyncShardWriter:
+    """Writes audio arrays to sharded NPZ files with async I/O.
+
+    Each shard contains:
+    - __paths__: numpy array of original file paths (string)
+    - audio_00000, audio_00001, ...: audio arrays
+
+    Features:
+    - Background thread for compression/writes (doesn't block main thread)
+    - Double-buffered: accumulates next shard while previous writes
+    - Memory-bounded: tracks bytes in flight and can block if too high
+    """
+
+    output_dir: Path
+    category: str  # 'speech', 'noise', or 'rir'
+    shard_size: int = 500  # Files per shard
+    resume_from_shard: int = 0  # Starting shard index when resuming
+    base_dir: Optional[str] = None  # Base dir for relative paths in index
+    max_pending_bytes: int = 2 * 1024 * 1024 * 1024  # 2GB max in-flight
+
+    def __post_init__(self):
+        self.shard_dir = self.output_dir / self.category
+        self.shard_dir.mkdir(parents=True, exist_ok=True)
+        self.current_shard: Dict[str, np.ndarray] = {}
+        self.current_paths: List[str] = []
+        self.current_shard_idx = self.resume_from_shard
+        self.current_shard_bytes = 0
+        self.index: Dict[str, Tuple[str, str]] = {}
+        self._lock = threading.Lock()
+        self._base_path = Path(self.base_dir) if self.base_dir else None
+
+        # Async write infrastructure
+        self._write_queue: Queue[Optional[Tuple[Path, Dict[str, np.ndarray], List[str], int]]] = Queue(maxsize=2)
+        self._pending_bytes = 0
+        self._bytes_lock = threading.Lock()
+        self._bytes_available = threading.Condition(self._bytes_lock)
+        self._shutdown = False
+        self._write_error: Optional[Exception] = None
+
+        # Start background write thread
+        self._write_thread = threading.Thread(target=self._write_worker, daemon=True)
+        self._write_thread.start()
+
+    def _write_worker(self):
+        """Background thread that handles shard compression and writing."""
+        while True:
+            try:
+                item = self._write_queue.get(timeout=0.1)
+            except Empty:
+                if self._shutdown:
+                    break
+                continue
+
+            if item is None:  # Shutdown signal
+                break
+
+            shard_path, shard_data, paths, shard_bytes = item
+
+            try:
+                self._write_shard_sync(shard_path, shard_data, paths)
+            except Exception as e:
+                self._write_error = e
+            finally:
+                # Release memory budget
+                with self._bytes_available:
+                    self._pending_bytes -= shard_bytes
+                    self._bytes_available.notify_all()
+
+    def _write_shard_sync(self, shard_path: Path, shard_data: Dict[str, np.ndarray], paths: List[str]) -> None:
+        """Synchronously write a shard to disk (called from worker thread)."""
+        temp_path = shard_path.parent / f"{shard_path.stem}.tmp"
+        temp_path_with_npz = temp_path.with_suffix(".tmp.npz")
+
+        # Skip if shard already exists
+        if shard_path.exists():
+            return
+
+        # Add paths to shard data
+        shard_data["__paths__"] = np.array(paths, dtype=object)
+
+        try:
+            np.savez_compressed(temp_path, **shard_data)
+            if temp_path_with_npz.exists():
+                temp_path_with_npz.rename(shard_path)
+        except Exception as e:
+            if temp_path_with_npz.exists():
+                temp_path_with_npz.unlink()
+            raise RuntimeError(f"Failed to write shard {shard_path}: {e}") from e
+
+    def _get_index_key(self, original_path: str) -> str:
+        """Convert absolute path to index key (relative if base_dir set)."""
+        if self._base_path:
+            try:
+                return str(Path(original_path).relative_to(self._base_path))
+            except ValueError:
+                return original_path
+        return original_path
+
+    def _wait_for_memory(self, needed_bytes: int) -> None:
+        """Block until enough memory budget is available."""
+        with self._bytes_available:
+            while self._pending_bytes + needed_bytes > self.max_pending_bytes:
+                if self._write_error:
+                    raise self._write_error
+                self._bytes_available.wait(timeout=0.5)
+
+    def add(self, original_path: str, audio: np.ndarray) -> None:
+        """Add an audio array to the current shard."""
+        # Check for errors from write thread
+        if self._write_error:
+            raise self._write_error
+
+        audio_bytes = audio.nbytes
+
+        with self._lock:
+            idx = len(self.current_shard)
+            key = f"audio_{idx:05d}"
+            self.current_shard[key] = audio
+            self.current_shard_bytes += audio_bytes
+
+            index_key = self._get_index_key(original_path)
+            self.current_paths.append(index_key)
+
+            shard_rel_path = f"{self.category}/shard_{self.current_shard_idx:04d}.npz"
+            self.index[index_key] = (shard_rel_path, key)
+
+            if len(self.current_shard) >= self.shard_size:
+                self._flush_shard_async()
+
+    def _flush_shard_async(self) -> None:
+        """Queue current shard for async write."""
+        if not self.current_shard:
+            return
+
+        shard_path = self.shard_dir / f"shard_{self.current_shard_idx:04d}.npz"
+        shard_bytes = self.current_shard_bytes
+
+        # Capture current shard data
+        shard_data = self.current_shard
+        paths = self.current_paths
+
+        # Reset state for next shard
+        self.current_shard = {}
+        self.current_paths = []
+        self.current_shard_bytes = 0
+        self.current_shard_idx += 1
+
+        # Wait for memory budget (outside lock to avoid deadlock)
+        self._wait_for_memory(shard_bytes)
+        with self._bytes_lock:
+            self._pending_bytes += shard_bytes
+
+        self._write_queue.put((shard_path, shard_data, paths, shard_bytes))
+
+    def finalize(self) -> Dict[str, Tuple[str, str]]:
+        """Flush remaining data and wait for all writes to complete."""
+        with self._lock:
+            if self.current_shard:
+                self._flush_shard_async()
+
+        # Signal shutdown and wait for write thread
+        self._shutdown = True
+        self._write_queue.put(None)
+        self._write_thread.join(timeout=300)  # 5 min timeout
+
+        if self._write_error:
+            raise self._write_error
+
+        return self.index
+
+
+@dataclass
 class ShardWriter:
-    """Writes audio arrays to sharded NPZ files.
+    """Writes audio arrays to sharded NPZ files (synchronous version).
 
     Each shard contains:
     - __paths__: numpy array of original file paths (string)
@@ -309,7 +481,7 @@ def build_cache_for_category(
             "skipped": skipped_count,
         }
 
-    writer = ShardWriter(output_dir, category, shard_size, resume_from_shard=resume_from_shard, base_dir=base_dir)
+    writer = AsyncShardWriter(output_dir, category, shard_size, resume_from_shard=resume_from_shard, base_dir=base_dir)
 
     # Stats
     total_files = len(files_to_process)
