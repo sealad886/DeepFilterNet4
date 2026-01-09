@@ -401,9 +401,9 @@ def train(
     # Loss function
     def loss_fn(model, noisy_real, noisy_imag, feat_erb, feat_spec, clean_real, clean_imag):
         """Compute training loss."""
-        # Reconstruct complex spec as stacked real/imag
-        noisy_spec = mx.stack([noisy_real, noisy_imag], axis=-1)
-        target_spec = mx.stack([clean_real, clean_imag], axis=-1)
+        # Model expects spec as tuple (real, imag)
+        noisy_spec = (noisy_real, noisy_imag)
+        target_spec = (clean_real, clean_imag)
 
         out = model(noisy_spec, feat_erb, feat_spec)
         return spectral_loss(out, target_spec)
@@ -597,8 +597,9 @@ def train(
                 feat_erb = batch["feat_erb"]
                 feat_spec = batch["feat_spec"]
 
-                noisy_spec = mx.stack([noisy_real, noisy_imag], axis=-1)
-                target_spec = mx.stack([clean_real, clean_imag], axis=-1)
+                # Model expects spec as tuple (real, imag)
+                noisy_spec = (noisy_real, noisy_imag)
+                target_spec = (clean_real, clean_imag)
 
                 out = model(noisy_spec, feat_erb, feat_spec)
                 loss = spectral_loss(out, target_spec)

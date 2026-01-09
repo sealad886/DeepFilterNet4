@@ -38,7 +38,7 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Queue
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import mlx.core as mx
 import numpy as np
@@ -167,17 +167,20 @@ class ShardedAudioCache:
         # Get list of available files
         self.files = list(self.index.keys())
 
-        # Cache for loaded shards (keep a few in memory)
-        self._shard_cache: Dict[str, Dict[str, np.ndarray]] = {}
+        # Cache for loaded shards - keep NpzFile objects open for lazy loading
+        self._shard_cache: Dict[str, Any] = {}  # NpzFile objects
         self._shard_access: List[str] = []
-        self._max_shards = 10  # Keep up to 10 shards in memory
+        self._max_shards = 20  # Keep up to 20 shards in memory (lazy, so minimal RAM)
         self._lock = threading.Lock()
 
     def __len__(self) -> int:
         return len(self.files)
 
-    def _load_shard(self, shard_rel_path: str) -> Dict[str, np.ndarray]:
-        """Load a shard from disk or cache.
+    def _get_shard(self, shard_rel_path: str) -> Any:  # Returns NpzFile
+        """Get a shard NpzFile, loading from disk if needed.
+
+        Uses lazy loading - the NpzFile object is kept open and arrays are
+        loaded on-demand when accessed, not all at once.
 
         Args:
             shard_rel_path: Relative path from cache_dir (e.g., "speech/shard_0000.npz")
@@ -189,20 +192,21 @@ class ShardedAudioCache:
                 self._shard_access.append(shard_rel_path)
                 return self._shard_cache[shard_rel_path]
 
-        # Load from disk (shard_rel_path is relative to cache_dir)
+        # Open NpzFile lazily (arrays loaded on access, not upfront)
         shard_path = self.cache_dir / shard_rel_path
-        shard_data = dict(np.load(shard_path))
+        npz_file = np.load(shard_path, mmap_mode="r")
 
         with self._lock:
             # Evict oldest if at capacity
             while len(self._shard_cache) >= self._max_shards:
                 oldest = self._shard_access.pop(0)
-                del self._shard_cache[oldest]
+                old_npz = self._shard_cache.pop(oldest)
+                old_npz.close()
 
-            self._shard_cache[shard_rel_path] = shard_data
+            self._shard_cache[shard_rel_path] = npz_file
             self._shard_access.append(shard_rel_path)
 
-        return shard_data
+        return npz_file
 
     def load(self, path: str) -> np.ndarray:
         """Load audio array by original file path."""
@@ -210,8 +214,9 @@ class ShardedAudioCache:
             raise KeyError(f"File not in cache: {path}")
 
         shard_name, key = self.index[path]
-        shard_data = self._load_shard(shard_name)
-        return shard_data[key]
+        npz_file = self._get_shard(shard_name)
+        # Access the specific array - this triggers lazy load of just that array
+        return np.asarray(npz_file[key])
 
     def load_random(self) -> np.ndarray:
         """Load a random audio file from the cache."""
