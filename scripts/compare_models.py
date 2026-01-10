@@ -375,14 +375,49 @@ class DeepFilterNet4MLXEnhancer:
         self.model = None
         self._initialized = False
 
+    def _detect_backbone_type(self, checkpoint_path: str) -> str:
+        """Detect backbone type from checkpoint weights.
+
+        Args:
+            checkpoint_path: Path to checkpoint file
+
+        Returns:
+            Backbone type: 'attention', 'gru', or 'mamba'
+        """
+        import mlx.core as mx
+
+        weights = mx.load(checkpoint_path)
+        weight_keys = set(weights.keys())
+
+        # Check for attention-specific keys
+        if any("attention_layers" in k for k in weight_keys):
+            return "attention"
+        # Check for GRU-specific keys
+        elif any("gru_layers" in k or "gru.weight" in k for k in weight_keys):
+            return "gru"
+        # Default to mamba
+        else:
+            return "mamba"
+
     def initialize(self):
         if self._initialized:
             return
 
+        from df_mlx.config import BackboneParams, ModelParams4
         from df_mlx.model import init_model
         from df_mlx.train import load_checkpoint
 
-        self.model = init_model()
+        # Detect backbone type from checkpoint
+        backbone_type = "gru"  # Default
+        if self.checkpoint_path:
+            backbone_type = self._detect_backbone_type(self.checkpoint_path)
+            print(f"  [DFNet4-MLX] Detected backbone: {backbone_type}")
+
+        # Create config with correct backbone type
+        config = ModelParams4()
+        config.backbone = BackboneParams(backbone_type=backbone_type)
+
+        self.model = init_model(config=config)
 
         if self.checkpoint_path:
             load_checkpoint(self.model, self.checkpoint_path)
