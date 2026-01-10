@@ -512,8 +512,9 @@ def train(
         min_lr=learning_rate * 0.01,
     )
 
-    # Optimizer
-    optimizer = optim.AdamW(learning_rate=schedule)
+    # Optimizer - use fixed learning rate (schedule applied manually before each step)
+    # This is required because schedule callbacks can't run inside mx.compile()
+    optimizer = optim.AdamW(learning_rate=learning_rate)
 
     # Loss function - define as a pure function for compilation
     def loss_fn(model, noisy_real, noisy_imag, feat_erb, feat_spec, clean_real, clean_imag):
@@ -637,6 +638,10 @@ def train(
                 feat_spec = feat_spec.astype(mx.float16)
 
             current_batch_size = noisy_real.shape[0]
+
+            # Update learning rate from schedule (must be done outside compiled step)
+            current_lr = schedule(global_step)
+            optimizer.learning_rate = current_lr
 
             # Forward, backward, and update (either compiled or standard)
             fwd_start = time.time()
