@@ -1499,22 +1499,35 @@ class MLXDataStream:
         worker threads, enabling concurrent sample loading.
 
         Args:
-            sample_dict: Dictionary with 'idx' key for sample index
+            sample_dict: Dictionary with 'idx' key for sample index and
+                        'fallbacks' key for backup indices to try
 
         Returns:
-            Dictionary with processed audio features as numpy arrays
+            Dictionary with processed audio features as numpy arrays.
+
+        Raises:
+            RuntimeError: If all sample indices fail to load (no dummy data used).
         """
-        # Extract index from numpy array (mlx-data stores as array)
+        # Extract primary index
         idx_val = sample_dict["idx"]
         if isinstance(idx_val, np.ndarray):
-            idx = int(idx_val.item())
+            primary_idx = int(idx_val.item())
         else:
-            idx = int(idx_val)
+            primary_idx = int(idx_val)
 
-        # Use retry logic for failed samples
-        max_retries = 3
-        for attempt in range(max_retries):
-            sample = self.dataset.get_sample(idx)
+        # Extract fallback indices
+        fallbacks = sample_dict.get("fallbacks", np.array([], dtype=np.int32))
+        if isinstance(fallbacks, np.ndarray):
+            fallback_list = fallbacks.tolist()
+        else:
+            fallback_list = list(fallbacks) if fallbacks is not None else []
+
+        # Build full list of indices to try: primary first, then fallbacks
+        indices_to_try = [primary_idx] + fallback_list
+
+        # Try each index until one succeeds
+        for try_idx in indices_to_try:
+            sample = self.dataset.get_sample(try_idx)
             if sample is not None:
                 # mlx-data requires contiguous arrays with consistent dtypes
                 # numpy rfft returns complex128 -> real/imag are float64, must cast to float32
@@ -1527,29 +1540,14 @@ class MLXDataStream:
                     "feat_spec": np.ascontiguousarray(sample.feat_spec, dtype=np.float32),
                     "snr": np.array([sample.snr], dtype=np.float32),
                     "gain": np.array([sample.gain], dtype=np.float32),
-                    "valid": np.array([1], dtype=np.int32),
                 }
-            # Try a different random sample on failure
-            idx = (idx + 1) % len(self.dataset)
 
-        # All retries failed - return invalid marker
-        # Create dummy data with correct shapes
-        n_frames = int(self.dataset.segment_samples / self.dataset.hop_size) + 1
-        n_freqs = self.dataset.fft_size // 2 + 1
-        nb_erb = self.dataset.config.nb_erb
-        nb_df = self.dataset.config.nb_df
-
-        return {
-            "noisy_real": np.zeros((n_frames, n_freqs), dtype=np.float32),
-            "noisy_imag": np.zeros((n_frames, n_freqs), dtype=np.float32),
-            "clean_real": np.zeros((n_frames, n_freqs), dtype=np.float32),
-            "clean_imag": np.zeros((n_frames, n_freqs), dtype=np.float32),
-            "feat_erb": np.zeros((n_frames, nb_erb), dtype=np.float32),
-            "feat_spec": np.zeros((n_frames, nb_df, 2), dtype=np.float32),
-            "snr": np.array([0.0], dtype=np.float32),
-            "gain": np.array([0.0], dtype=np.float32),
-            "valid": np.array([0], dtype=np.int32),
-        }
+        # All indices failed - raise error (no dummy data!)
+        raise RuntimeError(
+            f"Failed to load sample after trying {len(indices_to_try)} indices. "
+            f"Primary index: {primary_idx}. This indicates a data integrity issue. "
+            "Please verify your audio cache with validate_audio_cache.py."
+        )
 
     def _create_stream(self, skip_batches: int = 0) -> Any:
         """Create mlx-data stream for current epoch.
@@ -1573,8 +1571,18 @@ class MLXDataStream:
         if skip_samples > 0 and skip_samples < len(indices):
             indices = indices[skip_samples:]
 
-        # Create sample metadata buffer
-        samples = [{"idx": np.array([i], dtype=np.int32)} for i in indices]
+        # Create sample metadata buffer with fallback indices for retry
+        # Each sample carries a list of indices to try if primary fails
+        samples = []
+        for i, primary_idx in enumerate(indices):
+            # Create fallback indices (next 10 samples in shuffled order)
+            fallbacks = [indices[(i + j) % len(indices)] for j in range(1, 11)]
+            samples.append(
+                {
+                    "idx": np.array([primary_idx], dtype=np.int32),
+                    "fallbacks": np.array(fallbacks, dtype=np.int32),
+                }
+            )
 
         # Build mlx-data pipeline
         stream = dx.buffer_from_vector(samples)
@@ -1642,19 +1650,14 @@ class MLXDataStream:
         """Iterate over batches with prefetching.
 
         Yields:
-            Dictionary of MLX arrays for each batch
+            Dictionary of MLX arrays for each batch.
+            All samples are real data - no dummy/fake data is ever used.
         """
         # Create stream, skipping already-processed batches on resume
         self._stream = self._create_stream(self._checkpoint.batch_idx)
         self._batch_count = self._checkpoint.batch_idx
 
         for batch in self._stream:
-            # Check for invalid samples in batch
-            valid_mask = batch.get("valid", np.ones(self.batch_size, dtype=np.int32))
-            if isinstance(valid_mask, np.ndarray) and valid_mask.min() == 0:
-                # Some samples invalid - skip this batch
-                continue
-
             # Update checkpoint state
             self._batch_count += 1
             self._checkpoint.batch_idx = self._batch_count
