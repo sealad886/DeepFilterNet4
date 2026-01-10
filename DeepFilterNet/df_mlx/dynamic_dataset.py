@@ -1516,14 +1516,15 @@ class MLXDataStream:
         for attempt in range(max_retries):
             sample = self.dataset.get_sample(idx)
             if sample is not None:
-                # mlx-data requires contiguous arrays
+                # mlx-data requires contiguous arrays with consistent dtypes
+                # numpy rfft returns complex128 -> real/imag are float64, must cast to float32
                 return {
-                    "noisy_real": np.ascontiguousarray(sample.noisy_spec.real),
-                    "noisy_imag": np.ascontiguousarray(sample.noisy_spec.imag),
-                    "clean_real": np.ascontiguousarray(sample.clean_spec.real),
-                    "clean_imag": np.ascontiguousarray(sample.clean_spec.imag),
-                    "feat_erb": np.ascontiguousarray(sample.feat_erb),
-                    "feat_spec": np.ascontiguousarray(sample.feat_spec),
+                    "noisy_real": np.ascontiguousarray(sample.noisy_spec.real, dtype=np.float32),
+                    "noisy_imag": np.ascontiguousarray(sample.noisy_spec.imag, dtype=np.float32),
+                    "clean_real": np.ascontiguousarray(sample.clean_spec.real, dtype=np.float32),
+                    "clean_imag": np.ascontiguousarray(sample.clean_spec.imag, dtype=np.float32),
+                    "feat_erb": np.ascontiguousarray(sample.feat_erb, dtype=np.float32),
+                    "feat_spec": np.ascontiguousarray(sample.feat_spec, dtype=np.float32),
                     "snr": np.array([sample.snr], dtype=np.float32),
                     "gain": np.array([sample.gain], dtype=np.float32),
                     "valid": np.array([1], dtype=np.int32),
