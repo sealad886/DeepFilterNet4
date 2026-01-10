@@ -334,12 +334,81 @@ def read_file_list(path: str) -> List[str]:
     return files
 
 
+def merge_short_audio(
+    short_files: List[Tuple[str, np.ndarray]],
+    target_samples: int,
+    sample_rate: int,
+    merge_id: int,
+) -> Tuple[str, np.ndarray]:
+    """Merge multiple short audio files into one that meets the minimum duration.
+
+    Uses simple concatenation with 10ms crossfade at join points.
+
+    Args:
+        short_files: List of (path, audio_array) tuples to merge
+        target_samples: Minimum number of samples needed
+        sample_rate: Sample rate for crossfade calculation
+        merge_id: Unique ID for the merged file path
+
+    Returns:
+        Tuple of (merged_path, merged_audio)
+    """
+    # Crossfade length (10ms)
+    fade_samples = int(0.01 * sample_rate)
+
+    # Calculate total length after crossfades
+    total_samples = sum(len(audio) for _, audio in short_files)
+    # Subtract crossfade overlap for each join
+    total_samples -= fade_samples * (len(short_files) - 1)
+
+    # Pre-allocate output
+    result = np.zeros(total_samples, dtype=np.float32)
+
+    # Concatenate with crossfade
+    pos = 0
+    source_paths = []
+    for i, (path, audio) in enumerate(short_files):
+        source_paths.append(path)
+        if i == 0:
+            # First file - copy directly
+            result[pos : pos + len(audio)] = audio
+            pos += len(audio)
+        else:
+            # Apply crossfade at join point
+            fade_len = min(fade_samples, len(audio), pos)
+
+            # Fade out previous segment
+            fade_out = np.linspace(1.0, 0.0, fade_len, dtype=np.float32)
+            result[pos - fade_len : pos] *= fade_out
+
+            # Fade in current segment and add
+            fade_in = np.linspace(0.0, 1.0, fade_len, dtype=np.float32)
+            result[pos - fade_len : pos] += audio[:fade_len] * fade_in
+
+            # Copy remainder of current segment
+            if len(audio) > fade_len:
+                end_pos = pos + len(audio) - fade_len
+                result[pos:end_pos] = audio[fade_len:]
+                pos = end_pos
+
+    # Generate synthetic path that encodes the source files
+    merged_path = f"__merged_{merge_id:06d}__"
+
+    return merged_path, result
+
+
 def process_file(
     file_path: str,
     target_sr: int,
     normalize: bool = True,
-) -> Optional[Tuple[str, np.ndarray]]:
-    """Load and process a single audio file."""
+    min_samples: int = 0,
+) -> Optional[Tuple[str, np.ndarray, bool]]:
+    """Load and process a single audio file.
+
+    Returns:
+        Tuple of (path, audio, is_short) or None if failed.
+        is_short is True if audio length < min_samples.
+    """
     audio = load_audio_file(file_path, target_sr)
     if audio is None:
         return None
@@ -350,7 +419,8 @@ def process_file(
         if peak > 1e-6:
             audio = audio / peak
 
-    return (file_path, audio)
+    is_short = min_samples > 0 and len(audio) < min_samples
+    return (file_path, audio, is_short)
 
 
 def build_cache_for_category(
@@ -364,6 +434,8 @@ def build_cache_for_category(
     existing_index: Optional[Dict[str, Tuple[str, str]]] = None,
     base_dir: Optional[str] = None,
     max_writer_bytes: Optional[int] = None,
+    min_duration: float = 0.0,
+    merge_short: bool = False,
 ) -> Tuple[Dict[str, Tuple[str, str]], Dict]:
     """Build cache for a single category (speech/noise/rir).
 
@@ -377,12 +449,21 @@ def build_cache_for_category(
         normalize: Whether to normalize audio
         existing_index: Existing index from previous run (for resume)
         base_dir: Base directory for computing relative paths (None = absolute)
+        min_duration: Minimum audio duration in seconds (0 = no filter, only for speech)
+        merge_short: If True, merge short files; if False, skip them
 
     Returns:
         Tuple of (index dict, stats dict)
     """
     if not file_list:
-        return existing_index or {}, {"total": 0, "cached": 0, "failed": 0, "skipped": 0}
+        return existing_index or {}, {
+            "total": 0,
+            "cached": 0,
+            "failed": 0,
+            "skipped": 0,
+            "short_skipped": 0,
+            "merged": 0,
+        }
 
     # Helper to convert path to index key (same logic as ShardWriter)
     base_path = Path(base_dir) if base_dir else None
@@ -439,7 +520,15 @@ def build_cache_for_category(
             "cached": 0,
             "failed": 0,
             "skipped": skipped_count,
+            "short_skipped": 0,
+            "merged": 0,
         }
+
+    # Calculate minimum samples for speech files
+    min_samples = int(min_duration * sample_rate) if category == "speech" and min_duration > 0 else 0
+    if min_samples > 0:
+        action = "merge" if merge_short else "skip"
+        print(f"  Min duration: {min_duration}s ({min_samples:,} samples) - will {action} short files")
 
     writer_kwargs = {
         "output_dir": output_dir,
@@ -456,27 +545,64 @@ def build_cache_for_category(
     total_files = len(files_to_process)
     cached_count = 0
     failed_count = 0
+    short_skipped_count = 0
+    merged_count = 0
     total_samples = 0
     total_duration = 0.0
+
+    # Buffer for short files when merging
+    short_buffer: List[Tuple[str, np.ndarray]] = []
+    short_buffer_samples = 0
+    merge_id = 0
 
     # Use bounded queue to prevent OOM
     max_in_flight = num_workers * 4
     pending_futures: Queue[Future] = Queue(maxsize=max_in_flight)
 
     def submit_task(executor, path):
-        future = executor.submit(process_file, path, sample_rate, normalize)
+        future = executor.submit(process_file, path, sample_rate, normalize, min_samples)
         pending_futures.put(future)
+
+    def flush_short_buffer():
+        """Merge accumulated short files and write to cache."""
+        nonlocal short_buffer, short_buffer_samples, merge_id, merged_count
+        nonlocal cached_count, total_samples, total_duration
+        if not short_buffer:
+            return
+        merged_path, merged_audio = merge_short_audio(short_buffer, min_samples, sample_rate, merge_id)
+        writer.add(merged_path, merged_audio)
+        cached_count += 1
+        merged_count += 1
+        total_samples += len(merged_audio)
+        total_duration += len(merged_audio) / sample_rate
+        merge_id += 1
+        short_buffer = []
+        short_buffer_samples = 0
 
     def process_completed():
         nonlocal cached_count, failed_count, total_samples, total_duration
+        nonlocal short_buffer, short_buffer_samples, short_skipped_count
         future = pending_futures.get()
         result = future.result()
         if result is not None:
-            path, audio = result
-            writer.add(path, audio)
-            cached_count += 1
-            total_samples += len(audio)
-            total_duration += len(audio) / sample_rate
+            path, audio, is_short = result
+            if is_short:
+                if merge_short:
+                    # Add to buffer for merging
+                    short_buffer.append((path, audio))
+                    short_buffer_samples += len(audio)
+                    # Flush when buffer reaches target length
+                    if short_buffer_samples >= min_samples:
+                        flush_short_buffer()
+                else:
+                    # Skip short files
+                    short_skipped_count += 1
+            else:
+                # Normal file - add directly
+                writer.add(path, audio)
+                cached_count += 1
+                total_samples += len(audio)
+                total_duration += len(audio) / sample_rate
         else:
             failed_count += 1
 
@@ -498,6 +624,16 @@ def build_cache_for_category(
 
         pbar.close()
 
+    # Flush any remaining short files (discard if not enough to merge)
+    if short_buffer:
+        if short_buffer_samples >= min_samples:
+            flush_short_buffer()
+        else:
+            # Not enough to merge, skip these
+            short_skipped_count += len(short_buffer)
+            print(f"  Discarded {len(short_buffer)} short files at end (not enough to merge)")
+            short_buffer = []
+
     new_index = writer.finalize()
 
     # Merge with existing index
@@ -511,12 +647,18 @@ def build_cache_for_category(
         "cached": cached_count,
         "failed": failed_count,
         "skipped": skipped_count,
+        "short_skipped": short_skipped_count,
+        "merged": merged_count,
         "total_samples": total_samples,
         "total_duration_hours": total_duration / 3600,
         "num_shards": writer.current_shard_idx,
     }
 
     print(f"  Newly cached: {cached_count:,} files")
+    if short_skipped_count > 0:
+        print(f"  Short files skipped: {short_skipped_count:,}")
+    if merged_count > 0:
+        print(f"  Merged segments created: {merged_count:,}")
     print(f"  Duration: {total_duration / 3600:.1f} hours")
     print(f"  Total in index: {len(merged_index):,} files")
 
@@ -782,6 +924,21 @@ def main():
     parser.add_argument("--snr-min", type=float, default=-5.0)
     parser.add_argument("--snr-max", type=float, default=40.0)
 
+    # Short file handling (speech only)
+    parser.add_argument(
+        "--min-duration",
+        type=float,
+        default=0.0,
+        help="Minimum audio duration in seconds for speech files (0 = no filter). "
+        "Files shorter than this will be skipped or merged based on --merge-short.",
+    )
+    parser.add_argument(
+        "--merge-short",
+        action="store_true",
+        help="Merge short files together instead of skipping them. "
+        "Short files are concatenated with crossfade until they reach --min-duration.",
+    )
+
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -892,7 +1049,7 @@ def main():
     # Convert GB to bytes for async writer
     max_writer_bytes = args.max_pending_bytes * 1024 * 1024 * 1024
 
-    # Speech cache
+    # Speech cache (with short file handling)
     speech_index, speech_stats = build_cache_for_category(
         speech_files,
         "speech",
@@ -904,11 +1061,13 @@ def main():
         existing_index=existing_indices.get("speech"),
         base_dir=args.base_dir,
         max_writer_bytes=max_writer_bytes,
+        min_duration=args.min_duration,
+        merge_short=args.merge_short,
     )
     all_indices["speech"] = speech_index
     all_stats["speech"] = speech_stats
 
-    # Noise cache
+    # Noise cache (no min duration - noise can be any length)
     noise_index, noise_stats = build_cache_for_category(
         noise_files,
         "noise",
@@ -924,7 +1083,7 @@ def main():
     all_indices["noise"] = noise_index
     all_stats["noise"] = noise_stats
 
-    # RIR cache (if provided)
+    # RIR cache (no min duration - RIR can be any length)
     if rir_files:
         rir_index, rir_stats = build_cache_for_category(
             rir_files,
@@ -954,6 +1113,8 @@ def main():
         "cache_dir": str(output_dir),
         "sample_rate": args.sample_rate,
         "segment_length": args.segment_length,
+        "min_duration": args.min_duration,
+        "merge_short": args.merge_short,
         "fft_size": 960,
         "hop_size": 480,
         "nb_erb": 32,

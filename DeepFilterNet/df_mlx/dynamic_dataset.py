@@ -1017,14 +1017,19 @@ class DynamicDataset:
         return self.audio_cache.load(path)
 
     def _load_speech(self, idx: int) -> Optional[np.ndarray]:
-        """Load and prepare a speech sample."""
+        """Load and prepare a speech sample.
+
+        Returns None if the audio is shorter than segment_samples.
+        NOTE: When using a properly built cache (with --min-duration),
+        all speech files should be long enough.
+        """
         files = self.splits[self._current_split]
         path = files[idx]
 
         try:
             audio = self._load_audio(path, "speech")
 
-            # Skip if too short
+            # Skip audio that's too short (shouldn't happen with properly built cache)
             if len(audio) < self.segment_samples:
                 return None
 

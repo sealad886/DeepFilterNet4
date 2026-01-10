@@ -79,6 +79,17 @@ SHARD_SIZE="${SHARD_SIZE:-500}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
 MAX_PENDING_BYTES="${MAX_PENDING_BYTES:-8}"  # GB
 
+# Short file handling (speech only)
+# MIN_DURATION: Skip/merge speech files shorter than this (seconds)
+#   Set to 0 to disable filtering (include all files)
+#   Set to segment length (e.g. 5.0) to filter out files that can't provide full segments
+MIN_DURATION="${MIN_DURATION:-${SEGMENT_LENGTH}}"  # Default: same as segment length
+
+# MERGE_SHORT: What to do with short speech files
+#   false = skip short files (recommended - most datasets have enough long files)
+#   true = concatenate short files with crossfade until they reach MIN_DURATION
+MERGE_SHORT="${MERGE_SHORT:-false}"
+
 # ============================================================================
 # Validation
 # ============================================================================
@@ -92,6 +103,7 @@ echo "Output dir:       ${OUTPUT_DIR}"
 echo "List dir:         ${LIST_DIR}"
 echo "Sample rate:      ${SR} Hz"
 echo "Segment length:   ${SEGMENT_LENGTH}s"
+echo "Min duration:     ${MIN_DURATION}s (short files: $([ "${MERGE_SHORT}" = "true" ] && echo "merge" || echo "skip"))"
 echo "SNR range:        [${SNR_MIN}, ${SNR_MAX}] dB"
 echo "RIR prob:         ${RIR_PROB}"
 echo "Workers:          ${NUM_WORKERS}"
@@ -147,6 +159,12 @@ echo ""
 
 cd "${ROOT_DIR}/DeepFilterNet"
 
+# Build merge-short argument
+MERGE_SHORT_ARG=""
+if [[ "${MERGE_SHORT}" == "true" ]]; then
+  MERGE_SHORT_ARG="--merge-short"
+fi
+
 python -m df_mlx.build_audio_cache \
   --speech-list "${CLEAN_LIST}" \
   --noise-list "${NOISE_LIST}" \
@@ -154,6 +172,8 @@ python -m df_mlx.build_audio_cache \
   --output-dir "${OUTPUT_DIR}" \
   --sample-rate "${SR}" \
   --segment-length "${SEGMENT_LENGTH}" \
+  --min-duration "${MIN_DURATION}" \
+  ${MERGE_SHORT_ARG} \
   --shard-size "${SHARD_SIZE}" \
   --num-workers "${NUM_WORKERS}" \
   --snr-min "${SNR_MIN}" \
