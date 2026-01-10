@@ -5,7 +5,7 @@
 repos:
   # Standard pre-commit hooks for code hygiene
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v5.0.0
+    rev: v6.0.0
     hooks:
       - id: trailing-whitespace
         args: [--markdown-linebreak-ext=md]
@@ -22,21 +22,21 @@ repos:
 
   # Python formatting - matches python_lint.yml CI
   - repo: https://github.com/psf/black
-    rev: 24.10.0
+    rev: 25.12.0
     hooks:
       - id: black
         # Uses pyproject.toml [tool.black] config automatically
 
   # Python import sorting - matches python_lint.yml CI
   - repo: https://github.com/pycqa/isort
-    rev: 5.13.2
+    rev: 7.0.0
     hooks:
       - id: isort
         # Uses pyproject.toml [tool.isort] config automatically
 
   # Python linting - matches python_lint.yml CI
   - repo: https://github.com/PyCQA/flake8
-    rev: 7.1.1
+    rev: 7.3.0
     hooks:
       - id: flake8
         # Uses .flake8 config file automatically
