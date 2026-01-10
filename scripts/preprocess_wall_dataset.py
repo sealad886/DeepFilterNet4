@@ -233,6 +233,7 @@ def extract_noise_samples(
     output_dir: Path,
     max_noise_files: int = 100,
     min_duration: float = 1.0,
+    start_index: int = 0,
 ) -> List[str]:
     """Extract pure noise samples from silent segments."""
     import soundfile as sf
@@ -255,7 +256,7 @@ def extract_noise_samples(
             end_sample = int(seg.end_time * sr)
             noise_segment = audio[start_sample:end_sample]
 
-            out_path = noise_dir / f"noise_{i:04d}.wav"
+            out_path = noise_dir / f"noise_{start_index + i:04d}.wav"
             sf.write(out_path, noise_segment, sr)
             noise_files.append(str(out_path))
         except Exception as e:
@@ -287,6 +288,10 @@ def create_training_pairs(
     noisy_dir.mkdir(parents=True, exist_ok=True)
     clean_dir.mkdir(parents=True, exist_ok=True)
 
+    # Continue numbering from existing cache to avoid overwrites on resume
+    existing_pairs = sorted(noisy_dir.glob("pair_*.wav"))
+    pair_count = len(existing_pairs)
+
     # Load noise profile (average of noise samples)
     if noise_files:
         noise_samples = []
@@ -309,7 +314,6 @@ def create_training_pairs(
     # Get active segments
     active_segments = [s for s in segments if not s.is_silent and s.output_path]
 
-    pair_count = 0
     files_processed = set()
 
     for seg in active_segments:
@@ -550,6 +554,11 @@ def main():
 
         # Process files (sequential for now, can parallelize later)
         for mp4_path in tqdm(mp4_files, desc="Processing files", unit="file"):
+            # Skip if already extracted to cache (resume support)
+            out_wav_path = output_dir / "wav" / mp4_path.parent.name / f"{mp4_path.stem}.wav"
+            if out_wav_path.exists():
+                continue
+
             result = process_single_file(
                 mp4_path,
                 output_dir,
@@ -577,7 +586,10 @@ def main():
 
     # Extract noise samples
     print("\nExtracting noise samples...")
-    noise_files = extract_noise_samples(all_segments, output_dir)
+    noise_dir = output_dir / "noise_samples"
+    existing_noise = sorted(noise_dir.glob("noise_*.wav")) if noise_dir.exists() else []
+    noise_files = [str(p) for p in existing_noise]
+    noise_files.extend(extract_noise_samples(all_segments, output_dir, start_index=len(existing_noise)))
     stats.noise_profile_files = noise_files
     print(f"   Created {len(noise_files)} noise sample files")
 
