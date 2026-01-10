@@ -445,7 +445,7 @@ def main():
     from mlx.utils import tree_flatten
 
     flat_params = tree_flatten(model.parameters())
-    num_params = sum(p.size for _, p in flat_params)
+    num_params = sum(p.size for _, p in flat_params)  # type: ignore
     print(f"Model parameters: {num_params:,}")
 
     # Create optimizer
