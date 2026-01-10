@@ -26,7 +26,7 @@ import uuid
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 from tqdm import tqdm
@@ -164,6 +164,23 @@ def detect_noise_threshold(energy_values: List[float], percentile: float = 25) -
     if not energy_values:
         return 0.01
     return np.percentile(energy_values, percentile)  # type: ignore
+
+
+def load_processed_index(index_path: Path) -> Set[str]:
+    if not index_path.exists():
+        return set()
+    try:
+        with open(index_path, "r") as f:
+            data = json.load(f)
+        return set(data)
+    except Exception:
+        return set()
+
+
+def save_processed_index(index_path: Path, processed: Set[str]):
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(index_path, "w") as f:
+        json.dump(sorted(processed), f, indent=2)
 
 
 def process_single_file(
@@ -516,6 +533,11 @@ def main():
         default=2.0,
         help="Segment duration in seconds",
     )
+    parser.add_argument(
+        "--keep-wav",
+        action="store_true",
+        help="Keep extracted full-length WAV cache (by default it is deleted after pairs are created)",
+    )
 
     args = parser.parse_args()
 
@@ -550,14 +572,19 @@ def main():
     # Initialize stats
     stats = DatasetStats(total_files=len(mp4_files))
 
+    # Processed index for resume without relying on wav cache
+    manifest_dir = output_dir / "manifests"
+    processed_index_path = manifest_dir / "processed_index.json"
+    processed_set = load_processed_index(processed_index_path)
+
     # Process files (parallel when workers > 1)
     print(f"\nProcessing files with {args.workers} worker(s)...")
 
-    # Filter out already processed files to support resume
+    # Filter out already processed files to support resume (manifest-based)
     to_process = []
     for mp4_path in mp4_files:
-        out_wav_path = output_dir / "wav" / mp4_path.parent.name / f"{mp4_path.stem}.wav"
-        if not out_wav_path.exists():
+        rel_key = str(mp4_path.relative_to(input_dir))
+        if rel_key not in processed_set:
             to_process.append(mp4_path)
 
     all_segments: List[AudioSegment] = []
@@ -567,7 +594,7 @@ def main():
     try:
         if args.workers and args.workers > 1:
             executor = ProcessPoolExecutor(max_workers=args.workers)
-            futures = [
+            future_to_path = {
                 executor.submit(
                     process_single_file,
                     mp4_path,
@@ -575,20 +602,22 @@ def main():
                     temp_root,
                     args.target_sr,
                     args.segment_duration,
-                )
+                ): mp4_path
                 for mp4_path in to_process
-            ]
+            }
 
             try:
                 for future in tqdm(
-                    as_completed(futures),
-                    total=len(futures),
+                    as_completed(future_to_path),
+                    total=len(future_to_path),
                     desc="Processing files",
                     unit="file",
                     dynamic_ncols=True,
                     smoothing=0.1,
                     mininterval=1.0,
                 ):
+                    mp4_path = future_to_path[future]
+                    rel_key = str(mp4_path.relative_to(input_dir))
                     result = future.result()
                     if result:
                         segments, duration = result
@@ -598,11 +627,13 @@ def main():
                         stats.total_segments += len(segments)
                         stats.silent_segments += sum(1 for s in segments if s.is_silent)
                         stats.active_segments += sum(1 for s in segments if not s.is_silent)
+                        processed_set.add(rel_key)
+                        save_processed_index(processed_index_path, processed_set)
                     else:
                         stats.failed_files += 1
             except KeyboardInterrupt:
                 print("\n⚠️ KeyboardInterrupt received. Cancelling workers and cleaning up...")
-                for future in futures:
+                for future in future_to_path:
                     future.cancel()
                 executor.shutdown(cancel_futures=True, wait=False)
                 executor = None
@@ -633,6 +664,9 @@ def main():
                         stats.total_segments += len(segments)
                         stats.silent_segments += sum(1 for s in segments if s.is_silent)
                         stats.active_segments += sum(1 for s in segments if not s.is_silent)
+                        rel_key = str(mp4_path.relative_to(input_dir))
+                        processed_set.add(rel_key)
+                        save_processed_index(processed_index_path, processed_set)
                     else:
                         stats.failed_files += 1
             except KeyboardInterrupt:
@@ -666,6 +700,13 @@ def main():
     # Create manifest
     print("\nCreating manifests...")
     create_manifest(output_dir, stats, all_segments)
+
+    # Optionally clean up full-length wav cache to save disk
+    if not args.keep_wav:
+        wav_dir = output_dir / "wav"
+        if wav_dir.exists():
+            shutil.rmtree(wav_dir, ignore_errors=True)
+            print("\n🧹 Removed cached WAV files to save disk (use --keep-wav to retain).")
 
     print("\n" + "=" * 60)
     print("✅ Preprocessing complete!")
