@@ -25,6 +25,7 @@ Usage:
     output = quantized_model(input_audio)
 """
 
+# TODO: Rewrite quantization with lazy loading and any other updates/modernizations made to the overall df_mlx codebase.
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Union
 
@@ -236,6 +237,7 @@ def load_quantized_model(
     if path.suffix == ".safetensors":
         weights = mx.load(str(path))
     else:
+        # TODO: This is incorrect, as df_mlx should now lazy load files
         weights = dict(mx.load(str(path)))
 
     model.load_weights(list(weights.items()), strict=strict)

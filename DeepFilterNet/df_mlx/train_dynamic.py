@@ -40,7 +40,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Tuple
+from typing import Literal, Tuple, cast
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -67,7 +67,7 @@ def print_hardware_diagnostics():
     # MLX device info
     print("\n[MLX]")
     print(f"  Default device: {mx.default_device()}")
-    print(f"  MLX version:    {mx.__version__ if hasattr(mx, '__version__') else 'Unknown'}")
+    print(f"  MLX version:    {mx.__version__ if hasattr(mx, '__version__') else 'Unknown'}")  # type: ignore
 
     # Try to get Apple Silicon info
     try:
@@ -193,7 +193,7 @@ def clip_grad_norm(grads, max_norm: float) -> Tuple[dict, float]:
             return tuple(apply_clip(v) for v in x)
         return x
 
-    return apply_clip(grads), grad_norm_val
+    return cast(dict, apply_clip(grads)), grad_norm_val
 
 
 def save_checkpoint(
@@ -246,6 +246,45 @@ def load_checkpoint(model: nn.Module, path: str | Path) -> dict:
     return state
 
 
+def cleanup_checkpoints(
+    checkpoint_dir: Path,
+    save_total_limit: int,
+    keep_best: bool = True,
+) -> None:
+    """Remove old checkpoints, keeping only the most recent ones.
+
+    Args:
+        checkpoint_dir: Directory containing checkpoints
+        save_total_limit: Maximum number of checkpoints to keep
+        keep_best: If True, always keep best.safetensors (doesn't count towards limit)
+    """
+    if save_total_limit <= 0:
+        return
+
+    # Find all checkpoint files (epoch_*.safetensors and step_*.safetensors)
+    ckpt_files = []
+    for pattern in ["epoch_*.safetensors", "step_*.safetensors"]:
+        ckpt_files.extend(checkpoint_dir.glob(pattern))
+
+    # Sort by modification time (oldest first)
+    ckpt_files.sort(key=lambda p: p.stat().st_mtime)
+
+    # Calculate how many to remove
+    num_to_remove = len(ckpt_files) - save_total_limit
+
+    if num_to_remove <= 0:
+        return
+
+    # Remove oldest checkpoints
+    for ckpt_path in ckpt_files[:num_to_remove]:
+        # Remove the safetensors file
+        ckpt_path.unlink(missing_ok=True)
+
+        # Also remove the accompanying state.json
+        state_path = ckpt_path.with_suffix(".state.json")
+        state_path.unlink(missing_ok=True)
+
+
 def train(
     cache_dir: str | None = None,
     speech_list: str | None = None,
@@ -259,7 +298,9 @@ def train(
     resume_from: str | None = None,
     resume_data_from: str | None = None,
     validate_every: int = 1,
-    checkpoint_every: int = 5,
+    save_strategy: Literal["no", "epoch", "steps"] = "epoch",
+    save_steps: int = 500,
+    save_total_limit: int | None = None,
     checkpoint_batches: int = 0,
     max_grad_norm: float = 1.0,
     warmup_epochs: int = 5,
@@ -287,7 +328,9 @@ def train(
         resume_from: Optional model checkpoint to resume from
         resume_data_from: Optional data checkpoint for resuming interrupted epoch
         validate_every: Validate every N epochs
-        checkpoint_every: Save checkpoint every N epochs
+        save_strategy: When to save checkpoints - "no", "epoch", or "steps"
+        save_steps: Number of steps between checkpoints (when save_strategy="steps")
+        save_total_limit: Maximum number of checkpoints to keep (None=unlimited)
         checkpoint_batches: Save data checkpoint every N batches (0=disabled)
         max_grad_norm: Maximum gradient norm for clipping
         warmup_epochs: Number of warmup epochs
@@ -674,6 +717,23 @@ def train(
                 if (batch_idx + 1) % checkpoint_batches == 0:
                     train_stream.save_checkpoint(data_checkpoint_path)
 
+            # Save model checkpoint by steps (HuggingFace-style)
+            if save_strategy == "steps" and save_steps > 0 and global_step % save_steps == 0:
+                ckpt_path = ckpt_dir / f"step_{global_step:06d}.safetensors"
+                save_checkpoint(
+                    model,
+                    ckpt_path,
+                    epoch=epoch + 1,
+                    loss=train_loss / num_train_batches,
+                    best_valid_loss=best_valid_loss,
+                    config=config.__dict__,
+                )
+                print(f"\n  Saved checkpoint: {ckpt_path} (step {global_step})")
+
+                # Cleanup old checkpoints if limit is set
+                if save_total_limit is not None:
+                    cleanup_checkpoints(ckpt_dir, save_total_limit)
+
             # Start timing for next data fetch
             data_start = time.time()
 
@@ -788,8 +848,8 @@ def train(
             f"{epoch_time:.1f}s"
         )
 
-        # ====== Checkpointing ======
-        if (epoch + 1) % checkpoint_every == 0:
+        # ====== Epoch-based Checkpointing ======
+        if save_strategy == "epoch":
             ckpt_path = ckpt_dir / f"epoch_{epoch + 1:03d}.safetensors"
             save_checkpoint(
                 model,
@@ -799,7 +859,9 @@ def train(
                 best_valid_loss=best_valid_loss,
                 config=config.__dict__,
             )
-            print(f"  Saved checkpoint: {ckpt_path}")
+            print(f"  📦 Checkpoint saved: {ckpt_path.name}")
+            if save_total_limit is not None:
+                cleanup_checkpoints(ckpt_dir, save_total_limit)
 
         # ====== Early Stopping ======
         if epochs_without_improvement >= patience:
@@ -891,10 +953,23 @@ def main():
         help="Validate every N epochs",
     )
     parser.add_argument(
-        "--checkpoint-every",
+        "--save-strategy",
+        type=str,
+        default="epoch",
+        choices=["no", "epoch", "steps"],
+        help="Checkpoint save strategy: 'no' (only best model), 'epoch' (every epoch), 'steps' (every N steps)",
+    )
+    parser.add_argument(
+        "--save-steps",
         type=int,
-        default=5,
-        help="Save checkpoint every N epochs",
+        default=500,
+        help="Save checkpoint every N steps (only when --save-strategy=steps)",
+    )
+    parser.add_argument(
+        "--save-total-limit",
+        type=int,
+        default=None,
+        help="Maximum number of checkpoints to keep (oldest removed first, best model always kept)",
     )
     parser.add_argument(
         "--checkpoint-batches",
@@ -993,7 +1068,9 @@ def main():
         resume_from=args.resume,
         resume_data_from=args.resume_data,
         validate_every=args.validate_every,
-        checkpoint_every=args.checkpoint_every,
+        save_strategy=cast(Literal["no", "epoch", "steps"], args.save_strategy),
+        save_steps=args.save_steps,
+        save_total_limit=args.save_total_limit,
         checkpoint_batches=args.checkpoint_batches,
         max_grad_norm=args.max_grad_norm,
         warmup_epochs=args.warmup_epochs,

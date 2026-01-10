@@ -31,7 +31,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Tuple
+from typing import Tuple, cast
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -153,7 +153,7 @@ def clip_grad_norm(grads, max_norm: float) -> Tuple[dict, float]:
             return tuple(apply_clip(v) for v in x)
         return x
 
-    return apply_clip(grads), grad_norm_val
+    return cast(dict, apply_clip(grads)), grad_norm_val
 
 
 def train(
@@ -304,6 +304,7 @@ def train(
             feat_spec = batch["feat_spec"]
             target = batch["target"]
 
+            # TODO: Test out to see if the typechecking error is actually an issue
             current_batch_size = spec.shape[0]
 
             # Forward and backward pass
