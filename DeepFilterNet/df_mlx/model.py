@@ -900,7 +900,7 @@ class DfNet4(nn.Module):
         # Encoder
         self.encoder = Encoder4(p)
 
-        # Backbone (Mamba or GRU based on config)
+        # Backbone (Mamba, GRU, or Attention based on config)
         backbone_type = getattr(p.backbone, "backbone_type", "mamba")
         if backbone_type == "gru":
             self.backbone = SqueezedGRU_S(
@@ -908,6 +908,18 @@ class DfNet4(nn.Module):
                 hidden_size=p.emb_hidden_dim,
                 output_size=p.emb_hidden_dim,
                 num_layers=p.backbone.nb_layers,
+                linear_groups=8,
+                gru_skip=True,
+            )
+        elif backbone_type == "attention":
+            from .modules import SqueezedAttention
+
+            self.backbone = SqueezedAttention(
+                input_size=p.emb_hidden_dim,
+                hidden_size=p.emb_hidden_dim,
+                output_size=p.emb_hidden_dim,
+                num_layers=p.backbone.nb_layers,
+                num_heads=getattr(p.backbone, "num_heads", 4),
                 linear_groups=8,
                 gru_skip=True,
             )

@@ -90,7 +90,7 @@ def main():
     print("Batch size: 8, Sequence length: 500 frames")
 
     results = {}
-    for backbone in ["mamba", "gru"]:
+    for backbone in ["mamba", "gru", "attention"]:
         fwd, bwd = profile_backbone(backbone)
         results[backbone] = {"forward": fwd, "backward": bwd}
 
@@ -100,12 +100,22 @@ def main():
     for name, times in results.items():
         total = times["forward"] + times["backward"]
         print(
-            f"{name.upper():6s}: Forward {times['forward']:.0f}ms, Backward {times['backward']:.0f}ms, Total {total:.0f}ms"
+            f"{name.upper():10s}: Forward {times['forward']:.0f}ms, "
+            f"Backward {times['backward']:.0f}ms, Total {total:.0f}ms"
         )
 
+    # Calculate speedups
     if "mamba" in results and "gru" in results:
         speedup = results["mamba"]["backward"] / results["gru"]["backward"]
         print(f"\nGRU backward is {speedup:.1f}x faster than Mamba!")
+
+    if "mamba" in results and "attention" in results:
+        speedup = results["mamba"]["backward"] / results["attention"]["backward"]
+        print(f"Attention backward is {speedup:.1f}x faster than Mamba!")
+
+    if "gru" in results and "attention" in results:
+        speedup = results["gru"]["backward"] / results["attention"]["backward"]
+        print(f"Attention backward is {speedup:.1f}x faster than GRU!")
 
 
 if __name__ == "__main__":

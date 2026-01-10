@@ -1089,9 +1089,9 @@ def main():
     parser.add_argument(
         "--backbone-type",
         type=str,
-        choices=["mamba", "gru"],
+        choices=["mamba", "gru", "attention"],
         default="mamba",
-        help="Backbone type: 'mamba' (parallel scan SSM) or 'gru' (faster backward pass for training)",
+        help="Backbone type: 'mamba' (parallel scan SSM), 'gru' (recurrent), or 'attention' (fastest backward)",
     )
     parser.add_argument(
         "-v",
