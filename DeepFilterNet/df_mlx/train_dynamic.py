@@ -152,11 +152,12 @@ def print_hardware_diagnostics():
     print("=" * 70 + "\n")
 
 
-def clip_grad_norm(grads, max_norm: float) -> Tuple[dict, float]:
+def clip_grad_norm(grads, max_norm: float) -> Tuple[dict, mx.array]:
     """Clip gradients by global norm.
 
     Returns:
-        Tuple of (clipped_grads, grad_norm) for monitoring.
+        Tuple of (clipped_grads, grad_norm) where grad_norm is an MLX array.
+        Call float(grad_norm) outside compiled functions to get the scalar value.
     """
     flat_grads = []
 
@@ -173,11 +174,10 @@ def clip_grad_norm(grads, max_norm: float) -> Tuple[dict, float]:
     flatten(grads)
 
     if not flat_grads:
-        return grads, 0.0
+        return grads, mx.array(0.0)
 
     total_norm_sq = sum(mx.sum(g**2) for g in flat_grads)
     total_norm = mx.sqrt(total_norm_sq)
-    grad_norm_val = float(total_norm)
 
     clip_coef = max_norm / (total_norm + 1e-6)
     clip_coef = mx.minimum(clip_coef, mx.array(1.0))
@@ -193,7 +193,7 @@ def clip_grad_norm(grads, max_norm: float) -> Tuple[dict, float]:
             return tuple(apply_clip(v) for v in x)
         return x
 
-    return cast(dict, apply_clip(grads)), grad_norm_val
+    return cast(dict, apply_clip(grads)), total_norm
 
 
 def save_checkpoint(
@@ -669,9 +669,10 @@ def train(
                 # Force evaluation to get accurate timing
                 mx.eval(loss)
 
-                # Gradient clipping (returns clipped grads and norm)
+                # Gradient clipping (returns clipped grads and norm as MLX array)
                 if max_grad_norm > 0:
-                    grads, grad_norm = clip_grad_norm(grads, max_grad_norm)
+                    grads, grad_norm_arr = clip_grad_norm(grads, max_grad_norm)
+                    grad_norm = float(grad_norm_arr)
 
                 # Update parameters
                 optimizer.update(model, grads)
