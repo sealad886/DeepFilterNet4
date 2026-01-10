@@ -573,7 +573,11 @@ def main():
         default=None,
         help="Worker threads for training pair creation (defaults to --workers)",
     )
-
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug mode and connect to IDE debugpy client.",
+    )
     args = parser.parse_args()
 
     print("=" * 60)
@@ -582,6 +586,26 @@ def main():
 
     # Check dependencies
     check_dependencies()
+
+    if args.debug:
+        import debugpy
+
+        debug_port = 5678
+        timeout = 30  # seconds
+
+        print(f"\n🐛 Debug mode enabled. Starting debugpy server on port {debug_port}...")
+        debugpy.listen(debug_port)
+        print(f"   Waiting up to {timeout} seconds for debugger to attach...")
+
+        # Implement timeout for wait_for_client using threading
+        wait_thread = threading.Thread(target=debugpy.wait_for_client, daemon=True)
+        wait_thread.start()
+        wait_thread.join(timeout=timeout)
+
+        if wait_thread.is_alive():
+            print(f"   ⚠️  No debugger attached within {timeout} seconds. Continuing without debugger.")
+        else:
+            print("   ✅ Debugger attached successfully!")
 
     input_dir = Path(args.input)
     output_dir = Path(args.output)
