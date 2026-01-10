@@ -20,6 +20,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
 import numpy as np
+from mlx.utils import tree_unflatten
 from tqdm import tqdm
 
 # Add DeepFilterNet to path
@@ -345,20 +346,6 @@ def validate(
     return total_metrics
 
 
-def _unflatten_dict(flat_dict: Dict[str, mx.array]) -> Dict:
-    """Convert flat dictionary with dot-separated keys to nested dictionary."""
-    result = {}
-    for key, value in flat_dict.items():
-        parts = key.split(".")
-        current = result
-        for part in parts[:-1]:
-            if part not in current:
-                current[part] = {}
-            current = current[part]
-        current[parts[-1]] = value
-    return result
-
-
 def load_checkpoint(checkpoint_dir: Path, model: nn.Module) -> tuple[int, int]:
     """Load latest checkpoint and restore model weights.
 
@@ -388,12 +375,29 @@ def load_checkpoint(checkpoint_dir: Path, model: nn.Module) -> tuple[int, int]:
     weights_file = checkpoint_dir / f"step_{latest_step:06d}.safetensors"
     if weights_file.exists():
         try:
-            # mx.load returns a flat dict with keys like "linear1.weight"
             flat_weights = mx.load(str(weights_file))
-            # Convert to nested dict for model.update()
-            nested_weights = _unflatten_dict(flat_weights)
-            # Update model parameters
+
+            # Align checkpoint weights with the model's parameter tree to avoid
+            # shape/name mismatches. Missing parameters (should be none) fall
+            # back to current values so update() never fails.
+            from mlx.utils import tree_flatten
+
+            flat_model = tree_flatten(model.parameters())
+            pairs = []
+            missing = []
+            for name, param in flat_model:
+                if isinstance(flat_weights, dict) and name in flat_weights:
+                    pairs.append((name, flat_weights[name]))
+                else:
+                    pairs.append((name, param))
+                    missing.append(name)
+
+            nested_weights = tree_unflatten(pairs)
             model.update(nested_weights)
+
+            if missing:
+                print(f"⚠️  {len(missing)} parameters were missing in checkpoint (e.g., {missing[:5]})")
+
             print(f"✅ Loaded checkpoint from step {step}, epoch {epoch}")
             return step, epoch
         except Exception as e:
