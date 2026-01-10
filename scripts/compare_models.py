@@ -18,7 +18,9 @@ Usage:
 import argparse
 import glob
 import json
+import shutil
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -159,6 +161,133 @@ def get_audio_duration(audio_path: str, target_sr: int = 48000) -> float:
 
     info = sf.info(audio_path)
     return info.duration
+
+
+def convert_audio_to_wav(
+    input_path: str,
+    output_path: str,
+    target_sr: int = 48000,
+    mono: bool = True,
+) -> bool:
+    """Convert any audio file to WAV format suitable for DeepFilterNet.
+
+    Handles:
+    - Format conversion (mp3, flac, ogg, opus, m4a -> wav)
+    - Resampling to target sample rate
+    - Stereo to mono conversion
+    - Normalization to float32
+
+    Args:
+        input_path: Path to input audio file
+        output_path: Path to output WAV file
+        target_sr: Target sample rate (default: 48000)
+        mono: Convert to mono (default: True)
+
+    Returns:
+        True if conversion succeeded, False otherwise
+    """
+    import numpy as np
+
+    try:
+        # Try soundfile first (handles wav, flac, ogg)
+        import soundfile as sf
+
+        try:
+            audio, sr = sf.read(input_path, dtype="float32")
+        except Exception:
+            # Fall back to pydub for mp3, m4a, etc.
+            try:
+                from pydub import AudioSegment
+
+                sound = AudioSegment.from_file(input_path)
+                sr = sound.frame_rate
+                samples = np.array(sound.get_array_of_samples(), dtype=np.float32)
+
+                # Normalize to [-1, 1]
+                max_val = float(2 ** (sound.sample_width * 8 - 1))
+                samples = samples / max_val
+
+                # Handle stereo
+                if sound.channels == 2:
+                    audio = samples.reshape(-1, 2)
+                else:
+                    audio = samples
+            except ImportError:
+                # Try librosa as last resort
+                import librosa
+
+                audio, sr = librosa.load(input_path, sr=None, mono=False)
+                if audio.ndim == 2:
+                    audio = audio.T  # librosa returns (channels, samples)
+
+        # Convert to mono if needed
+        if mono and audio.ndim > 1:
+            audio = audio.mean(axis=1)
+
+        # Ensure 1D for mono
+        if audio.ndim > 1 and audio.shape[1] == 1:
+            audio = audio.squeeze()
+
+        # Resample if needed
+        if sr != target_sr:
+            from scipy import signal
+
+            num_samples = int(len(audio) * target_sr / sr)
+            audio = signal.resample(audio, num_samples).astype(np.float32)
+
+        # Normalize to prevent clipping
+        max_val = np.abs(audio).max()
+        if max_val > 1.0:
+            audio = audio / max_val * 0.95
+        elif max_val < 0.01:
+            # Very quiet audio, normalize up
+            audio = audio / (max_val + 1e-8) * 0.5
+
+        # Ensure float32
+        audio = audio.astype(np.float32)
+
+        # Save as WAV
+        sf.write(output_path, audio, target_sr, subtype="FLOAT")
+        return True
+
+    except Exception as e:
+        print(f"    WARNING: Audio conversion failed for {input_path}: {e}")
+        return False
+
+
+def prepare_audio_file(input_path: str, temp_dir: Path, target_sr: int = 48000) -> Optional[str]:
+    """Prepare an audio file for processing, converting if necessary.
+
+    Args:
+        input_path: Path to input audio file
+        temp_dir: Directory for temporary converted files
+        target_sr: Target sample rate
+
+    Returns:
+        Path to prepared audio file (may be original or converted), or None if failed
+    """
+    input_path = Path(input_path)
+
+    # Check if already a compatible WAV
+    if input_path.suffix.lower() == ".wav":
+        try:
+            import soundfile as sf
+
+            info = sf.info(str(input_path))
+            # Check if already 48kHz mono
+            if info.samplerate == target_sr and info.channels == 1:
+                return str(input_path)
+        except Exception:
+            pass
+
+    # Need to convert
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    converted_path = temp_dir / f"{input_path.stem}_converted.wav"
+
+    if convert_audio_to_wav(str(input_path), str(converted_path), target_sr, mono=True):
+        return str(converted_path)
+
+    return None
 
 
 class DeepFilterNetV1V2V3Enhancer:
@@ -346,6 +475,30 @@ def run_comparison(
     print(f"Found {len(audio_files)} audio files")
     print(f"Models to test: {models}")
     print(f"Output directory: {output_dir}")
+
+    # Create temp directory for converted audio
+    temp_dir = Path(tempfile.mkdtemp(prefix="dfnet_compare_"))
+    print(f"Temp directory for conversions: {temp_dir}")
+    print()
+
+    # Pre-convert audio files that need it
+    print("Preparing audio files...")
+    prepared_files = []
+    for audio_file in audio_files:
+        prepared = prepare_audio_file(audio_file, temp_dir)
+        if prepared:
+            prepared_files.append((audio_file, prepared))
+            if prepared != audio_file:
+                print(f"  ✓ Converted: {Path(audio_file).name}")
+        else:
+            print(f"  ✗ Failed to prepare: {Path(audio_file).name}")
+
+    if not prepared_files:
+        print("No audio files could be prepared!")
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        sys.exit(1)
+
+    print(f"\nPrepared {len(prepared_files)}/{len(audio_files)} files")
     print()
 
     results = ComparisonResults(input_dir=input_path, output_dir=output_dir)
@@ -368,19 +521,25 @@ def run_comparison(
         model_output_dir = Path(output_dir) / model_name.replace(" ", "_")
         model_output_dir.mkdir(parents=True, exist_ok=True)
 
-        for i, audio_file in enumerate(audio_files):
-            filename = Path(audio_file).stem
+        for i, (original_file, prepared_file) in enumerate(prepared_files):
+            filename = Path(original_file).stem
             output_file = model_output_dir / f"{filename}_enhanced.wav"
 
-            print(f"  [{i + 1}/{len(audio_files)}] {Path(audio_file).name}...", end=" ", flush=True)
+            print(f"  [{i + 1}/{len(prepared_files)}] {Path(original_file).name}...", end=" ", flush=True)
 
-            result = enhancer.enhance(audio_file, str(output_file))
+            result = enhancer.enhance(prepared_file, str(output_file))
+            # Store original file path in result for clarity
+            result.input_file = original_file
             results.add_result(result)
 
             if result.success:
                 print(f"✓ RTF={result.rtf:.3f}")
             else:
                 print(f"✗ Error: {result.error[:50]}...")
+
+    # Cleanup temp directory
+    print("\nCleaning up temp directory...")
+    shutil.rmtree(temp_dir, ignore_errors=True)
 
     results.compute_summary()
     return results
