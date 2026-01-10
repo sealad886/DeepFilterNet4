@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+from tqdm import tqdm
 
 
 @dataclass
@@ -548,10 +549,7 @@ def main():
         temp_path = Path(temp_dir)
 
         # Process files (sequential for now, can parallelize later)
-        for i, mp4_path in enumerate(mp4_files):
-            if (i + 1) % 10 == 0 or i == 0:
-                print(f"  Processing {i + 1}/{len(mp4_files)}: {mp4_path.name}")
-
+        for mp4_path in tqdm(mp4_files, desc="Processing files", unit="file"):
             result = process_single_file(
                 mp4_path,
                 output_dir,
