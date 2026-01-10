@@ -435,7 +435,7 @@ class SegmentalSiSdrLoss:
         self.factor = factor
 
     def __call__(self, pred: mx.array, target: mx.array) -> mx.array:
-        """Compute segmental SI-SDR loss."""
+        """Compute segmental SI-SDR loss using vectorized segmentation."""
         if pred.ndim == 1:
             pred = mx.expand_dims(pred, axis=0)
         if target.ndim == 1:
@@ -444,19 +444,45 @@ class SegmentalSiSdrLoss:
         batch, samples = pred.shape
         n_segments = max(1, (samples - self.segment_size) // self.hop_size + 1)
 
-        total_sisdr = mx.array(0.0)
+        # Ensure we have valid segments
+        if n_segments == 0:
+            return mx.array(0.0)
 
-        for i in range(n_segments):
-            start = i * self.hop_size
-            end = start + self.segment_size
-            if end > samples:
-                break
+        # Vectorized segmentation using mx.take
+        # Create indices for all segments at once
+        segment_starts = mx.arange(n_segments) * self.hop_size  # [n_segments]
+        offsets = mx.arange(self.segment_size)  # [segment_size]
+        indices = segment_starts[:, None] + offsets[None, :]  # [n_segments, segment_size]
 
-            seg_pred = pred[:, start:end]
-            seg_target = target[:, start:end]
-            total_sisdr = total_sisdr + si_sdr(seg_pred, seg_target)
+        # Clip indices to valid range (handles edge cases)
+        max_idx = samples - 1
+        indices = mx.clip(indices, 0, max_idx)
+        flat_indices = indices.flatten()
 
-        return -total_sisdr / n_segments * self.factor
+        # Extract all segments at once: [batch, n_segments * segment_size]
+        seg_pred_flat = mx.take(pred, flat_indices, axis=1)
+        seg_target_flat = mx.take(target, flat_indices, axis=1)
+
+        # Reshape to [batch, n_segments, segment_size]
+        seg_pred = seg_pred_flat.reshape(batch, n_segments, self.segment_size)
+        seg_target = seg_target_flat.reshape(batch, n_segments, self.segment_size)
+
+        # Compute SI-SDR for all segments at once
+        # s_target projection: <s_hat, s_target> / ||s_target||^2 * s_target
+        dot = mx.sum(seg_pred * seg_target, axis=-1, keepdims=True)  # [batch, n_segments, 1]
+        s_target_pow = mx.sum(seg_target**2, axis=-1, keepdims=True) + EPS
+        s_target_proj = (dot / s_target_pow) * seg_target
+
+        # Noise
+        noise = seg_pred - s_target_proj
+
+        # SI-SDR per segment: [batch, n_segments]
+        signal_pow = mx.sum(s_target_proj**2, axis=-1)
+        noise_pow = mx.sum(noise**2, axis=-1) + EPS
+        sisdr = 10 * mx.log10(signal_pow / noise_pow + EPS)
+
+        # Mean over segments and batch
+        return -mx.mean(sisdr) * self.factor
 
 
 class SdrLoss:

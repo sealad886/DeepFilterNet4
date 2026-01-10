@@ -269,6 +269,7 @@ def train(
     p_reverb: float = 0.5,
     p_clipping: float = 0.0,
     use_mlx_data: bool = True,
+    use_fp16: bool | None = None,
     verbose: bool = False,
 ) -> None:
     """Train DfNet4 model with dynamic on-the-fly mixing.
@@ -296,6 +297,7 @@ def train(
         p_reverb: Probability of applying reverb
         p_clipping: Probability of clipping distortion
         use_mlx_data: Use MLXDataStream if available (faster, with checkpointing)
+        use_fp16: Use FP16 (half-precision) training. None=auto-detect from hardware
         verbose: Enable detailed timing and diagnostic output
     """
     from df_mlx.dynamic_dataset import (
@@ -306,12 +308,21 @@ def train(
         PrefetchDataLoader,
         read_file_list,
     )
+    from df_mlx.hardware import HardwareConfig
     from df_mlx.model import count_parameters, init_model
     from df_mlx.train import WarmupCosineSchedule, spectral_loss
 
     print("=" * 60)
     print("MLX DeepFilterNet4 Training - Dynamic On-the-Fly Mixing")
     print("=" * 60)
+
+    # Detect hardware and get optimal settings
+    hw_config = HardwareConfig.detect(verbose=verbose)
+
+    # Determine FP16 setting
+    if use_fp16 is None:
+        use_fp16 = hw_config.use_fp16
+    print(f"  Mixed precision (FP16): {'enabled' if use_fp16 else 'disabled'}")
 
     # Print hardware diagnostics in verbose mode
     if verbose:
@@ -461,7 +472,7 @@ def train(
     # Optimizer
     optimizer = optim.AdamW(learning_rate=schedule)
 
-    # Loss function
+    # Loss function - define as a pure function for compilation
     def loss_fn(model, noisy_real, noisy_imag, feat_erb, feat_spec, clean_real, clean_imag):
         """Compute training loss."""
         # Model expects spec as tuple (real, imag)
@@ -472,6 +483,38 @@ def train(
         return spectral_loss(out, target_spec)
 
     loss_and_grad = nn.value_and_grad(model, loss_fn)
+
+    # Compiled training step for performance optimization
+    # Captures model and optimizer state for graph tracing
+    state = [model.state, optimizer.state]
+
+    from functools import partial
+
+    @partial(mx.compile, inputs=state, outputs=state)
+    def compiled_step(noisy_real, noisy_imag, feat_erb, feat_spec, clean_real, clean_imag, max_grad_norm_val):
+        """JIT-compiled training step for faster training.
+
+        This compiles the forward pass, backward pass, and optimizer update
+        into a single optimized computation graph.
+        """
+        loss, grads = loss_and_grad(
+            model,
+            noisy_real,
+            noisy_imag,
+            feat_erb,
+            feat_spec,
+            clean_real,
+            clean_imag,
+        )
+        # Gradient clipping inline
+        if max_grad_norm_val > 0:
+            grads, _ = clip_grad_norm(grads, max_grad_norm_val)
+        optimizer.update(model, grads)
+        return loss
+
+    # Flag to use compiled step (can be disabled for debugging)
+    use_compiled_step = True
+    print(f"  Using compiled training step: {use_compiled_step}")
 
     # Training loop
     print(f"\nStarting training (epoch {start_epoch + 1} to {epochs})...")
@@ -499,10 +542,7 @@ def train(
 
         # Timing accumulators for verbose diagnostics
         total_data_time = 0.0
-        total_forward_time = 0.0
-        total_backward_time = 0.0
-        total_update_time = 0.0
-        total_eval_time = 0.0
+        total_forward_time = 0.0  # Used for compiled step timing
 
         # Create data iterator (MLXDataStream or PrefetchDataLoader)
         if use_mlx_stream and train_stream is not None:
@@ -544,42 +584,60 @@ def train(
             feat_erb = batch["feat_erb"]
             feat_spec = batch["feat_spec"]
 
+            # Convert to FP16 if enabled (mixed precision training)
+            if use_fp16:
+                noisy_real = noisy_real.astype(mx.float16)
+                noisy_imag = noisy_imag.astype(mx.float16)
+                clean_real = clean_real.astype(mx.float16)
+                clean_imag = clean_imag.astype(mx.float16)
+                feat_erb = feat_erb.astype(mx.float16)
+                feat_spec = feat_spec.astype(mx.float16)
+
             current_batch_size = noisy_real.shape[0]
 
-            # Forward and backward pass (timed together since value_and_grad)
+            # Forward, backward, and update (either compiled or standard)
             fwd_start = time.time()
-            loss, grads = loss_and_grad(
-                model,
-                noisy_real,
-                noisy_imag,
-                feat_erb,
-                feat_spec,
-                clean_real,
-                clean_imag,
-            )
-            # Force evaluation to get accurate timing
-            mx.eval(loss)
+
+            if use_compiled_step:
+                # Use compiled training step for better performance
+                loss = compiled_step(
+                    noisy_real,
+                    noisy_imag,
+                    feat_erb,
+                    feat_spec,
+                    clean_real,
+                    clean_imag,
+                    max_grad_norm,
+                )
+                # Evaluate state
+                mx.eval(state)
+                grad_norm = 0.0  # Not tracked in compiled step
+            else:
+                # Standard training step
+                loss, grads = loss_and_grad(
+                    model,
+                    noisy_real,
+                    noisy_imag,
+                    feat_erb,
+                    feat_spec,
+                    clean_real,
+                    clean_imag,
+                )
+                # Force evaluation to get accurate timing
+                mx.eval(loss)
+
+                # Gradient clipping (returns clipped grads and norm)
+                if max_grad_norm > 0:
+                    grads, grad_norm = clip_grad_norm(grads, max_grad_norm)
+
+                # Update parameters
+                optimizer.update(model, grads)
+
+                # Force evaluation
+                mx.eval(model.parameters(), optimizer.state)
+
             fwd_time = time.time() - fwd_start
             total_forward_time += fwd_time
-
-            # Gradient clipping (returns clipped grads and norm)
-            clip_start = time.time()
-            if max_grad_norm > 0:
-                grads, grad_norm = clip_grad_norm(grads, max_grad_norm)
-            clip_time = time.time() - clip_start
-            total_backward_time += clip_time
-
-            # Update parameters
-            update_start = time.time()
-            optimizer.update(model, grads)
-            update_time = time.time() - update_start
-            total_update_time += update_time
-
-            # Force evaluation
-            eval_start = time.time()
-            mx.eval(model.parameters(), optimizer.state)
-            eval_time = time.time() - eval_start
-            total_eval_time += eval_time
 
             step_time = time.time() - step_start
             loss_val = float(loss)
@@ -598,9 +656,9 @@ def train(
                     loss=f"{loss_val:.4f}",
                     lr=f"{lr:.1e}",
                     data=f"{data_time * 1000:.0f}ms",
-                    fwd=f"{fwd_time * 1000:.0f}ms",
-                    upd=f"{(update_time + eval_time) * 1000:.0f}ms",
+                    step=f"{fwd_time * 1000:.0f}ms",
                     spd=f"{samples_per_sec:.0f}/s",
+                    compiled="✓" if use_compiled_step else "✗",
                 )
             else:
                 train_pbar.set_postfix(
@@ -629,16 +687,14 @@ def train(
 
         # Print detailed timing breakdown in verbose mode
         if verbose and num_train_batches > 0:
-            total_time = (
-                total_data_time + total_forward_time + total_backward_time + total_update_time + total_eval_time
+            total_time = total_data_time + total_forward_time
+            print(f"\n  [Timing Breakdown - Epoch {epoch + 1}]")
+            print(f"    Data loading:       {total_data_time:6.1f}s ({100 * total_data_time / total_time:5.1f}%)")
+            print(
+                f"    Train step (fwd+bwd+upd): {total_forward_time:6.1f}s ({100 * total_forward_time / total_time:5.1f}%)"
             )
-            print(f"\\n  [Timing Breakdown - Epoch {epoch + 1}]")
-            print(f"    Data loading:    {total_data_time:6.1f}s ({100 * total_data_time / total_time:5.1f}%)")
-            print(f"    Forward+Backward:{total_forward_time:6.1f}s ({100 * total_forward_time / total_time:5.1f}%)")
-            print(f"    Gradient clip:   {total_backward_time:6.1f}s ({100 * total_backward_time / total_time:5.1f}%)")
-            print(f"    Optimizer update:{total_update_time:6.1f}s ({100 * total_update_time / total_time:5.1f}%)")
-            print(f"    mx.eval sync:    {total_eval_time:6.1f}s ({100 * total_eval_time / total_time:5.1f}%)")
-            print(f"    TOTAL:           {total_time:6.1f}s")
+            print(f"    TOTAL:              {total_time:6.1f}s")
+            print(f"    Compiled training:  {'enabled' if use_compiled_step else 'disabled'}")
             if total_data_time > total_forward_time:
                 print("    ⚠️  DATA LOADING IS BOTTLENECK - consider more workers or faster storage")
 
@@ -898,6 +954,17 @@ def main():
         help="Disable mlx-data (use PrefetchDataLoader instead)",
     )
     parser.add_argument(
+        "--fp16",
+        action="store_true",
+        default=None,
+        help="Enable FP16 (half-precision) training for faster performance",
+    )
+    parser.add_argument(
+        "--no-fp16",
+        action="store_true",
+        help="Disable FP16 training (use FP32 for full precision)",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -905,6 +972,13 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # Determine FP16 setting from arguments
+    use_fp16: bool | None = None
+    if args.fp16:
+        use_fp16 = True
+    elif args.no_fp16:
+        use_fp16 = False
 
     train(
         cache_dir=args.cache_dir,
@@ -929,6 +1003,7 @@ def main():
         p_reverb=args.p_reverb,
         p_clipping=args.p_clipping,
         use_mlx_data=not args.no_mlx_data,
+        use_fp16=use_fp16,
         verbose=args.verbose,
     )
 

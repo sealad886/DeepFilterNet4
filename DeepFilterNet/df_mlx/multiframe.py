@@ -35,22 +35,28 @@ def as_windowed(x: mx.array, window_length: int, step: int = 1, axis: int = 1) -
     Returns:
         Windowed tensor with shape [B, (N - window_length + step) // step, window_length, ...]
     """
-    # MLX doesn't have as_strided, implement manually
+    # Vectorized windowing using mx.take with index broadcasting
     shape = list(x.shape)
+    axis = axis % len(shape)  # Normalize negative axis
     n_windows = (shape[axis] - window_length + step) // step
 
-    # Use slicing to create windows
-    windows = []
-    for i in range(n_windows):
-        start = i * step
-        end = start + window_length
-        # Slice along the specified axis
-        slices = [slice(None)] * len(shape)
-        slices[axis] = slice(start, end)
-        windows.append(x[tuple(slices)])
+    # Create indices for vectorized gather
+    window_starts = mx.arange(n_windows) * step  # [n_windows]
+    offsets = mx.arange(window_length)  # [window_length]
+    indices = window_starts[:, None] + offsets[None, :]  # [n_windows, window_length]
 
-    # Stack along new axis after the window axis
-    result = mx.stack(windows, axis=axis)
+    # Flatten indices for take operation
+    flat_indices = indices.flatten()
+
+    # Take along the specified axis
+    result = mx.take(x, flat_indices, axis=axis)
+
+    # Reshape to insert the window dimension
+    new_shape = list(result.shape)
+    new_shape[axis] = n_windows
+    new_shape.insert(axis + 1, window_length)
+    result = result.reshape(new_shape)
+
     return result
 
 
@@ -118,16 +124,26 @@ class MultiFrameModule(nn.Module):
         # Pad along time axis (axis 2)
         spec_padded = pad_time(spec, self.pad_left, self.pad_right, time_axis=2)
 
-        # Unfold: create overlapping windows
+        # Vectorized unfold using mx.take
         B, C, T_padded, F, _ = spec_padded.shape
         T = T_padded - self.frame_size + 1
 
-        windows = []
-        for i in range(self.frame_size):
-            windows.append(spec_padded[:, :, i : i + T, :, :])
+        # Create indices for all windows: [T, frame_size]
+        time_starts = mx.arange(T)  # [T]
+        offsets = mx.arange(self.frame_size)  # [frame_size]
+        indices = time_starts[:, None] + offsets[None, :]  # [T, frame_size]
 
-        # Stack to get [B, C, T, F, N, 2]
-        return mx.stack(windows, axis=4)
+        # Take along time axis (axis 2)
+        flat_indices = indices.flatten()
+        result = mx.take(spec_padded, flat_indices, axis=2)
+
+        # Reshape: [B, C, T*frame_size, F, 2] -> [B, C, T, frame_size, F, 2]
+        result = result.reshape(B, C, T, self.frame_size, F, 2)
+
+        # Transpose to get [B, C, T, F, N, 2]
+        result = mx.transpose(result, (0, 1, 2, 4, 3, 5))
+
+        return result
 
     def spec_unfold_real(self, spec: mx.array) -> mx.array:
         """Pads and unfolds for real-valued processing.
@@ -147,12 +163,22 @@ class MultiFrameModule(nn.Module):
         B, C, T_padded, F, _ = spec_padded.shape
         T = T_padded - self.frame_size + 1
 
-        windows = []
-        for i in range(self.frame_size):
-            windows.append(spec_padded[:, :, i : i + T, :, :])
+        # Create indices for all windows: [T, frame_size]
+        time_starts = mx.arange(T)  # [T]
+        offsets = mx.arange(self.frame_size)  # [frame_size]
+        indices = time_starts[:, None] + offsets[None, :]  # [T, frame_size]
 
-        # Stack to get [B, C, N, T, F, 2]
-        return mx.stack(windows, axis=2)
+        # Take along time axis (axis 2)
+        flat_indices = indices.flatten()
+        result = mx.take(spec_padded, flat_indices, axis=2)
+
+        # Reshape: [B, C, T*frame_size, F, 2] -> [B, C, T, frame_size, F, 2]
+        result = result.reshape(B, C, T, self.frame_size, F, 2)
+
+        # Transpose to get [B, C, N, T, F, 2]
+        result = mx.transpose(result, (0, 1, 3, 2, 4, 5))
+
+        return result
 
     @staticmethod
     def apply_coefs(spec: mx.array, coefs: mx.array) -> mx.array:

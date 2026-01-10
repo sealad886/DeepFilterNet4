@@ -99,16 +99,19 @@ def stft(
         pad_right = n_fft - win_length - pad_left
         win = mx.pad(win, [(pad_left, pad_right)])
 
-    # Frame the signal
+    # Frame the signal using vectorized gather (no Python loop)
     num_samples = x.shape[1]
     num_frames = (num_samples - n_fft) // hop_length + 1
 
-    # Create frames using striding (manually, since MLX doesn't have as_strided)
-    frames = []
-    for i in range(num_frames):
-        start = i * hop_length
-        frames.append(x[:, start : start + n_fft])
-    frames = mx.stack(frames, axis=1)  # (batch, frames, n_fft)
+    # Create frame indices: [0, hop, 2*hop, ...] + [0, 1, 2, ..., n_fft-1]
+    frame_starts = mx.arange(num_frames) * hop_length  # (num_frames,)
+    offsets = mx.arange(n_fft)  # (n_fft,)
+    # Broadcast to get all indices: (num_frames, n_fft)
+    indices = frame_starts[:, None] + offsets[None, :]
+
+    # Gather frames for all batches: use advanced indexing
+    # x shape: (batch, samples) -> gather -> (batch, num_frames, n_fft)
+    frames = mx.take(x, indices.flatten(), axis=1).reshape(x.shape[0], num_frames, n_fft)
 
     # Apply window
     frames = frames * win
@@ -189,16 +192,21 @@ def istft(
     # Apply window
     frames = frames * win
 
-    # Overlap-add
+    # Overlap-add (loop is necessary as MLX lacks scatter_add)
     output_length = (num_frames - 1) * hop_length + n_fft
     output = mx.zeros((batch_size, output_length))
-    window_sum = mx.zeros((output_length,))
 
-    # Manual overlap-add (MLX doesn't have scatter_add)
+    # Pre-compute window sum (same for all batches, compute once)
+    window_sum = mx.zeros((output_length,))
+    win_squared = win * win
+    for i in range(num_frames):
+        start = i * hop_length
+        window_sum = window_sum.at[start : start + n_fft].add(win_squared)
+
+    # Overlap-add frames
     for i in range(num_frames):
         start = i * hop_length
         output = output.at[:, start : start + n_fft].add(frames[:, i, :])
-        window_sum = window_sum.at[start : start + n_fft].add(win * win)
 
     # Normalize by window sum
     window_sum = mx.maximum(window_sum, 1e-8)
@@ -454,9 +462,7 @@ def as_strided_frames(
     hop_length: int,
     axis: int = -2,
 ) -> mx.array:
-    """Extract overlapping frames from a tensor.
-
-    This is a simplified version that works with MLX's limitations.
+    """Extract overlapping frames from a tensor using vectorized gather.
 
     Args:
         x: Input tensor
@@ -467,24 +473,30 @@ def as_strided_frames(
     Returns:
         Tensor with an additional dimension for frame contents
     """
-    # Get shape info
+    # Normalize axis
     shape = list(x.shape)
     axis = axis % len(shape)
     length = shape[axis]
 
     num_frames = (length - frame_length) // hop_length + 1
 
-    # Extract frames
-    frames = []
-    for i in range(num_frames):
-        start = i * hop_length
-        # Build slicing
-        slices = [slice(None)] * len(shape)
-        slices[axis] = slice(start, start + frame_length)
-        frames.append(x[tuple(slices)])
+    # Create indices for vectorized gather
+    frame_starts = mx.arange(num_frames) * hop_length
+    offsets = mx.arange(frame_length)
+    indices = frame_starts[:, None] + offsets[None, :]  # (num_frames, frame_length)
 
-    # Stack along new axis
-    result = mx.stack(frames, axis=axis)
+    # Flatten indices for take operation
+    flat_indices = indices.flatten()
+
+    # Take along the specified axis
+    result = mx.take(x, flat_indices, axis=axis)
+
+    # Reshape to insert the frame dimension
+    new_shape = list(result.shape)
+    new_shape[axis] = num_frames
+    new_shape.insert(axis + 1, frame_length)
+    result = result.reshape(new_shape)
+
     return result
 
 
