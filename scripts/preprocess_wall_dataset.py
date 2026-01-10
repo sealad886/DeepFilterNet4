@@ -22,6 +22,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -161,7 +163,7 @@ def detect_noise_threshold(energy_values: List[float], percentile: float = 25) -
     """
     if not energy_values:
         return 0.01
-    return np.percentile(energy_values, percentile)
+    return np.percentile(energy_values, percentile)  # type: ignore
 
 
 def process_single_file(
@@ -175,8 +177,8 @@ def process_single_file(
 
     Returns (list of segments, total duration) or None on failure.
     """
-    # Extract audio to temp file
-    temp_wav = temp_dir / f"{mp4_path.stem}.wav"
+    # Extract audio to temp file (unique name for parallel execution)
+    temp_wav = temp_dir / f"{mp4_path.stem}_{uuid.uuid4().hex}.wav"
     if not extract_audio(mp4_path, temp_wav, target_sr):
         return None
 
@@ -544,39 +546,83 @@ def main():
     # Initialize stats
     stats = DatasetStats(total_files=len(mp4_files))
 
-    # Process files
-    print(f"\nProcessing files with {args.workers} workers...")
+    # Process files (parallel when workers > 1)
+    print(f"\nProcessing files with {args.workers} worker(s)...")
+
+    # Filter out already processed files to support resume
+    to_process = []
+    for mp4_path in mp4_files:
+        out_wav_path = output_dir / "wav" / mp4_path.parent.name / f"{mp4_path.stem}.wav"
+        if not out_wav_path.exists():
+            to_process.append(mp4_path)
 
     all_segments: List[AudioSegment] = []
+    temp_root = Path(tempfile.mkdtemp())
 
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_path = Path(temp_dir)
+    try:
+        if args.workers and args.workers > 1:
+            with ProcessPoolExecutor(max_workers=args.workers) as executor:
+                futures = [
+                    executor.submit(
+                        process_single_file,
+                        mp4_path,
+                        output_dir,
+                        temp_root,
+                        args.target_sr,
+                        args.segment_duration,
+                    )
+                    for mp4_path in to_process
+                ]
 
-        # Process files (sequential for now, can parallelize later)
-        for mp4_path in tqdm(mp4_files, desc="Processing files", unit="file"):
-            # Skip if already extracted to cache (resume support)
-            out_wav_path = output_dir / "wav" / mp4_path.parent.name / f"{mp4_path.stem}.wav"
-            if out_wav_path.exists():
-                continue
+                for future in tqdm(
+                    as_completed(futures),
+                    total=len(futures),
+                    desc="Processing files",
+                    unit="file",
+                    dynamic_ncols=True,
+                    smoothing=0.1,
+                    mininterval=1.0,
+                ):
+                    result = future.result()
+                    if result:
+                        segments, duration = result
+                        all_segments.extend(segments)
+                        stats.processed_files += 1
+                        stats.total_duration_seconds += duration
+                        stats.total_segments += len(segments)
+                        stats.silent_segments += sum(1 for s in segments if s.is_silent)
+                        stats.active_segments += sum(1 for s in segments if not s.is_silent)
+                    else:
+                        stats.failed_files += 1
+        else:
+            for mp4_path in tqdm(
+                to_process,
+                desc="Processing files",
+                unit="file",
+                dynamic_ncols=True,
+                smoothing=0.1,
+                mininterval=1.0,
+            ):
+                result = process_single_file(
+                    mp4_path,
+                    output_dir,
+                    temp_root,
+                    args.target_sr,
+                    args.segment_duration,
+                )
 
-            result = process_single_file(
-                mp4_path,
-                output_dir,
-                temp_path,
-                args.target_sr,
-                args.segment_duration,
-            )
-
-            if result:
-                segments, duration = result
-                all_segments.extend(segments)
-                stats.processed_files += 1
-                stats.total_duration_seconds += duration
-                stats.total_segments += len(segments)
-                stats.silent_segments += sum(1 for s in segments if s.is_silent)
-                stats.active_segments += sum(1 for s in segments if not s.is_silent)
-            else:
-                stats.failed_files += 1
+                if result:
+                    segments, duration = result
+                    all_segments.extend(segments)
+                    stats.processed_files += 1
+                    stats.total_duration_seconds += duration
+                    stats.total_segments += len(segments)
+                    stats.silent_segments += sum(1 for s in segments if s.is_silent)
+                    stats.active_segments += sum(1 for s in segments if not s.is_silent)
+                else:
+                    stats.failed_files += 1
+    finally:
+        shutil.rmtree(temp_root, ignore_errors=True)
 
     print(f"\n✅ Processed {stats.processed_files}/{stats.total_files} files")
     print(f"   Total duration: {stats.total_duration_seconds / 3600:.2f} hours")
