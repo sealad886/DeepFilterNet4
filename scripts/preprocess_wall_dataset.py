@@ -17,13 +17,15 @@ Usage:
 """
 
 import argparse
+import itertools
 import json
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import uuid
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -289,6 +291,7 @@ def create_training_pairs(
     output_dir: Path,
     noise_files: List[str],
     pairs_per_file: int = 3,
+    pair_workers: Optional[int] = None,
 ) -> int:
     """Create training pairs for self-supervised learning.
 
@@ -343,12 +346,20 @@ def create_training_pairs(
     max_clip_seconds = 2.0
     min_clip_seconds = 1.0
 
-    for output_path, file_segments in segments_by_file.items():
+    counter = itertools.count(start=pair_count)
+    counter_lock = threading.Lock()
+
+    def next_id() -> int:
+        with counter_lock:
+            return next(counter)
+
+    def process_file(output_path: str, file_segments: List[AudioSegment]) -> int:
+        local_created = 0
         try:
             audio, sr = sf.read(output_path)
         except Exception as e:
             print(f"Error reading {output_path} for training pairs: {e}")
-            continue
+            return 0
 
         for seg in file_segments[:pairs_per_file]:
             start_sample = int(seg.start_time * sr)
@@ -365,7 +376,8 @@ def create_training_pairs(
             if len(segment_audio) == 0:
                 continue
 
-            noisy_path = noisy_dir / f"pair_{pair_count:06d}.wav"
+            pair_id = next_id()
+            noisy_path = noisy_dir / f"pair_{pair_id:06d}.wav"
             sf.write(noisy_path, segment_audio, sr)
 
             if noise_avg is not None and len(noise_avg) >= len(segment_audio):
@@ -373,12 +385,29 @@ def create_training_pairs(
             else:
                 clean_segment = simple_wiener_filter(segment_audio)
 
-            clean_path = clean_dir / f"pair_{pair_count:06d}.wav"
+            clean_path = clean_dir / f"pair_{pair_id:06d}.wav"
             sf.write(clean_path, clean_segment, sr)
 
-            pair_count += 1
+            local_created += 1
 
-    return pair_count
+        return local_created
+
+    # Parallelize pair creation across files (IO-bound writes, light CPU)
+    workers = pair_workers if pair_workers and pair_workers > 0 else None
+
+    if workers and workers > 1:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for _ in pool.map(
+                lambda item: process_file(item[0], item[1]),
+                segments_by_file.items(),
+            ):
+                pass
+    else:
+        for output_path, file_segments in segments_by_file.items():
+            process_file(output_path, file_segments)
+
+    # Next counter value is total created
+    return next(counter)
 
 
 def spectral_subtract(noisy: np.ndarray, noise_estimate: np.ndarray, sr: int, alpha: float = 2.0) -> np.ndarray:
@@ -538,6 +567,12 @@ def main():
         action="store_true",
         help="Keep extracted full-length WAV cache (by default it is deleted after pairs are created)",
     )
+    parser.add_argument(
+        "--pair-workers",
+        type=int,
+        default=None,
+        help="Worker threads for training pair creation (defaults to --workers)",
+    )
 
     args = parser.parse_args()
 
@@ -694,7 +729,13 @@ def main():
 
     # Create training pairs
     print("\nCreating training pairs...")
-    pair_count = create_training_pairs(all_segments, output_dir, noise_files)
+    pair_count = create_training_pairs(
+        all_segments,
+        output_dir,
+        noise_files,
+        pairs_per_file=3,
+        pair_workers=args.pair_workers or args.workers,
+    )
     print(f"   Created {pair_count} training pairs")
 
     # Create manifest
