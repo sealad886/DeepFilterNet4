@@ -20,6 +20,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
 import numpy as np
+from tqdm import tqdm
 
 # Add DeepFilterNet to path
 SCRIPT_DIR = Path(__file__).parent
@@ -320,18 +321,22 @@ def validate(
     total_metrics = {"total": 0.0, "l1": 0.0, "spec": 0.0, "log_spec": 0.0}
     count = 0
 
-    for _ in range(num_batches):
-        batch = val_dataset.get_batch(config.batch_size)
-        if batch is None:
-            continue
+    with tqdm(total=num_batches, desc="Validation", leave=False, unit="batch") as pbar:
+        for _ in range(num_batches):
+            batch = val_dataset.get_batch(config.batch_size)
+            if batch is None:
+                continue
 
-        noisy, clean = batch
-        _, metrics = compute_loss(model, noisy, clean, erb_fb, erb_inv, config)
-        mx.eval(metrics)
+            noisy, clean = batch
+            _, metrics = compute_loss(model, noisy, clean, erb_fb, erb_inv, config)
+            mx.eval(metrics)
 
-        for k, v in metrics.items():
-            total_metrics[k] += v
-        count += 1
+            for k, v in metrics.items():
+                total_metrics[k] += v
+            count += 1
+
+            pbar.set_postfix({"loss": f"{metrics['total']:.4f}"})
+            pbar.update(1)
 
     if count > 0:
         for k in total_metrics:
@@ -457,76 +462,97 @@ def main():
 
     step = 0
     best_val_loss = float("inf")
-    start_time = time.time()
 
-    for epoch in range(config.num_epochs):
-        epoch_start = time.time()
-        epoch_metrics = {"total": 0.0, "l1": 0.0, "spec": 0.0, "log_spec": 0.0}
-        epoch_steps = 0
+    with tqdm(total=config.num_epochs, desc="Training", unit="epoch", position=0) as epoch_pbar:
+        for epoch in range(config.num_epochs):
+            epoch_start = time.time()
+            epoch_metrics = {"total": 0.0, "l1": 0.0, "spec": 0.0, "log_spec": 0.0}
+            epoch_steps = 0
 
-        # Training epoch
-        steps_per_epoch = max(len(train_dataset) // config.batch_size, 1)
-        for batch_idx in range(steps_per_epoch):
-            batch = train_dataset.get_batch(config.batch_size)
-            if batch is None:
-                continue
+            # Training epoch
+            steps_per_epoch = max(len(train_dataset) // config.batch_size, 1)
 
-            noisy, clean = batch
+            with tqdm(
+                total=steps_per_epoch,
+                desc=f"Epoch {epoch + 1}/{config.num_epochs}",
+                leave=False,
+                unit="batch",
+                position=1,
+            ) as step_pbar:
+                for batch_idx in range(steps_per_epoch):
+                    batch = train_dataset.get_batch(config.batch_size)
+                    if batch is None:
+                        continue
 
-            metrics = train_step(model, optimizer, noisy, clean, erb_fb, erb_inv, config)
-            mx.eval(model.parameters())
+                    noisy, clean = batch
 
-            step += 1
-            epoch_steps += 1
+                    metrics = train_step(model, optimizer, noisy, clean, erb_fb, erb_inv, config)
+                    mx.eval(model.parameters())
 
-            for k, v in metrics.items():
-                epoch_metrics[k] += v
+                    step += 1
+                    epoch_steps += 1
 
-            # Log
-            if step % config.log_interval == 0:
-                elapsed = time.time() - start_time
-                print(
-                    f"Epoch {epoch + 1}/{config.num_epochs} | "
-                    f"Step {step} | "
-                    f"Loss: {metrics['total']:.4f} | "
-                    f"L1: {metrics['l1']:.4f} | "
-                    f"Spec: {metrics['spec']:.4f} | "
-                    f"Time: {elapsed:.1f}s"
-                )
+                    for k, v in metrics.items():
+                        epoch_metrics[k] += v
 
-            # Validation
-            if step % config.val_interval == 0:
-                val_metrics = validate(model, val_dataset, erb_fb, erb_inv, config)
-                print(f"  [VAL] Loss: {val_metrics['total']:.4f} | L1: {val_metrics['l1']:.4f}")
-
-                if val_metrics["total"] < best_val_loss:
-                    best_val_loss = val_metrics["total"]
-                    save_checkpoint(
-                        model,
-                        optimizer,
-                        step,
-                        epoch,
-                        val_metrics,
-                        Path(config.checkpoint_dir) / "best",
+                    # Update step progress bar with current metrics
+                    step_pbar.set_postfix(
+                        {
+                            "loss": f"{metrics['total']:.4f}",
+                            "l1": f"{metrics['l1']:.4f}",
+                            "spec": f"{metrics['spec']:.4f}",
+                            "best_val": f"{best_val_loss:.4f}" if best_val_loss != float("inf") else "N/A",
+                        }
                     )
+                    step_pbar.update(1)
 
-            # Save checkpoint
-            if step % config.save_interval == 0:
-                save_checkpoint(
-                    model,
-                    optimizer,
-                    step,
-                    epoch,
-                    metrics,
-                    Path(config.checkpoint_dir),
-                )
+                    # Validation
+                    if step % config.val_interval == 0:
+                        val_metrics = validate(model, val_dataset, erb_fb, erb_inv, config)
+                        step_pbar.write(
+                            f"  [VAL @ step {step}] Loss: {val_metrics['total']:.4f} | "
+                            f"L1: {val_metrics['l1']:.4f} | Spec: {val_metrics['spec']:.4f}"
+                        )
 
-        # Epoch summary
-        epoch_time = time.time() - epoch_start
-        if epoch_steps > 0:
-            for k in epoch_metrics:
-                epoch_metrics[k] /= epoch_steps
-        print(f"\nEpoch {epoch + 1} complete | Avg Loss: {epoch_metrics['total']:.4f} | Time: {epoch_time:.1f}s\n")
+                        if val_metrics["total"] < best_val_loss:
+                            best_val_loss = val_metrics["total"]
+                            save_checkpoint(
+                                model,
+                                optimizer,
+                                step,
+                                epoch,
+                                val_metrics,
+                                Path(config.checkpoint_dir) / "best",
+                            )
+                            step_pbar.write(f"  ✅ New best validation loss: {best_val_loss:.4f}")
+
+                    # Save checkpoint
+                    if step % config.save_interval == 0:
+                        save_checkpoint(
+                            model,
+                            optimizer,
+                            step,
+                            epoch,
+                            metrics,
+                            Path(config.checkpoint_dir),
+                        )
+                        step_pbar.write(f"  💾 Checkpoint saved at step {step}")
+
+            # Epoch summary
+            epoch_time = time.time() - epoch_start
+            if epoch_steps > 0:
+                for k in epoch_metrics:
+                    epoch_metrics[k] /= epoch_steps
+
+            # Update epoch progress bar
+            epoch_pbar.set_postfix(
+                {
+                    "avg_loss": f"{epoch_metrics['total']:.4f}",
+                    "best_val": f"{best_val_loss:.4f}" if best_val_loss != float("inf") else "N/A",
+                    "time": f"{epoch_time:.1f}s",
+                }
+            )
+            epoch_pbar.update(1)
 
     print("=" * 60)
     print("Training complete!")
