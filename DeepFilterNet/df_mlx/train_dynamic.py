@@ -285,6 +285,36 @@ def cleanup_checkpoints(
         state_path.unlink(missing_ok=True)
 
 
+def find_latest_checkpoint(checkpoint_dir: Path) -> Path | None:
+    """Find the most recent checkpoint in the checkpoint directory.
+
+    Checks for step_*.safetensors and epoch_*.safetensors files,
+    returning the most recently modified one.
+
+    Args:
+        checkpoint_dir: Directory to search for checkpoints
+
+    Returns:
+        Path to most recent checkpoint, or None if no checkpoints found
+    """
+    if not checkpoint_dir.exists():
+        return None
+
+    ckpt_files = []
+    for pattern in ["step_*.safetensors", "epoch_*.safetensors"]:
+        ckpt_files.extend(checkpoint_dir.glob(pattern))
+
+    if not ckpt_files:
+        # Also check for best.safetensors
+        best_path = checkpoint_dir / "best.safetensors"
+        if best_path.exists():
+            return best_path
+        return None
+
+    # Return most recently modified
+    return max(ckpt_files, key=lambda p: p.stat().st_mtime)
+
+
 def train(
     cache_dir: str | None = None,
     speech_list: str | None = None,
@@ -313,7 +343,7 @@ def train(
     use_fp16: bool | None = None,
     grad_accumulation_steps: int = 1,
     eval_frequency: int = 10,
-    backbone_type: Literal["mamba", "gru"] = "mamba",
+    backbone_type: Literal["mamba", "gru", "attention"] = "mamba",
     verbose: bool = False,
 ) -> None:
     """Train DfNet4 model with dynamic on-the-fly mixing.
@@ -973,13 +1003,17 @@ def main():
     )
     parser.add_argument(
         "--resume",
-        type=str,
-        help="Resume model from checkpoint",
+        nargs="?",
+        const=True,
+        default=False,
+        help="Resume from checkpoint. If no path given, auto-finds latest in checkpoint-dir",
     )
     parser.add_argument(
         "--resume-data",
-        type=str,
-        help="Resume data loading from checkpoint (for interrupted epochs)",
+        nargs="?",
+        const=True,
+        default=False,
+        help="Resume data loading state. If no path given, uses data_checkpoint.json in checkpoint-dir",
     )
     parser.add_argument(
         "--validate-every",
@@ -1109,6 +1143,36 @@ def main():
     elif args.no_fp16:
         use_fp16 = False
 
+    # Resolve resume paths
+    # --resume can be: False (not set), True (flag only), or str (explicit path)
+    resume_from: str | None = None
+    if args.resume:
+        if isinstance(args.resume, str):
+            resume_from = args.resume
+        else:
+            # Auto-find latest checkpoint in checkpoint_dir
+            ckpt_dir = Path(args.checkpoint_dir)
+            latest = find_latest_checkpoint(ckpt_dir)
+            if latest:
+                resume_from = str(latest)
+                print(f"Auto-resuming from: {resume_from}")
+            else:
+                print(f"Warning: --resume specified but no checkpoint found in {ckpt_dir}")
+
+    # --resume-data can be: False (not set), True (flag only), or str (explicit path)
+    resume_data_from: str | None = None
+    if args.resume_data:
+        if isinstance(args.resume_data, str):
+            resume_data_from = args.resume_data
+        else:
+            # Auto-use data_checkpoint.json in checkpoint_dir
+            data_ckpt = Path(args.checkpoint_dir) / "data_checkpoint.json"
+            if data_ckpt.exists():
+                resume_data_from = str(data_ckpt)
+                print(f"Auto-resuming data from: {resume_data_from}")
+            else:
+                print(f"Warning: --resume-data specified but {data_ckpt} not found")
+
     train(
         cache_dir=args.cache_dir,
         speech_list=args.speech_list,
@@ -1119,8 +1183,8 @@ def main():
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         checkpoint_dir=args.checkpoint_dir,
-        resume_from=args.resume,
-        resume_data_from=args.resume_data,
+        resume_from=resume_from,
+        resume_data_from=resume_data_from,
         validate_every=args.validate_every,
         save_strategy=cast(Literal["no", "epoch", "steps"], args.save_strategy),
         save_steps=args.save_steps,
@@ -1137,7 +1201,7 @@ def main():
         use_fp16=use_fp16,
         grad_accumulation_steps=args.grad_accumulation_steps,
         eval_frequency=args.eval_frequency,
-        backbone_type=cast(Literal["mamba", "gru"], args.backbone_type),
+        backbone_type=cast(Literal["mamba", "gru", "attention"], args.backbone_type),
         verbose=args.verbose,
     )
 
