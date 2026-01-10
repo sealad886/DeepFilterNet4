@@ -313,49 +313,53 @@ def create_training_pairs(
     else:
         noise_avg = None
 
-    # Get active segments
+    # Group active segments by source file to slice only the detected regions
     active_segments = [s for s in segments if not s.is_silent and s.output_path]
 
-    files_processed = set()
-
+    segments_by_file: Dict[str, List[AudioSegment]] = {}
     for seg in active_segments:
-        if seg.output_path in files_processed:
-            continue
-        files_processed.add(seg.output_path)
+        segments_by_file.setdefault(seg.output_path, []).append(seg)
 
+    for file_segments in segments_by_file.values():
+        file_segments.sort(key=lambda s: s.start_time)
+
+    max_clip_seconds = 2.0
+    min_clip_seconds = 1.0
+
+    for output_path, file_segments in segments_by_file.items():
         try:
-            audio, sr = sf.read(seg.output_path)
-
-            # Create multiple segments from this file
-            segment_length = int(2.0 * sr)  # 2 second segments
-            for i in range(min(pairs_per_file, len(audio) // segment_length)):
-                start = i * segment_length
-                end = start + segment_length
-                segment = audio[start:end]
-
-                if len(segment) < segment_length:
-                    continue
-
-                # Save noisy version (original)
-                noisy_path = noisy_dir / f"pair_{pair_count:06d}.wav"
-                sf.write(noisy_path, segment, sr)
-
-                # Create "clean" target using spectral subtraction
-                # For stationary noise, simple spectral subtraction works
-                if noise_avg is not None and len(noise_avg) >= len(segment):
-                    # Simple noise reduction using spectral subtraction
-                    clean_segment = spectral_subtract(segment, noise_avg[: len(segment)], sr)
-                else:
-                    # Fallback: use Wiener filtering approximation
-                    clean_segment = simple_wiener_filter(segment)
-
-                clean_path = clean_dir / f"pair_{pair_count:06d}.wav"
-                sf.write(clean_path, clean_segment, sr)
-
-                pair_count += 1
-
+            audio, sr = sf.read(output_path)
         except Exception as e:
-            print(f"Error creating pairs from {seg.output_path}: {e}")
+            print(f"Error reading {output_path} for training pairs: {e}")
+            continue
+
+        for seg in file_segments[:pairs_per_file]:
+            start_sample = int(seg.start_time * sr)
+            end_sample = int(seg.end_time * sr)
+            if end_sample - start_sample < int(min_clip_seconds * sr):
+                continue
+
+            segment_audio = audio[start_sample:end_sample]
+
+            max_samples = int(max_clip_seconds * sr)
+            if len(segment_audio) > max_samples:
+                segment_audio = segment_audio[:max_samples]
+
+            if len(segment_audio) == 0:
+                continue
+
+            noisy_path = noisy_dir / f"pair_{pair_count:06d}.wav"
+            sf.write(noisy_path, segment_audio, sr)
+
+            if noise_avg is not None and len(noise_avg) >= len(segment_audio):
+                clean_segment = spectral_subtract(segment_audio, noise_avg[: len(segment_audio)], sr)
+            else:
+                clean_segment = simple_wiener_filter(segment_audio)
+
+            clean_path = clean_dir / f"pair_{pair_count:06d}.wav"
+            sf.write(clean_path, clean_segment, sr)
+
+            pair_count += 1
 
     return pair_count
 
@@ -558,22 +562,24 @@ def main():
 
     all_segments: List[AudioSegment] = []
     temp_root = Path(tempfile.mkdtemp())
+    executor: Optional[ProcessPoolExecutor] = None
 
     try:
         if args.workers and args.workers > 1:
-            with ProcessPoolExecutor(max_workers=args.workers) as executor:
-                futures = [
-                    executor.submit(
-                        process_single_file,
-                        mp4_path,
-                        output_dir,
-                        temp_root,
-                        args.target_sr,
-                        args.segment_duration,
-                    )
-                    for mp4_path in to_process
-                ]
+            executor = ProcessPoolExecutor(max_workers=args.workers)
+            futures = [
+                executor.submit(
+                    process_single_file,
+                    mp4_path,
+                    output_dir,
+                    temp_root,
+                    args.target_sr,
+                    args.segment_duration,
+                )
+                for mp4_path in to_process
+            ]
 
+            try:
                 for future in tqdm(
                     as_completed(futures),
                     total=len(futures),
@@ -594,34 +600,47 @@ def main():
                         stats.active_segments += sum(1 for s in segments if not s.is_silent)
                     else:
                         stats.failed_files += 1
+            except KeyboardInterrupt:
+                print("\n⚠️ KeyboardInterrupt received. Cancelling workers and cleaning up...")
+                for future in futures:
+                    future.cancel()
+                executor.shutdown(cancel_futures=True, wait=False)
+                executor = None
+                return
         else:
-            for mp4_path in tqdm(
-                to_process,
-                desc="Processing files",
-                unit="file",
-                dynamic_ncols=True,
-                smoothing=0.1,
-                mininterval=1.0,
-            ):
-                result = process_single_file(
-                    mp4_path,
-                    output_dir,
-                    temp_root,
-                    args.target_sr,
-                    args.segment_duration,
-                )
+            try:
+                for mp4_path in tqdm(
+                    to_process,
+                    desc="Processing files",
+                    unit="file",
+                    dynamic_ncols=True,
+                    smoothing=0.1,
+                    mininterval=1.0,
+                ):
+                    result = process_single_file(
+                        mp4_path,
+                        output_dir,
+                        temp_root,
+                        args.target_sr,
+                        args.segment_duration,
+                    )
 
-                if result:
-                    segments, duration = result
-                    all_segments.extend(segments)
-                    stats.processed_files += 1
-                    stats.total_duration_seconds += duration
-                    stats.total_segments += len(segments)
-                    stats.silent_segments += sum(1 for s in segments if s.is_silent)
-                    stats.active_segments += sum(1 for s in segments if not s.is_silent)
-                else:
-                    stats.failed_files += 1
+                    if result:
+                        segments, duration = result
+                        all_segments.extend(segments)
+                        stats.processed_files += 1
+                        stats.total_duration_seconds += duration
+                        stats.total_segments += len(segments)
+                        stats.silent_segments += sum(1 for s in segments if s.is_silent)
+                        stats.active_segments += sum(1 for s in segments if not s.is_silent)
+                    else:
+                        stats.failed_files += 1
+            except KeyboardInterrupt:
+                print("\n⚠️ KeyboardInterrupt received. Stopping early and cleaning up...")
+                return
     finally:
+        if executor:
+            executor.shutdown(wait=True)
         shutil.rmtree(temp_root, ignore_errors=True)
 
     print(f"\n✅ Processed {stats.processed_files}/{stats.total_files} files")
