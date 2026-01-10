@@ -345,6 +345,64 @@ def validate(
     return total_metrics
 
 
+def _unflatten_dict(flat_dict: Dict[str, mx.array]) -> Dict:
+    """Convert flat dictionary with dot-separated keys to nested dictionary."""
+    result = {}
+    for key, value in flat_dict.items():
+        parts = key.split(".")
+        current = result
+        for part in parts[:-1]:
+            if part not in current:
+                current[part] = {}
+            current = current[part]
+        current[parts[-1]] = value
+    return result
+
+
+def load_checkpoint(checkpoint_dir: Path, model: nn.Module) -> tuple[int, int]:
+    """Load latest checkpoint and restore model weights.
+
+    Returns:
+        (step, epoch) tuple, or (0, 0) if no checkpoint found
+    """
+    checkpoint_dir = Path(checkpoint_dir)
+    if not checkpoint_dir.exists():
+        return 0, 0
+
+    # Find latest checkpoint by state file
+    state_files = sorted(checkpoint_dir.glob("step_*_state.json"))
+    if not state_files:
+        return 0, 0
+
+    latest_state_file = state_files[-1]
+    latest_step = int(latest_state_file.stem.split("_")[1])
+
+    # Load state
+    with open(latest_state_file) as f:
+        state = json.load(f)
+
+    step = state.get("step", 0)
+    epoch = state.get("epoch", 0)
+
+    # Load model weights
+    weights_file = checkpoint_dir / f"step_{latest_step:06d}.safetensors"
+    if weights_file.exists():
+        try:
+            # mx.load returns a flat dict with keys like "linear1.weight"
+            flat_weights = mx.load(str(weights_file))
+            # Convert to nested dict for model.update()
+            nested_weights = _unflatten_dict(flat_weights)
+            # Update model parameters
+            model.update(nested_weights)
+            print(f"✅ Loaded checkpoint from step {step}, epoch {epoch}")
+            return step, epoch
+        except Exception as e:
+            print(f"⚠️  Failed to load checkpoint: {e}")
+            return 0, 0
+
+    return 0, 0
+
+
 def save_checkpoint(
     model: nn.Module,
     optimizer: optim.Optimizer,
@@ -456,15 +514,30 @@ def main():
     # Create optimizer
     optimizer = optim.AdamW(learning_rate=config.learning_rate, weight_decay=config.weight_decay)
 
+    # Resume from checkpoint if requested
+    step = 0
+    best_val_loss = float("inf")
+    resume_epoch = 0
+
+    if args.resume:
+        checkpoint_path = Path(config.checkpoint_dir)
+        if checkpoint_path.exists():
+            loaded_step, loaded_epoch = load_checkpoint(checkpoint_path, model)
+            if loaded_step > 0:
+                step = loaded_step
+                resume_epoch = loaded_epoch
+                print(f"📂 Resuming from checkpoint: step={step}, epoch={loaded_epoch}")
+        else:
+            print(f"⚠️  No checkpoint directory found at {checkpoint_path}, starting fresh")
+
     # Training loop
     print("\nStarting training...")
     print("-" * 60)
 
-    step = 0
-    best_val_loss = float("inf")
-
-    with tqdm(total=config.num_epochs, desc="Training", unit="epoch", position=0) as epoch_pbar:
-        for epoch in range(config.num_epochs):
+    with tqdm(
+        total=config.num_epochs - resume_epoch, desc="Training", unit="epoch", position=0, initial=resume_epoch
+    ) as epoch_pbar:
+        for epoch in range(resume_epoch, config.num_epochs):
             epoch_start = time.time()
             epoch_metrics = {"total": 0.0, "l1": 0.0, "spec": 0.0, "log_spec": 0.0}
             epoch_steps = 0
