@@ -311,6 +311,9 @@ def train(
     p_clipping: float = 0.0,
     use_mlx_data: bool = True,
     use_fp16: bool | None = None,
+    grad_accumulation_steps: int = 1,
+    eval_frequency: int = 10,
+    backbone_type: Literal["mamba", "gru"] = "mamba",
     verbose: bool = False,
 ) -> None:
     """Train DfNet4 model with dynamic on-the-fly mixing.
@@ -341,8 +344,11 @@ def train(
         p_clipping: Probability of clipping distortion
         use_mlx_data: Use MLXDataStream if available (faster, with checkpointing)
         use_fp16: Use FP16 (half-precision) training. None=auto-detect from hardware
+        grad_accumulation_steps: Number of steps to accumulate gradients (effective batch = batch_size * grad_accumulation_steps)
+        eval_frequency: Evaluate loss every N batches (reduces synchronization overhead)
         verbose: Enable detailed timing and diagnostic output
     """
+    from df_mlx.config import get_default_config
     from df_mlx.dynamic_dataset import (
         HAS_MLX_DATA,
         DatasetConfig,
@@ -482,9 +488,12 @@ def train(
                 num_workers=num_workers,
             )
 
-    # Initialize model
+    # Initialize model with config
     print("\nInitializing model...")
-    model = init_model()
+    model_config = get_default_config()
+    model_config.backbone.backbone_type = backbone_type  # type: ignore[assignment]
+    print(f"  Backbone type: {backbone_type}")
+    model = init_model(config=model_config)
     num_params = count_parameters(model)
     print(f"  Parameters: {num_params:,}")
 
@@ -583,6 +592,7 @@ def train(
         num_train_batches = 0
         samples_processed = 0
         grad_norm = 0.0
+        loss_val = 0.0  # Initialize for async eval
 
         # Timing accumulators for verbose diagnostics
         total_data_time = 0.0
@@ -657,8 +667,11 @@ def train(
                     clean_imag,
                     max_grad_norm,
                 )
-                # Evaluate state
-                mx.eval(state)
+                # OPTIMIZATION: Only sync periodically to reduce GPU stalls
+                # This allows MLX to batch operations for better throughput
+                should_sync = (batch_idx + 1) % eval_frequency == 0
+                if should_sync:
+                    mx.eval(state)
                 grad_norm = 0.0  # Not tracked in compiled step
             else:
                 # Standard training step
@@ -671,52 +684,61 @@ def train(
                     clean_real,
                     clean_imag,
                 )
-                # Force evaluation to get accurate timing
-                mx.eval(loss)
+                # Only sync periodically
+                should_sync = (batch_idx + 1) % eval_frequency == 0
+                if should_sync:
+                    mx.eval(loss)
 
                 # Gradient clipping (returns clipped grads and norm as MLX array)
                 if max_grad_norm > 0:
                     grads, grad_norm_arr = clip_grad_norm(grads, max_grad_norm)
-                    grad_norm = float(grad_norm_arr)
+                    if should_sync:
+                        grad_norm = float(grad_norm_arr)
 
                 # Update parameters
                 optimizer.update(model, grads)
 
-                # Force evaluation
-                mx.eval(model.parameters(), optimizer.state)
+                # Only sync periodically for better throughput
+                if should_sync:
+                    mx.eval(model.parameters(), optimizer.state)
 
             fwd_time = time.time() - fwd_start
             total_forward_time += fwd_time
 
             step_time = time.time() - step_start
-            loss_val = float(loss)
-            train_loss += loss_val
+
+            # Only convert loss to float when synced (avoids blocking)
+            if should_sync:
+                loss_val = float(loss)
+                train_loss += loss_val * eval_frequency  # Approximate accumulated loss
             num_train_batches += 1
             samples_processed += current_batch_size
             global_step += 1
 
-            # Update progress bar with real-time metrics
-            lr = float(schedule(global_step))
-            samples_per_sec = current_batch_size / step_time if step_time > 0 else 0
+            # Update progress bar with real-time metrics (only on sync)
+            if should_sync:
+                lr = float(schedule(global_step))
+                samples_per_sec = (
+                    (current_batch_size * eval_frequency) / (step_time * eval_frequency) if step_time > 0 else 0
+                )
 
-            if verbose:
-                # Show timing breakdown in verbose mode
-                train_pbar.set_postfix(
-                    loss=f"{loss_val:.4f}",
-                    lr=f"{lr:.1e}",
-                    data=f"{data_time * 1000:.0f}ms",
-                    step=f"{fwd_time * 1000:.0f}ms",
-                    spd=f"{samples_per_sec:.0f}/s",
-                    compiled="✓" if use_compiled_step else "✗",
-                )
-            else:
-                train_pbar.set_postfix(
-                    loss=f"{loss_val:.4f}",
-                    avg=f"{train_loss / num_train_batches:.4f}",
-                    lr=f"{lr:.1e}",
-                    grad=f"{grad_norm:.2f}",
-                    speed=f"{samples_per_sec:.0f}s/s",
-                )
+                if verbose:
+                    train_pbar.set_postfix(
+                        loss=f"{loss_val:.4f}",
+                        lr=f"{lr:.1e}",
+                        data=f"{data_time * 1000:.0f}ms",
+                        step=f"{fwd_time * 1000:.0f}ms",
+                        spd=f"{samples_per_sec:.0f}/s",
+                        sync=f"1/{eval_frequency}",
+                    )
+                else:
+                    train_pbar.set_postfix(
+                        loss=f"{loss_val:.4f}",
+                        avg=f"{train_loss / num_train_batches:.4f}",
+                        lr=f"{lr:.1e}",
+                        grad=f"{grad_norm:.2f}",
+                        speed=f"{samples_per_sec:.0f}s/s",
+                    )
 
             # Save data checkpoint periodically (for resume capability)
             if checkpoint_batches > 0 and use_mlx_stream and train_stream is not None:
@@ -725,16 +747,20 @@ def train(
 
             # Save model checkpoint by steps (HuggingFace-style)
             if save_strategy == "steps" and save_steps > 0 and global_step % save_steps == 0:
+                # Force sync before checkpoint to get accurate loss
+                mx.eval(state)
+                loss_val = float(loss)
+
                 ckpt_path = ckpt_dir / f"step_{global_step:06d}.safetensors"
                 save_checkpoint(
                     model,
                     ckpt_path,
                     epoch=epoch + 1,
-                    loss=train_loss / num_train_batches,
+                    loss=train_loss / num_train_batches if num_train_batches > 0 else loss_val,
                     best_valid_loss=best_valid_loss,
                     config=config.__dict__,
                 )
-                print(f"\n  Saved checkpoint: {ckpt_path} (step {global_step})")
+                print(f"\n  📦 Checkpoint saved: {ckpt_path.name} (step {global_step})")
 
                 # Cleanup old checkpoints if limit is set
                 if save_total_limit is not None:
@@ -744,6 +770,9 @@ def train(
             data_start = time.time()
 
         train_pbar.close()
+
+        # Force sync at epoch end to ensure accurate loss
+        mx.eval(state)
 
         # Save data checkpoint at end of epoch (for clean resume at epoch boundary)
         if use_mlx_stream and train_stream is not None:
@@ -1046,6 +1075,25 @@ def main():
         help="Disable FP16 training (use FP32 for full precision)",
     )
     parser.add_argument(
+        "--grad-accumulation-steps",
+        type=int,
+        default=1,
+        help="Number of gradient accumulation steps (effective batch = batch_size * grad_accumulation_steps)",
+    )
+    parser.add_argument(
+        "--eval-frequency",
+        type=int,
+        default=10,
+        help="Sync with GPU every N batches (higher = faster but less responsive logging)",
+    )
+    parser.add_argument(
+        "--backbone-type",
+        type=str,
+        choices=["mamba", "gru"],
+        default="mamba",
+        help="Backbone type: 'mamba' (parallel scan SSM) or 'gru' (faster backward pass for training)",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -1087,6 +1135,9 @@ def main():
         p_clipping=args.p_clipping,
         use_mlx_data=not args.no_mlx_data,
         use_fp16=use_fp16,
+        grad_accumulation_steps=args.grad_accumulation_steps,
+        eval_frequency=args.eval_frequency,
+        backbone_type=cast(Literal["mamba", "gru"], args.backbone_type),
         verbose=args.verbose,
     )
 

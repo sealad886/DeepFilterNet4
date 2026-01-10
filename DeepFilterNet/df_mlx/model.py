@@ -20,7 +20,7 @@ import mlx.nn as nn
 
 from .config import ModelParams4, get_default_config
 from .mamba import GroupedLinear, SqueezedMamba
-from .modules import Conv2dNormAct, ConvTranspose2dNormAct, DfOp, Mask, erb_fb
+from .modules import Conv2dNormAct, ConvTranspose2dNormAct, DfOp, Mask, SqueezedGRU_S, erb_fb
 
 # ============================================================================
 # Encoder
@@ -900,16 +900,27 @@ class DfNet4(nn.Module):
         # Encoder
         self.encoder = Encoder4(p)
 
-        # Mamba backbone
-        self.backbone = SqueezedMamba(
-            input_size=p.emb_hidden_dim,
-            hidden_size=p.emb_hidden_dim,
-            output_size=p.emb_hidden_dim,
-            num_layers=p.backbone.nb_layers,
-            d_state=p.backbone.d_state,
-            d_conv=p.backbone.d_conv,
-            expand_factor=p.backbone.expand_factor,
-        )
+        # Backbone (Mamba or GRU based on config)
+        backbone_type = getattr(p.backbone, "backbone_type", "mamba")
+        if backbone_type == "gru":
+            self.backbone = SqueezedGRU_S(
+                input_size=p.emb_hidden_dim,
+                hidden_size=p.emb_hidden_dim,
+                output_size=p.emb_hidden_dim,
+                num_layers=p.backbone.nb_layers,
+                linear_groups=8,
+                gru_skip=True,
+            )
+        else:
+            self.backbone = SqueezedMamba(
+                input_size=p.emb_hidden_dim,
+                hidden_size=p.emb_hidden_dim,
+                output_size=p.emb_hidden_dim,
+                num_layers=p.backbone.nb_layers,
+                d_state=p.backbone.d_state,
+                d_conv=p.backbone.d_conv,
+                expand_factor=p.backbone.expand_factor,
+            )
 
         # Decoders
         self.erb_decoder = ErbDecoder4(p)
