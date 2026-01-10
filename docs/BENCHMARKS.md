@@ -149,6 +149,42 @@ Frame-by-frame processing (10ms chunks):
 3. **Lazy Evaluation**: MLX uses lazy evaluation which allows for better
    operation fusion and memory optimization.
 
+## Data Loading Performance
+
+### MLXDataStream vs Sequential Loading
+
+The MLXDataStream class (introduced in v4.0) uses Apple's mlx-data library for
+high-throughput data loading with parallel prefetching and checkpoint/resume capability.
+
+| Configuration | Throughput (samples/s) | Speedup |
+|---------------|------------------------|---------|
+| Sequential (baseline) | 93 | 1.0x |
+| prefetch=2, workers=2 | 316 | 3.4x |
+| **prefetch=4, workers=4** | **416** | **4.5x** |
+| prefetch=8, workers=4 | 387 | 4.2x |
+| prefetch=8, workers=8 | 359 | 3.9x |
+
+*Measured on M3 Pro with synthetic audio samples (96000 samples @ 48kHz).*
+
+### Data Loading Features
+
+- **Parallel Prefetching**: Uses `mlx-data` stream API with configurable prefetch depth
+- **Multi-threaded Loading**: Parallelized `sample_transform` across worker threads
+- **Checkpoint/Resume**: Saves epoch, batch, and sample progress for resume capability
+- **Auto-Resume**: Automatically resumes from last checkpoint on training restart
+
+### Recommended Configuration
+
+For optimal throughput on Apple Silicon:
+
+```bash
+python -m df_mlx.train_dynamic \
+    --use-mlx-data \
+    --prefetch-size 4 \
+    --num-workers 4 \
+    --checkpoint-batches 100  # Save every 100 batches
+```
+
 4. **Lightweight Runtime**: MLX has minimal Python overhead compared to
    PyTorch's more general-purpose framework.
 

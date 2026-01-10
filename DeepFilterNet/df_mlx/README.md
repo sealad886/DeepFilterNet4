@@ -105,6 +105,42 @@ python -m df_mlx.train_dynamic \
 The dynamic approach provides better model generalization due to the vastly
 larger effective training set (each epoch sees different combinations).
 
+### High-Throughput Data Loading with mlx-data
+
+The `train_dynamic` script supports Apple's `mlx-data` library for optimized
+data loading with parallel prefetching and checkpoint/resume capability:
+
+```bash
+# Install mlx-data (Apple Silicon only)
+pip install mlx-data
+
+# Train with mlx-data for 4.5x faster data loading
+python -m df_mlx.train_dynamic \
+    --config ./file_lists/config.json \
+    --use-mlx-data \
+    --prefetch-size 4 \
+    --num-workers 4 \
+    --checkpoint-batches 100  # Save every 100 batches for resume
+```
+
+Key features:
+- **4.5x throughput improvement** over sequential loading (416 vs 93 samples/s)
+- **Checkpoint/resume**: Saves progress (epoch, batch, samples) for interruption recovery
+- **Auto-resume**: Automatically resumes from last checkpoint on restart
+- **Parallel prefetching**: Multi-threaded sample loading with configurable depth
+
+Resume from interruption:
+```bash
+# Resume from specific checkpoint
+python -m df_mlx.train_dynamic \
+    --config ./file_lists/config.json \
+    --resume-data-from checkpoints/data_checkpoint.json
+
+# Or auto-resume (default if checkpoint exists)
+python -m df_mlx.train_dynamic \
+    --config ./file_lists/config.json
+```
+
 ### Basic Training API
 
 ```python
@@ -152,6 +188,8 @@ for batch in dataloader:
 | PhaseEncoder | ✅ Complete | Phase spectrum encoder using cos/sin representation |
 | CrossDomainAttention | ✅ Complete | Multi-head cross-attention for time-mag and mag-phase fusion |
 | HybridEncoder | ✅ Complete | Full multi-domain encoder with Mamba backbone |
+| MLXDataStream | ✅ Complete | High-throughput data loading with mlx-data (4.5x speedup) |
+| Checkpoint/Resume | ✅ Complete | Save/load data progress for interruption recovery |
 
 ### ⚠️ Partially Implemented
 

@@ -35,14 +35,24 @@ Usage:
 import json
 import random
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Queue
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 import mlx.core as mx
 import numpy as np
 from scipy import signal as scipy_signal
+
+# Optional mlx-data import (for MLXDataStream)
+try:
+    import mlx.data as dx
+
+    HAS_MLX_DATA = True
+except ImportError:
+    dx = None
+    HAS_MLX_DATA = False
 
 # Try to import soundfile, fall back to scipy.io.wavfile
 try:
@@ -1319,3 +1329,370 @@ def create_dataset_from_lists(
     )
 
     return DynamicDataset(config)
+
+
+# =============================================================================
+# MLX-Data Integration for High-Throughput Training
+# =============================================================================
+
+
+@dataclass
+class CheckpointState:
+    """Checkpoint state for resuming interrupted training.
+
+    This captures the minimal state needed to resume training from
+    exactly where it left off, ensuring reproducibility.
+    """
+
+    epoch: int = 0
+    batch_idx: int = 0
+    samples_processed: int = 0
+    seed: int = 42
+    split: str = "train"
+    timestamp: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize checkpoint to dictionary."""
+        return {
+            "epoch": self.epoch,
+            "batch_idx": self.batch_idx,
+            "samples_processed": self.samples_processed,
+            "seed": self.seed,
+            "split": self.split,
+            "timestamp": self.timestamp or time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "CheckpointState":
+        """Deserialize checkpoint from dictionary."""
+        return cls(
+            epoch=data.get("epoch", 0),
+            batch_idx=data.get("batch_idx", 0),
+            samples_processed=data.get("samples_processed", 0),
+            seed=data.get("seed", 42),
+            split=data.get("split", "train"),
+            timestamp=data.get("timestamp", ""),
+        )
+
+    def save(self, path: Union[str, Path]) -> None:
+        """Save checkpoint to JSON file."""
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(self.to_dict(), f, indent=2)
+
+    @classmethod
+    def load(cls, path: Union[str, Path]) -> "CheckpointState":
+        """Load checkpoint from JSON file."""
+        with open(path) as f:
+            data = json.load(f)
+        return cls.from_dict(data)
+
+
+class MLXDataStream:
+    """High-throughput data loader using mlx-data.
+
+    This class wraps the DynamicDataset with mlx-data's Stream API to provide:
+    - Parallel sample loading via prefetch with multiple threads
+    - Automatic batching with configurable batch size
+    - Checkpoint/resume support for interrupted training
+    - Memory-efficient streaming iteration
+
+    The key performance improvement comes from mlx-data's prefetch mechanism
+    which loads samples in parallel background threads while the GPU processes
+    the current batch.
+
+    Example:
+        config = DatasetConfig(cache_dir="./audio_cache", ...)
+        dataset = DynamicDataset(config)
+        stream = MLXDataStream(dataset, batch_size=8, num_workers=8)
+
+        for epoch in range(num_epochs):
+            stream.set_epoch(epoch)
+            for batch in stream:
+                # Train on batch
+                ...
+            stream.save_checkpoint("checkpoint.json")
+
+    Resume example:
+        stream = MLXDataStream.from_checkpoint(dataset, "checkpoint.json")
+        for batch in stream:  # Continues from where it left off
+            ...
+    """
+
+    def __init__(
+        self,
+        dataset: DynamicDataset,
+        batch_size: int = 8,
+        prefetch_size: int = 8,
+        num_workers: int = 8,
+        drop_last: bool = True,
+        checkpoint: Optional[CheckpointState] = None,
+    ):
+        """Initialize MLXDataStream.
+
+        Args:
+            dataset: DynamicDataset instance with audio data
+            batch_size: Number of samples per batch
+            prefetch_size: Number of batches to prefetch in background
+            num_workers: Number of parallel worker threads for loading
+            drop_last: Whether to drop the last incomplete batch
+            checkpoint: Optional checkpoint state for resuming
+        """
+        if not HAS_MLX_DATA:
+            raise ImportError("mlx-data is required for MLXDataStream. " "Install with: pip install mlx-data")
+
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.prefetch_size = prefetch_size
+        self.num_workers = num_workers
+        self.drop_last = drop_last
+
+        # Initialize checkpoint state
+        self._checkpoint = checkpoint or CheckpointState(seed=dataset.config.seed)
+
+        # Sync dataset state with checkpoint
+        self.dataset.set_split(self._checkpoint.split)
+        self.dataset.set_epoch(self._checkpoint.epoch)
+
+        # Track iteration state
+        self._stream: Optional[Any] = None
+        self._batch_count = 0
+
+    @classmethod
+    def from_checkpoint(
+        cls,
+        dataset: DynamicDataset,
+        checkpoint_path: Union[str, Path],
+        batch_size: int = 8,
+        prefetch_size: int = 8,
+        num_workers: int = 8,
+        drop_last: bool = True,
+    ) -> "MLXDataStream":
+        """Create MLXDataStream from saved checkpoint.
+
+        Args:
+            dataset: DynamicDataset instance
+            checkpoint_path: Path to checkpoint JSON file
+            batch_size: Number of samples per batch
+            prefetch_size: Number of batches to prefetch
+            num_workers: Number of parallel workers
+            drop_last: Whether to drop last incomplete batch
+
+        Returns:
+            MLXDataStream configured to resume from checkpoint
+        """
+        checkpoint = CheckpointState.load(checkpoint_path)
+        return cls(
+            dataset=dataset,
+            batch_size=batch_size,
+            prefetch_size=prefetch_size,
+            num_workers=num_workers,
+            drop_last=drop_last,
+            checkpoint=checkpoint,
+        )
+
+    def _sample_transform(self, sample_dict: Dict[str, Any]) -> Dict[str, np.ndarray]:
+        """Transform sample metadata to actual audio data.
+
+        This function is called by mlx-data's prefetch mechanism in parallel
+        worker threads, enabling concurrent sample loading.
+
+        Args:
+            sample_dict: Dictionary with 'idx' key for sample index
+
+        Returns:
+            Dictionary with processed audio features as numpy arrays
+        """
+        # Extract index from numpy array (mlx-data stores as array)
+        idx_val = sample_dict["idx"]
+        if isinstance(idx_val, np.ndarray):
+            idx = int(idx_val.item())
+        else:
+            idx = int(idx_val)
+
+        # Use retry logic for failed samples
+        max_retries = 3
+        for attempt in range(max_retries):
+            sample = self.dataset.get_sample(idx)
+            if sample is not None:
+                # mlx-data requires contiguous arrays
+                return {
+                    "noisy_real": np.ascontiguousarray(sample.noisy_spec.real),
+                    "noisy_imag": np.ascontiguousarray(sample.noisy_spec.imag),
+                    "clean_real": np.ascontiguousarray(sample.clean_spec.real),
+                    "clean_imag": np.ascontiguousarray(sample.clean_spec.imag),
+                    "feat_erb": np.ascontiguousarray(sample.feat_erb),
+                    "feat_spec": np.ascontiguousarray(sample.feat_spec),
+                    "snr": np.array([sample.snr], dtype=np.float32),
+                    "gain": np.array([sample.gain], dtype=np.float32),
+                    "valid": np.array([1], dtype=np.int32),
+                }
+            # Try a different random sample on failure
+            idx = (idx + 1) % len(self.dataset)
+
+        # All retries failed - return invalid marker
+        # Create dummy data with correct shapes
+        n_frames = int(self.dataset.segment_samples / self.dataset.hop_size) + 1
+        n_freqs = self.dataset.fft_size // 2 + 1
+        nb_erb = self.dataset.config.nb_erb
+        nb_df = self.dataset.config.nb_df
+
+        return {
+            "noisy_real": np.zeros((n_frames, n_freqs), dtype=np.float32),
+            "noisy_imag": np.zeros((n_frames, n_freqs), dtype=np.float32),
+            "clean_real": np.zeros((n_frames, n_freqs), dtype=np.float32),
+            "clean_imag": np.zeros((n_frames, n_freqs), dtype=np.float32),
+            "feat_erb": np.zeros((n_frames, nb_erb), dtype=np.float32),
+            "feat_spec": np.zeros((n_frames, nb_df, 2), dtype=np.float32),
+            "snr": np.array([0.0], dtype=np.float32),
+            "gain": np.array([0.0], dtype=np.float32),
+            "valid": np.array([0], dtype=np.int32),
+        }
+
+    def _create_stream(self, skip_batches: int = 0) -> Any:
+        """Create mlx-data stream for current epoch.
+
+        Args:
+            skip_batches: Number of batches to skip for resume
+
+        Returns:
+            Configured mlx-data Stream ready for iteration
+        """
+        # Get shuffled indices for current epoch
+        n_samples = len(self.dataset)
+        indices = list(range(n_samples))
+
+        # Use deterministic shuffling based on epoch
+        epoch_rng = random.Random(self._checkpoint.seed + self._checkpoint.epoch)
+        epoch_rng.shuffle(indices)
+
+        # Skip samples for resume
+        skip_samples = skip_batches * self.batch_size
+        if skip_samples > 0 and skip_samples < len(indices):
+            indices = indices[skip_samples:]
+
+        # Create sample metadata buffer
+        samples = [{"idx": np.array([i], dtype=np.int32)} for i in indices]
+
+        # Build mlx-data pipeline
+        stream = dx.buffer_from_vector(samples)
+        stream = stream.to_stream()
+
+        # Apply our processing function (parallelized by prefetch!)
+        stream = stream.sample_transform(self._sample_transform)
+
+        # Batch samples together
+        stream = stream.batch(self.batch_size)
+
+        # Background prefetching with multiple workers
+        stream = stream.prefetch(self.prefetch_size, self.num_workers)
+
+        return stream
+
+    def _convert_batch(self, batch: Dict[str, np.ndarray]) -> Dict[str, mx.array]:
+        """Convert numpy batch to MLX arrays.
+
+        Args:
+            batch: Dictionary of numpy arrays from mlx-data
+
+        Returns:
+            Dictionary of MLX arrays ready for model
+        """
+        return {
+            "noisy_real": mx.array(batch["noisy_real"]),
+            "noisy_imag": mx.array(batch["noisy_imag"]),
+            "clean_real": mx.array(batch["clean_real"]),
+            "clean_imag": mx.array(batch["clean_imag"]),
+            "feat_erb": mx.array(batch["feat_erb"]),
+            "feat_spec": mx.array(batch["feat_spec"]),
+            "snr": mx.array(batch["snr"]).squeeze(-1),
+            "gain": mx.array(batch["gain"]).squeeze(-1),
+        }
+
+    def set_epoch(self, epoch: int) -> None:
+        """Set epoch and reset iteration state.
+
+        Args:
+            epoch: New epoch number
+        """
+        self._checkpoint.epoch = epoch
+        self._checkpoint.batch_idx = 0
+        self._checkpoint.samples_processed = 0
+        self._batch_count = 0
+
+        # Sync dataset epoch for deterministic sample processing
+        self.dataset.set_epoch(epoch)
+
+        # Reset stream
+        self._stream = None
+
+    def set_split(self, split: str) -> None:
+        """Set data split (train/valid/test).
+
+        Args:
+            split: Split name
+        """
+        self._checkpoint.split = split
+        self.dataset.set_split(split)
+        self._stream = None
+
+    def __iter__(self) -> Iterator[Dict[str, mx.array]]:
+        """Iterate over batches with prefetching.
+
+        Yields:
+            Dictionary of MLX arrays for each batch
+        """
+        # Create stream, skipping already-processed batches on resume
+        self._stream = self._create_stream(self._checkpoint.batch_idx)
+        self._batch_count = self._checkpoint.batch_idx
+
+        for batch in self._stream:
+            # Check for invalid samples in batch
+            valid_mask = batch.get("valid", np.ones(self.batch_size, dtype=np.int32))
+            if isinstance(valid_mask, np.ndarray) and valid_mask.min() == 0:
+                # Some samples invalid - skip this batch
+                continue
+
+            # Update checkpoint state
+            self._batch_count += 1
+            self._checkpoint.batch_idx = self._batch_count
+            self._checkpoint.samples_processed += self.batch_size
+
+            yield self._convert_batch(batch)
+
+    def __len__(self) -> int:
+        """Return approximate number of batches in current split."""
+        n = len(self.dataset)
+        if self.drop_last:
+            return n // self.batch_size
+        return (n + self.batch_size - 1) // self.batch_size
+
+    @property
+    def checkpoint(self) -> CheckpointState:
+        """Get current checkpoint state."""
+        self._checkpoint.timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        return self._checkpoint
+
+    def save_checkpoint(self, path: Union[str, Path]) -> None:
+        """Save current checkpoint to file.
+
+        Args:
+            path: Path for checkpoint JSON file
+        """
+        self.checkpoint.save(path)
+
+    def get_progress(self) -> Dict[str, Any]:
+        """Get current progress information.
+
+        Returns:
+            Dictionary with progress metrics
+        """
+        total_batches = len(self)
+        return {
+            "epoch": self._checkpoint.epoch,
+            "batch": self._batch_count,
+            "total_batches": total_batches,
+            "samples_processed": self._checkpoint.samples_processed,
+            "progress_pct": 100.0 * self._batch_count / max(total_batches, 1),
+        }

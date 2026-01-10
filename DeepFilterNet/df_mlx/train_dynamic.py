@@ -257,14 +257,18 @@ def train(
     learning_rate: float = 1e-4,
     checkpoint_dir: str = "checkpoints",
     resume_from: str | None = None,
+    resume_data_from: str | None = None,
     validate_every: int = 1,
     checkpoint_every: int = 5,
+    checkpoint_batches: int = 0,
     max_grad_norm: float = 1.0,
     warmup_epochs: int = 5,
     patience: int = 10,
     num_workers: int = 4,
+    prefetch_size: int = 8,
     p_reverb: float = 0.5,
     p_clipping: float = 0.0,
+    use_mlx_data: bool = True,
     verbose: bool = False,
 ) -> None:
     """Train DfNet4 model with dynamic on-the-fly mixing.
@@ -279,18 +283,29 @@ def train(
         batch_size: Batch size
         learning_rate: Initial learning rate
         checkpoint_dir: Directory for checkpoints
-        resume_from: Optional checkpoint to resume from
+        resume_from: Optional model checkpoint to resume from
+        resume_data_from: Optional data checkpoint for resuming interrupted epoch
         validate_every: Validate every N epochs
         checkpoint_every: Save checkpoint every N epochs
+        checkpoint_batches: Save data checkpoint every N batches (0=disabled)
         max_grad_norm: Maximum gradient norm for clipping
         warmup_epochs: Number of warmup epochs
         patience: Early stopping patience
         num_workers: Number of data loading workers
+        prefetch_size: Number of batches to prefetch (for MLXDataStream)
         p_reverb: Probability of applying reverb
         p_clipping: Probability of clipping distortion
+        use_mlx_data: Use MLXDataStream if available (faster, with checkpointing)
         verbose: Enable detailed timing and diagnostic output
     """
-    from df_mlx.dynamic_dataset import DatasetConfig, DynamicDataset, PrefetchDataLoader, read_file_list
+    from df_mlx.dynamic_dataset import (
+        HAS_MLX_DATA,
+        DatasetConfig,
+        DynamicDataset,
+        MLXDataStream,
+        PrefetchDataLoader,
+        read_file_list,
+    )
     from df_mlx.model import count_parameters, init_model
     from df_mlx.train import WarmupCosineSchedule, spectral_loss
 
@@ -361,6 +376,58 @@ def train(
     dataset.set_split("train")
     dataset.set_epoch(0)
 
+    # Create checkpoint directory early (needed for data checkpoint path)
+    ckpt_dir = Path(checkpoint_dir)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    # Determine which data loader to use
+    use_mlx_stream = use_mlx_data and HAS_MLX_DATA
+    if use_mlx_data and not HAS_MLX_DATA:
+        print("  Note: mlx-data not available, using PrefetchDataLoader")
+    elif use_mlx_stream:
+        print(f"  Using MLXDataStream (workers={num_workers}, prefetch={prefetch_size})")
+
+    # Create data stream/loader
+    data_checkpoint_path = ckpt_dir / "data_checkpoint.json"
+    train_stream: MLXDataStream | None = None
+
+    if use_mlx_stream:
+        # Check for data checkpoint to resume from
+        if resume_data_from:
+            train_stream = MLXDataStream.from_checkpoint(
+                dataset=dataset,
+                checkpoint_path=resume_data_from,
+                batch_size=batch_size,
+                prefetch_size=prefetch_size,
+                num_workers=num_workers,
+            )
+            print(f"  Resuming data from: {resume_data_from}")
+            progress = train_stream.get_progress()
+            print(f"  Data checkpoint: epoch {progress['epoch']}, batch {progress['batch']}")
+        elif data_checkpoint_path.exists():
+            # Auto-resume from last data checkpoint
+            try:
+                train_stream = MLXDataStream.from_checkpoint(
+                    dataset=dataset,
+                    checkpoint_path=data_checkpoint_path,
+                    batch_size=batch_size,
+                    prefetch_size=prefetch_size,
+                    num_workers=num_workers,
+                )
+                progress = train_stream.get_progress()
+                print(f"  Auto-resuming from data checkpoint: epoch {progress['epoch']}, batch {progress['batch']}")
+            except Exception as e:
+                print(f"  Warning: Could not load data checkpoint: {e}")
+                train_stream = None
+
+        if train_stream is None:
+            train_stream = MLXDataStream(
+                dataset=dataset,
+                batch_size=batch_size,
+                prefetch_size=prefetch_size,
+                num_workers=num_workers,
+            )
+
     # Initialize model
     print("\nInitializing model...")
     model = init_model()
@@ -393,10 +460,6 @@ def train(
 
     # Optimizer
     optimizer = optim.AdamW(learning_rate=schedule)
-
-    # Create checkpoint directory
-    ckpt_dir = Path(checkpoint_dir)
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     # Loss function
     def loss_fn(model, noisy_real, noisy_imag, feat_erb, feat_spec, clean_real, clean_imag):
@@ -441,16 +504,25 @@ def train(
         total_update_time = 0.0
         total_eval_time = 0.0
 
-        data_loader = PrefetchDataLoader(
-            dataset,
-            batch_size=batch_size,
-            num_workers=config.num_workers,
-            prefetch_factor=2,
-        )
+        # Create data iterator (MLXDataStream or PrefetchDataLoader)
+        if use_mlx_stream and train_stream is not None:
+            train_stream.set_epoch(epoch)
+            data_iterator = train_stream
+            # Check if resuming mid-epoch
+            progress = train_stream.get_progress()
+            if progress["batch"] > 0 and epoch == progress["epoch"]:
+                print(f"  Resuming epoch {epoch + 1} from batch {progress['batch']}")
+        else:
+            data_iterator = PrefetchDataLoader(
+                dataset,
+                batch_size=batch_size,
+                num_workers=config.num_workers,
+                prefetch_factor=2,
+            )
 
         # Training progress bar
         train_pbar = tqdm(
-            enumerate(data_loader),
+            enumerate(data_iterator),
             total=steps_per_epoch,
             desc=f"Epoch {epoch + 1}/{epochs}",
             unit="batch",
@@ -539,10 +611,20 @@ def train(
                     speed=f"{samples_per_sec:.0f}s/s",
                 )
 
+            # Save data checkpoint periodically (for resume capability)
+            if checkpoint_batches > 0 and use_mlx_stream and train_stream is not None:
+                if (batch_idx + 1) % checkpoint_batches == 0:
+                    train_stream.save_checkpoint(data_checkpoint_path)
+
             # Start timing for next data fetch
             data_start = time.time()
 
         train_pbar.close()
+
+        # Save data checkpoint at end of epoch (for clean resume at epoch boundary)
+        if use_mlx_stream and train_stream is not None:
+            train_stream.save_checkpoint(data_checkpoint_path)
+
         avg_train_loss = train_loss / max(num_train_batches, 1)
 
         # Print detailed timing breakdown in verbose mode
@@ -739,7 +821,12 @@ def main():
     parser.add_argument(
         "--resume",
         type=str,
-        help="Resume from checkpoint",
+        help="Resume model from checkpoint",
+    )
+    parser.add_argument(
+        "--resume-data",
+        type=str,
+        help="Resume data loading from checkpoint (for interrupted epochs)",
     )
     parser.add_argument(
         "--validate-every",
@@ -752,6 +839,12 @@ def main():
         type=int,
         default=5,
         help="Save checkpoint every N epochs",
+    )
+    parser.add_argument(
+        "--checkpoint-batches",
+        type=int,
+        default=0,
+        help="Save data checkpoint every N batches (0=disabled, for resume)",
     )
 
     # Augmentation parameters
@@ -776,6 +869,12 @@ def main():
         help="Number of data loading workers",
     )
     parser.add_argument(
+        "--prefetch-size",
+        type=int,
+        default=8,
+        help="Number of batches to prefetch (for MLXDataStream)",
+    )
+    parser.add_argument(
         "--max-grad-norm",
         type=float,
         default=1.0,
@@ -792,6 +891,11 @@ def main():
         type=int,
         default=10,
         help="Early stopping patience",
+    )
+    parser.add_argument(
+        "--no-mlx-data",
+        action="store_true",
+        help="Disable mlx-data (use PrefetchDataLoader instead)",
     )
     parser.add_argument(
         "-v",
@@ -813,14 +917,18 @@ def main():
         learning_rate=args.learning_rate,
         checkpoint_dir=args.checkpoint_dir,
         resume_from=args.resume,
+        resume_data_from=args.resume_data,
         validate_every=args.validate_every,
         checkpoint_every=args.checkpoint_every,
+        checkpoint_batches=args.checkpoint_batches,
         max_grad_norm=args.max_grad_norm,
         warmup_epochs=args.warmup_epochs,
         patience=args.patience,
         num_workers=args.num_workers,
+        prefetch_size=args.prefetch_size,
         p_reverb=args.p_reverb,
         p_clipping=args.p_clipping,
+        use_mlx_data=not args.no_mlx_data,
         verbose=args.verbose,
     )
 
