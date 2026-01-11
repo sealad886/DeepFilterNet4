@@ -36,6 +36,7 @@ import argparse
 import gc
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -48,6 +49,97 @@ import mlx.optimizers as optim
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+
+# ============================================================================
+# Signal Handling for Graceful Interrupt
+# ============================================================================
+
+# Global state for signal handler
+_interrupt_state = {
+    "checkpoint_dir": None,
+    "epoch": 0,
+    "model": None,
+    "optimizer": None,
+    "loss": 0.0,
+    "best_valid_loss": float("inf"),
+    "config": {},
+    "interrupted": False,
+}
+
+
+def _handle_sigint(signum, frame):
+    """Handle SIGINT (CTRL+C) to save final checkpoint before exit.
+
+    Args:
+        signum: Signal number
+        frame: Current stack frame
+    """
+    if _interrupt_state["interrupted"]:
+        print("\n❌ Force exit (SIGINT received again)")
+        sys.exit(1)
+
+    _interrupt_state["interrupted"] = True
+    print("\n" + "=" * 60)
+    print("⚠️  Training interrupted by user (CTRL+C)")
+    print("=" * 60)
+
+    # Save final checkpoint
+    if (
+        _interrupt_state["model"] is not None
+        and _interrupt_state["optimizer"] is not None
+        and _interrupt_state["checkpoint_dir"] is not None
+    ):
+        try:
+            print("💾 Saving final checkpoint before exit...")
+            ckpt_dir = Path(_interrupt_state["checkpoint_dir"])
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+            final_path = ckpt_dir / f"interrupted_epoch_{_interrupt_state['epoch']:03d}.safetensors"
+            save_checkpoint(
+                _interrupt_state["model"],
+                final_path,
+                epoch=_interrupt_state["epoch"],
+                loss=_interrupt_state["loss"],
+                best_valid_loss=_interrupt_state["best_valid_loss"],
+                config=_interrupt_state["config"],
+                optimizer=_interrupt_state["optimizer"],
+            )
+            print(f"✅ Final checkpoint saved to {final_path}")
+        except Exception as e:
+            print(f"❌ Failed to save final checkpoint: {e}")
+
+    print("Exiting...")
+    raise KeyboardInterrupt()
+
+
+def _register_sigint_handler(model, optimizer, checkpoint_dir, config):
+    """Register SIGINT handler for graceful training shutdown.
+
+    Args:
+        model: Model to save on interrupt
+        optimizer: Optimizer to save state on interrupt
+        checkpoint_dir: Directory to save checkpoint to
+        config: Training configuration dict
+    """
+    _interrupt_state["model"] = model
+    _interrupt_state["optimizer"] = optimizer
+    _interrupt_state["checkpoint_dir"] = checkpoint_dir
+    _interrupt_state["config"] = config
+    signal.signal(signal.SIGINT, _handle_sigint)
+
+
+def _update_interrupt_state(epoch, loss, best_valid_loss):
+    """Update global state for interrupt handler.
+
+    Args:
+        epoch: Current epoch
+        loss: Current training loss
+        best_valid_loss: Best validation loss so far
+    """
+    _interrupt_state["epoch"] = epoch
+    _interrupt_state["loss"] = loss
+    _interrupt_state["best_valid_loss"] = best_valid_loss
 
 
 def print_hardware_diagnostics():
@@ -196,6 +288,37 @@ def clip_grad_norm(grads, max_norm: float) -> Tuple[dict, mx.array]:
     return cast(dict, apply_clip(grads)), total_norm
 
 
+def _validate_checkpoint_pair(checkpoint_path: Path) -> bool:
+    """Validate that both .safetensors and .state.json files exist and are non-empty.
+
+    Args:
+        checkpoint_path: Path to checkpoint (.safetensors file)
+
+    Returns:
+        True if both files exist and are valid, False otherwise
+    """
+    weights_file = checkpoint_path
+    state_file = checkpoint_path.with_suffix(".state.json")
+
+    # Check both files exist
+    if not weights_file.exists():
+        print(f"⚠️  Checkpoint missing: {weights_file.name}")
+        return False
+    if not state_file.exists():
+        print(f"⚠️  Checkpoint missing state file: {state_file.name}")
+        return False
+
+    # Check files are not empty (indicates incomplete write)
+    if weights_file.stat().st_size == 0:
+        print(f"⚠️  Checkpoint is empty: {weights_file.name}")
+        return False
+    if state_file.stat().st_size == 0:
+        print(f"⚠️  Checkpoint state file is empty: {state_file.name}")
+        return False
+
+    return True
+
+
 def save_checkpoint(
     model: nn.Module,
     path: Path,
@@ -204,8 +327,19 @@ def save_checkpoint(
     loss: float,
     best_valid_loss: float,
     config: dict,
+    optimizer: optim.Optimizer | None = None,
 ) -> None:
-    """Save a training checkpoint."""
+    """Save a training checkpoint with model weights, training state, and optimizer state.
+
+    Args:
+        model: Model to save
+        path: Path to checkpoint file (.safetensors)
+        epoch: Current epoch number
+        loss: Current training loss
+        best_valid_loss: Best validation loss so far
+        config: Training configuration dict
+        optimizer: Optional optimizer to save state from
+    """
     from mlx.utils import tree_flatten
 
     path = Path(path)
@@ -216,34 +350,105 @@ def save_checkpoint(
     weights = {k: v for k, v in flat_params}
     mx.save_safetensors(str(path), weights)
 
-    # Save training state
+    # Prepare optimizer state for serialization
+    optimizer_state_dict = {}
+    if optimizer is not None and hasattr(optimizer, "state") and optimizer.state:
+        try:
+            # Flatten optimizer state for JSON serialization
+            flat_state = tree_flatten(optimizer.state)
+            # Convert to dict with string representations (JSON-serializable)
+            optimizer_state_dict = {name: str(value) for name, value in flat_state}
+        except Exception as e:
+            print(f"⚠️  Failed to serialize optimizer state: {e}")
+
+    # Save training state and metadata
     state_path = path.with_suffix(".state.json")
     state = {
         "epoch": epoch,
         "loss": loss,
         "best_valid_loss": best_valid_loss,
         "config": config,
+        "optimizer_state": optimizer_state_dict,
     }
     with open(state_path, "w") as f:
         json.dump(state, f, indent=2)
 
+    if optimizer_state_dict:
+        print(f"✅ Saved checkpoint with optimizer state: {path.name}")
 
-def load_checkpoint(model: nn.Module, path: str | Path) -> dict:
-    """Load a training checkpoint."""
+
+def load_checkpoint(
+    model: nn.Module,
+    path: str | Path,
+    optimizer: optim.Optimizer | None = None,
+) -> dict:
+    """Load a training checkpoint and restore model weights and optimizer state.
+
+    Args:
+        model: Model to load weights into
+        path: Path to checkpoint file
+        optimizer: Optional optimizer to restore state into
+
+    Returns:
+        Training state dict containing epoch, loss, etc.
+    """
+    from mlx.utils import tree_flatten, tree_unflatten
+
     ckpt_path = Path(path)
 
-    # Load weights
-    weights = mx.load(str(ckpt_path))
-    model.load_weights(weights)
+    # Validate checkpoint pair before loading
+    if not _validate_checkpoint_pair(ckpt_path):
+        print(f"⚠️  Checkpoint validation failed: {ckpt_path.name}")
+        return {}
 
-    # Load training state
-    state_path = ckpt_path.with_suffix(".state.json")
-    state = {}
-    if state_path.exists():
-        with open(state_path) as f:
-            state = json.load(f)
+    try:
+        # Load weights
+        weights = mx.load(str(ckpt_path))
 
-    return state
+        # Align checkpoint weights with model's parameter tree
+        flat_model = tree_flatten(model.parameters())
+        pairs = []
+        missing = []
+        for name, param in flat_model:
+            if isinstance(weights, dict) and name in weights:
+                pairs.append((name, weights[name]))
+            else:
+                pairs.append((name, param))
+                missing.append(name)
+
+        nested_weights = tree_unflatten(pairs)
+        model.update(nested_weights)
+
+        if missing:
+            print(f"⚠️  {len(missing)} parameters were missing in checkpoint")
+
+        # Load training state
+        state_path = ckpt_path.with_suffix(".state.json")
+        state = {}
+        if state_path.exists():
+            with open(state_path) as f:
+                state = json.load(f)
+
+        # Restore optimizer state if provided
+        if optimizer is not None and "optimizer_state" in state:
+            try:
+                optimizer_state_dict = state.get("optimizer_state", {})
+                if optimizer_state_dict:
+                    # Reconstruct optimizer state from flat dict
+                    state_pairs = list(optimizer_state_dict.items())
+                    nested_state = tree_unflatten(state_pairs)
+                    optimizer.state = nested_state
+                    print(f"✅ Restored optimizer state from checkpoint")
+            except Exception as e:
+                print(f"⚠️  Failed to restore optimizer state: {e}")
+
+        epoch = state.get("epoch", 0)
+        print(f"✅ Loaded checkpoint from epoch {epoch}")
+        return state
+
+    except Exception as e:
+        print(f"⚠️  Failed to load checkpoint: {e}")
+        return {}
 
 
 def cleanup_checkpoints(
@@ -527,17 +732,6 @@ def train(
     num_params = count_parameters(model)
     print(f"  Parameters: {num_params:,}")
 
-    # Resume from checkpoint if provided
-    start_epoch = 0
-    best_valid_loss = float("inf")
-    epochs_without_improvement = 0
-
-    if resume_from:
-        state = load_checkpoint(model, resume_from)
-        start_epoch = state.get("epoch", 0)
-        best_valid_loss = state.get("best_valid_loss", float("inf"))
-        print(f"  Resumed from: {resume_from} (epoch {start_epoch})")
-
     # Estimate steps per epoch (approximate since samples may be skipped)
     approx_samples_per_epoch = len(dataset)
     steps_per_epoch = approx_samples_per_epoch // batch_size
@@ -551,9 +745,21 @@ def train(
         min_lr=learning_rate * 0.01,
     )
 
-    # Optimizer - use fixed learning rate (schedule applied manually before each step)
+    # Optimizer - create before loading checkpoint to allow optimizer state restoration
+    # Use fixed learning rate (schedule applied manually before each step)
     # This is required because schedule callbacks can't run inside mx.compile()
     optimizer = optim.AdamW(learning_rate=learning_rate)
+
+    # Resume from checkpoint if provided (AFTER optimizer creation)
+    start_epoch = 0
+    best_valid_loss = float("inf")
+    epochs_without_improvement = 0
+
+    if resume_from:
+        state = load_checkpoint(model, resume_from, optimizer=optimizer)
+        start_epoch = state.get("epoch", 0)
+        best_valid_loss = state.get("best_valid_loss", float("inf"))
+        print(f"  Resumed from: {resume_from} (epoch {start_epoch})")
 
     # Loss function - define as a pure function for compilation
     def loss_fn(model, noisy_real, noisy_imag, feat_erb, feat_spec, clean_real, clean_imag):
@@ -599,6 +805,10 @@ def train(
     use_compiled_step = True
     print(f"  Using compiled training step: {use_compiled_step}")
 
+    # Register SIGINT handler for graceful shutdown
+    _register_sigint_handler(model, optimizer, ckpt_dir, config.__dict__)
+    print(f"  SIGINT handler registered (CTRL+C will save checkpoint before exit)")
+
     # Training loop
     print(f"\nStarting training (epoch {start_epoch + 1} to {epochs})...")
     print(f"  Warmup steps: {warmup_steps:,}")
@@ -623,6 +833,9 @@ def train(
         samples_processed = 0
         grad_norm = 0.0
         loss_val = 0.0  # Initialize for async eval
+
+        # Update interrupt state at start of epoch
+        _update_interrupt_state(epoch + 1, 0.0, best_valid_loss)
 
         # Timing accumulators for verbose diagnostics
         total_data_time = 0.0
@@ -789,6 +1002,7 @@ def train(
                     loss=train_loss / num_train_batches if num_train_batches > 0 else loss_val,
                     best_valid_loss=best_valid_loss,
                     config=config.__dict__,
+                    optimizer=optimizer,
                 )
                 print(f"\n  📦 Checkpoint saved: {ckpt_path.name} (step {global_step})")
 
@@ -894,6 +1108,7 @@ def train(
                     loss=avg_train_loss,
                     best_valid_loss=best_valid_loss,
                     config=config.__dict__,
+                    optimizer=optimizer,
                 )
             else:
                 epochs_without_improvement += 1
@@ -901,6 +1116,9 @@ def train(
         # ====== Epoch Summary ======
         epoch_time = time.time() - epoch_start
         epoch_throughput = samples_processed / epoch_time if epoch_time > 0 else 0
+
+        # Update interrupt state with final epoch metrics
+        _update_interrupt_state(epoch + 1, avg_train_loss, best_valid_loss)
 
         # Improved epoch summary with throughput
         improvement_marker = "★" if avg_valid_loss <= best_valid_loss else ""
@@ -923,6 +1141,7 @@ def train(
                 loss=avg_train_loss,
                 best_valid_loss=best_valid_loss,
                 config=config.__dict__,
+                optimizer=optimizer,
             )
             print(f"  📦 Checkpoint saved: {ckpt_path.name}")
             if save_total_limit is not None:
