@@ -72,6 +72,10 @@ def test_checkpoint_save_load():
         assert state["epoch"] == 5
         print(f"  ✅ State file correct: step={state['step']}, epoch={state['epoch']}")
 
+        # Verify optimizer state was saved
+        assert "optimizer_state" in state, "optimizer_state not in checkpoint"
+        print(f"  ✅ Optimizer state saved in checkpoint: {len(state['optimizer_state'])} entries")
+
         # Modify model weights to simulate different state by recreating model
         print("  Creating new model instance...")
         model2 = SimpleModel()
@@ -87,8 +91,15 @@ def test_checkpoint_save_load():
                 print("  ✅ Model 2 has different weights (as expected)")
                 break
 
-        # Load checkpoint into model2
-        loaded_step, loaded_epoch = load_checkpoint(checkpoint_dir, model2)
+        # Create fresh optimizer for model2
+        optimizer2 = optim.AdamW(learning_rate=0.001)
+
+        # Load checkpoint into model2 and optimizer2
+        loaded_step, loaded_epoch = load_checkpoint(
+            checkpoint_dir,
+            model2,
+            optimizer=optimizer2,
+        )
 
         assert loaded_step == 100, f"Expected step 100, got {loaded_step}"
         assert loaded_epoch == 5, f"Expected epoch 5, got {loaded_epoch}"
@@ -115,5 +126,55 @@ def test_checkpoint_save_load():
             sys.exit(1)
 
 
+def test_unpaired_checkpoint_handling():
+    """Test that unpaired checkpoints (missing state.json or .safetensors) are handled gracefully."""
+    print("\nTesting unpaired checkpoint handling...")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        checkpoint_dir = Path(tmpdir)
+
+        # Create model and optimizer
+        model = SimpleModel()
+        optimizer = optim.AdamW(learning_rate=0.001)
+
+        # Save first checkpoint
+        save_checkpoint(
+            model,
+            optimizer,
+            step=100,
+            epoch=5,
+            metrics={"loss": 0.5},
+            checkpoint_dir=checkpoint_dir,
+        )
+
+        # Save second checkpoint
+        save_checkpoint(
+            model,
+            optimizer,
+            step=200,
+            epoch=10,
+            metrics={"loss": 0.4},
+            checkpoint_dir=checkpoint_dir,
+        )
+
+        # Delete the .safetensors file for step 200 to simulate incomplete save
+        weights_file = checkpoint_dir / "step_000200.safetensors"
+        weights_file.unlink()
+
+        print("  Deleted step 200 .safetensors file (simulating incomplete save)")
+
+        # Create fresh model for loading
+        model_fresh = SimpleModel()
+
+        # Try to load - should fall back to step 100
+        loaded_step, loaded_epoch = load_checkpoint(checkpoint_dir, model_fresh)
+
+        assert loaded_step == 100, f"Expected fallback to step 100, got {loaded_step}"
+        print(f"  ✅ Correctly fell back to step {loaded_step} when step 200 was incomplete")
+
+        print("\n✅ Unpaired checkpoint handling test passed!")
+
+
 if __name__ == "__main__":
     test_checkpoint_save_load()
+    test_unpaired_checkpoint_handling()
