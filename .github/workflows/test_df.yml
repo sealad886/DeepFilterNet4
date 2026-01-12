@@ -30,7 +30,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # Free up disk space on ubuntu for PyTorch installation
       - name: Free disk space
         if: runner.os == 'Linux'
