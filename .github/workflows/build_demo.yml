@@ -14,16 +14,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-25.0
+          - os: ubuntu-24.04
             rust: nightly
-          - os: macos-15
+          - os: macos-14
             rust: nightly
           - os: windows-2022
             rust: nightly
             ext: .exe
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
@@ -43,7 +43,7 @@ jobs:
         shell: bash
         run: |
           cargo build -p df-demo --bin df-demo --features ui --release
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v4
         with:
           name: demo-build-artifact-${{runner.os}}
           path: target/release/df-demo${{matrix.ext}}
