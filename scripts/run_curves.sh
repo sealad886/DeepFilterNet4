@@ -184,6 +184,7 @@ fi
 RUN_NAMES=("baseline" "vad_low" "vad_mid" "vad_speech")
 RUN_VAD_W=("0" "0.02" "0.05" "0.05")
 RUN_SPEECH_W=("0" "0" "0" "0.03")
+RUN_TOTAL=${#RUN_NAMES[@]}
 
 for idx in "${!RUN_NAMES[@]}"; do
   name="${RUN_NAMES[$idx]}"
@@ -191,10 +192,12 @@ for idx in "${!RUN_NAMES[@]}"; do
   speech_w="${RUN_SPEECH_W[$idx]}"
   ckpt_dir="$CHECKPOINT_ROOT/$name"
   log_file="$LOGS_DIR/curves_${name}.log"
+  run_no=$((idx + 1))
+  ts="$(date +"%Y-%m-%d %H:%M:%S")"
 
   mkdir -p "$ckpt_dir"
   echo "============================================================"
-  echo "Run: $name | vad_w=$vad_w | speech_w=$speech_w"
+  echo "[$ts] Run $run_no/$RUN_TOTAL: $name | vad_w=$vad_w | speech_w=$speech_w"
   echo "Checkpoint: $ckpt_dir"
   echo "Log: $log_file"
 
@@ -210,7 +213,9 @@ for idx in "${!RUN_NAMES[@]}"; do
     )
 
     set +e
-    "${cmd[@]}" 2>&1 | tee -a "$log_file"
+    "${cmd[@]}" 2>&1 \
+      | awk -v prefix="[$name] " '{print prefix $0; fflush();}' \
+      | tee -a "$log_file"
     status=$?
     set -e
 
