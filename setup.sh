@@ -23,6 +23,7 @@ PYDF_DATA_FEATURES=""
 CARGO_FLAGS="${CARGO_FLAGS:---workspace --release --all-features}"
 USE_ALL=0
 LD_OVERRIDE=""
+CARGO_INCLUDE_PYDF=0
 
 usage() {
   cat <<'EOF'
@@ -39,6 +40,7 @@ Cargo (default on):
   --cargo-flags "FLAGS"     Override cargo flags (default: --workspace --release --all-features)
   --no-cargo                Skip Cargo build
   --ld PATH                 Override ld linker path (exported as LD)
+  --cargo-include-pydf      Include pyDF/pyDF-data crates in cargo build (default: excluded)
 
 Maturin bindings (optional):
   --with-pydf               Build/install pyDF via maturin develop --release -m pyDF/Cargo.toml
@@ -82,6 +84,10 @@ while [[ $# -gt 0 ]]; do
     --ld)
       LD_OVERRIDE="$2"
       shift 2
+      ;;
+    --cargo-include-pydf)
+      CARGO_INCLUDE_PYDF=1
+      shift 1
       ;;
     --no-cargo)
       BUILD_CARGO=0
@@ -166,12 +172,22 @@ resolve_ld() {
 if [[ $BUILD_PYTHON -eq 1 ]]; then
   echo "==> Python setup (venv: $VENV_DIR; python: $PYTHON_BIN)"
   require_cmd "$PYTHON_BIN" "Python 3.10+"
+  py_ver="$("$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')"
+  if [[ "$py_ver" != "3.10" ]]; then
+    echo "ERROR: Python 3.10 required. '$PYTHON_BIN' reports $py_ver." >&2
+    exit 1
+  fi
 
   if [[ ! -d "$VENV_DIR" ]]; then
     "$PYTHON_BIN" -m venv "$VENV_DIR"
   fi
   # shellcheck disable=SC1091
   source "$VENV_DIR/bin/activate"
+  venv_ver="$(python -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')"
+  if [[ "$venv_ver" != "3.10" ]]; then
+    echo "ERROR: venv python version $venv_ver (expected 3.10). Recreate $VENV_DIR with python3.10." >&2
+    exit 1
+  fi
 
   pushd DeepFilterNet
 
@@ -201,7 +217,13 @@ fi
 
 # ------------------------- Cargo ------------------------- #
 if [[ $BUILD_CARGO -eq 1 ]]; then
-  echo "==> Cargo build ($CARGO_FLAGS)"
+  build_flags=()
+  read -r -a build_flags <<<"$CARGO_FLAGS"
+  if [[ $CARGO_INCLUDE_PYDF -eq 0 ]]; then
+    build_flags+=(--exclude DeepFilterLib --exclude DeepFilterDataLoader)
+  fi
+
+  echo "==> Cargo build (${build_flags[*]})"
   require_cmd cargo "Cargo"
   require_cmd rustc "rustc"
   LD_PATH="$(resolve_ld)"
@@ -213,7 +235,7 @@ if [[ $BUILD_CARGO -eq 1 ]]; then
   fi
   cargo --version
   rustc --version
-  cargo build $CARGO_FLAGS
+  cargo build "${build_flags[@]}"
 fi
 
 # ------------------------- Maturin bindings ------------------------- #
