@@ -15,6 +15,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOGS_DIR="$REPO_ROOT/logs"
 PYTHON_BIN="${PYTHON_BIN:-python}"
+export DFNET_TQDM=1
+export PYTHONUNBUFFERED=1
 
 # Defaults (override via env or CLI)
 CACHE_DIR="${CACHE_DIR:-}"
@@ -213,7 +215,8 @@ for idx in "${!RUN_NAMES[@]}"; do
     )
 
     set +e
-    "${cmd[@]}" 2>&1 \
+    "${cmd[@]}" \
+      2> >(tee -a "$log_file" >&2) \
       | awk -v prefix="[$name] " '{print prefix $0; fflush();}' \
       | tee -a "$log_file"
     status=$?
