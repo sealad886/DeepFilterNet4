@@ -22,6 +22,7 @@ BUILD_PYDF_DATA=0
 PYDF_DATA_FEATURES=""
 CARGO_FLAGS="${CARGO_FLAGS:---workspace --release --all-features}"
 USE_ALL=0
+LD_OVERRIDE=""
 
 usage() {
   cat <<'EOF'
@@ -37,6 +38,7 @@ Python (default on):
 Cargo (default on):
   --cargo-flags "FLAGS"     Override cargo flags (default: --workspace --release --all-features)
   --no-cargo                Skip Cargo build
+  --ld PATH                 Override ld linker path (exported as LD)
 
 Maturin bindings (optional):
   --with-pydf               Build/install pyDF via maturin develop --release -m pyDF/Cargo.toml
@@ -75,6 +77,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --cargo-flags)
       CARGO_FLAGS="$2"
+      shift 2
+      ;;
+    --ld)
+      LD_OVERRIDE="$2"
       shift 2
       ;;
     --no-cargo)
@@ -136,6 +142,26 @@ dedupe_extras() {
   printf "%s\n" "${out[@]}"
 }
 
+resolve_ld() {
+  if [[ -n "$LD_OVERRIDE" ]]; then
+    echo "$LD_OVERRIDE"
+    return
+  fi
+  if [[ "$(uname)" == "Darwin" ]] && command -v xcrun >/dev/null 2>&1; then
+    local mac_ld
+    mac_ld="$(xcrun -f ld 2>/dev/null || true)"
+    if [[ -n "$mac_ld" && -x "$mac_ld" ]]; then
+      echo "$mac_ld"
+      return
+    fi
+  fi
+  if command -v ld >/dev/null 2>&1; then
+    command -v ld
+    return
+  fi
+  echo ""
+}
+
 # ------------------------- Python ------------------------- #
 if [[ $BUILD_PYTHON -eq 1 ]]; then
   echo "==> Python setup (venv: $VENV_DIR; python: $PYTHON_BIN)"
@@ -146,6 +172,8 @@ if [[ $BUILD_PYTHON -eq 1 ]]; then
   fi
   # shellcheck disable=SC1091
   source "$VENV_DIR/bin/activate"
+
+  pushd DeepFilterNet
 
   python -m pip install -U pip setuptools wheel
 
@@ -167,6 +195,8 @@ if [[ $BUILD_PYTHON -eq 1 ]]; then
     echo "Installing project without extras"
     python -m pip install .
   fi
+
+  popd
 fi
 
 # ------------------------- Cargo ------------------------- #
@@ -174,6 +204,13 @@ if [[ $BUILD_CARGO -eq 1 ]]; then
   echo "==> Cargo build ($CARGO_FLAGS)"
   require_cmd cargo "Cargo"
   require_cmd rustc "rustc"
+  LD_PATH="$(resolve_ld)"
+  if [[ -n "$LD_PATH" ]]; then
+    export LD="$LD_PATH"
+    echo "Using linker: $LD"
+  else
+    echo "WARNING: ld not found; build may fail if linker is missing."
+  fi
   cargo --version
   rustc --version
   cargo build $CARGO_FLAGS
