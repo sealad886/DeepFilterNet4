@@ -21,6 +21,7 @@ BUILD_PYDF=0
 BUILD_PYDF_DATA=0
 PYDF_DATA_FEATURES=""
 CARGO_FLAGS="${CARGO_FLAGS:---workspace --release --all-features}"
+USE_ALL=0
 
 usage() {
   cat <<'EOF'
@@ -31,6 +32,7 @@ Python (default on):
   --python-bin PATH         Python interpreter to use (default: python3.10)
   --venv DIR                Virtualenv directory (default: .venv)
   --no-python               Skip Python environment setup
+  --all                     Convenience: enables extras dev,train,eval and builds pyDF + pyDF-data
 
 Cargo (default on):
   --cargo-flags "FLAGS"     Override cargo flags (default: --workspace --release --all-features)
@@ -62,6 +64,10 @@ while [[ $# -gt 0 ]]; do
     --venv)
       VENV_DIR="$2"
       shift 2
+      ;;
+    --all)
+      USE_ALL=1
+      shift 1
       ;;
     --no-python)
       BUILD_PYTHON=0
@@ -99,6 +105,13 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# Apply --all bundle
+if [[ $USE_ALL -eq 1 ]]; then
+  USER_EXTRAS+=("dev" "train" "eval")
+  BUILD_PYDF=1
+  BUILD_PYDF_DATA=1
+fi
 
 # ------------------------- helpers ------------------------- #
 require_cmd() {
