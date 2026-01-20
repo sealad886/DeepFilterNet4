@@ -46,9 +46,131 @@ from typing import Literal, Tuple, cast
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
-from tqdm import tqdm
+import numpy as np
+from tqdm.auto import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# =============================================================================
+# tqdm configuration
+# =============================================================================
+# Write progress bars to stderr so stdout can be redirected to a log file without
+# capturing the progress bar spam. Also auto-disable tqdm when stderr isn't a TTY
+# (e.g., when piping/redirecting), which prevents log files from being flooded.
+_tqdm_env = os.getenv("DFNET_TQDM", "").strip().lower()
+if _tqdm_env in {"1", "true", "yes", "on"}:
+    _tqdm_disable = False
+elif _tqdm_env in {"0", "false", "no", "off"}:
+    _tqdm_disable = True
+else:
+    # Default: disable when stderr isn't interactive (prevents log spam when piped).
+    _tqdm_disable = not sys.stderr.isatty()
+
+_TQDM_KWARGS = {
+    "file": sys.stderr,
+    "disable": _tqdm_disable,
+    "mininterval": 1.0,
+    "maxinterval": 10.0,
+    "dynamic_ncols": True,
+}
+
+# =============================================================================
+# VAD-based speech preservation helpers
+# =============================================================================
+
+_EPS = 1e-8
+
+
+def _build_speech_band_mask(
+    n_freqs: int,
+    sample_rate: int,
+    band_low_hz: float,
+    band_high_hz: float,
+) -> tuple[mx.array, float]:
+    """Build a fixed speech-band mask for STFT bins."""
+    freqs = np.linspace(0.0, sample_rate / 2.0, n_freqs, dtype=np.float32)
+    mask = ((freqs >= band_low_hz) & (freqs <= band_high_hz)).astype(np.float32)
+    band_bins = float(mask.sum())
+    if band_bins < 1:
+        raise ValueError(
+            f"Speech band [{band_low_hz}, {band_high_hz}] Hz has no bins for " f"n_freqs={n_freqs}, sr={sample_rate}."
+        )
+    return mx.array(mask), band_bins
+
+
+def _compute_vad_probs(
+    clean_real: mx.array,
+    clean_imag: mx.array,
+    out_real: mx.array,
+    out_imag: mx.array,
+    band_mask: mx.array,
+    band_bins: float,
+    vad_z_threshold: float,
+    vad_z_slope: float,
+    eps: float = _EPS,
+) -> tuple[mx.array, mx.array]:
+    """Compute soft VAD probabilities from log-band energy (z-scored per utterance)."""
+    clean_power = clean_real**2 + clean_imag**2
+    out_power = out_real**2 + out_imag**2
+
+    clean_band = mx.sum(clean_power * band_mask, axis=-1) / (band_bins + eps)
+    out_band = mx.sum(out_power * band_mask, axis=-1) / (band_bins + eps)
+
+    log_clean = mx.log10(clean_band + eps)
+    mu = mx.mean(log_clean, axis=1, keepdims=True)
+    sigma = mx.sqrt(mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True) + eps)
+
+    z_ref = (log_clean - mu) / (sigma + eps)
+    z_out = (mx.log10(out_band + eps) - mu) / (sigma + eps)
+
+    z_slope = max(vad_z_slope, 1e-3)
+    p_ref = mx.sigmoid((z_ref - vad_z_threshold) / z_slope)
+    p_out = mx.sigmoid((z_out - vad_z_threshold) / z_slope)
+    return p_ref, p_out
+
+
+def _compute_vad_loss(
+    clean_real: mx.array,
+    clean_imag: mx.array,
+    out_real: mx.array,
+    out_imag: mx.array,
+    snr: mx.array,
+    band_mask: mx.array,
+    band_bins: float,
+    vad_threshold: float,
+    vad_margin: float,
+    vad_snr_gate_db: float,
+    vad_snr_gate_width: float,
+    vad_z_threshold: float,
+    vad_z_slope: float,
+) -> tuple[mx.array, mx.array, mx.array, mx.array]:
+    """Compute soft VAD loss and diagnostics.
+
+    Penalizes decreases in VAD probability relative to reference speech.
+    """
+    clean_real = clean_real.astype(mx.float32)
+    clean_imag = clean_imag.astype(mx.float32)
+    out_real = out_real.astype(mx.float32)
+    out_imag = out_imag.astype(mx.float32)
+
+    p_ref, p_out = _compute_vad_probs(
+        clean_real,
+        clean_imag,
+        out_real,
+        out_imag,
+        band_mask,
+        band_bins,
+        vad_z_threshold,
+        vad_z_slope,
+    )
+
+    speech_gate = mx.clip((p_ref - vad_threshold) / (1.0 - vad_threshold + _EPS), 0.0, 1.0)
+    snr_scale = max(vad_snr_gate_width, 1e-3)
+    snr_gate = mx.sigmoid((snr[:, None] - vad_snr_gate_db) / snr_scale)
+    gate = mx.stop_gradient(speech_gate * snr_gate)
+
+    vad_loss = mx.mean(mx.maximum(p_ref - p_out - vad_margin, 0.0) * gate)
+    return vad_loss, p_ref, p_out, gate
 
 
 # ============================================================================
@@ -328,6 +450,7 @@ def save_checkpoint(
     best_valid_loss: float,
     config: dict,
     optimizer: optim.Optimizer | None = None,
+    completed: bool = False,
 ) -> None:
     """Save a training checkpoint with model weights, training state, and optimizer state.
 
@@ -339,6 +462,7 @@ def save_checkpoint(
         best_valid_loss: Best validation loss so far
         config: Training configuration dict
         optimizer: Optional optimizer to save state from
+        completed: Whether this checkpoint marks a completed training run
     """
     from mlx.utils import tree_flatten
 
@@ -356,8 +480,12 @@ def save_checkpoint(
         try:
             # Flatten optimizer state for JSON serialization
             flat_state = tree_flatten(optimizer.state)
-            # Convert to dict with string representations (JSON-serializable)
-            optimizer_state_dict = {name: str(value) for name, value in flat_state}
+            # Convert arrays to lists, preserve scalar types (int, float, bool)
+            for k, v in flat_state:
+                if isinstance(v, mx.array):
+                    optimizer_state_dict[k] = v.tolist()  # Array → list
+                else:
+                    optimizer_state_dict[k] = v  # Scalar → keep as-is
         except Exception as e:
             print(f"⚠️  Failed to serialize optimizer state: {e}")
 
@@ -369,6 +497,7 @@ def save_checkpoint(
         "best_valid_loss": best_valid_loss,
         "config": config,
         "optimizer_state": optimizer_state_dict,
+        "completed": completed,
     }
     with open(state_path, "w") as f:
         json.dump(state, f, indent=2)
@@ -434,11 +563,16 @@ def load_checkpoint(
             try:
                 optimizer_state_dict = state.get("optimizer_state", {})
                 if optimizer_state_dict:
+                    # Convert all values back to mx.array (including scalars from .tolist())
+                    restored = {}
+                    for k, v in optimizer_state_dict.items():
+                        # All serialized optimizer state values should become mx.array
+                        restored[k] = mx.array(v)
                     # Reconstruct optimizer state from flat dict
-                    state_pairs = list(optimizer_state_dict.items())
+                    state_pairs = list(restored.items())
                     nested_state = tree_unflatten(state_pairs)
                     optimizer.state = nested_state
-                    print(f"✅ Restored optimizer state from checkpoint")
+                    print("✅ Restored optimizer state from checkpoint")
             except Exception as e:
                 print(f"⚠️  Failed to restore optimizer state: {e}")
 
@@ -493,7 +627,7 @@ def cleanup_checkpoints(
 def find_latest_checkpoint(checkpoint_dir: Path) -> Path | None:
     """Find the most recent checkpoint in the checkpoint directory.
 
-    Checks for step_*.safetensors and epoch_*.safetensors files,
+    Checks for step_*.safetensors, epoch_*.safetensors, and final.safetensors files,
     returning the most recently modified one.
 
     Args:
@@ -506,7 +640,7 @@ def find_latest_checkpoint(checkpoint_dir: Path) -> Path | None:
         return None
 
     ckpt_files = []
-    for pattern in ["step_*.safetensors", "epoch_*.safetensors"]:
+    for pattern in ["step_*.safetensors", "epoch_*.safetensors", "final.safetensors"]:
         ckpt_files.extend(checkpoint_dir.glob(pattern))
 
     if not ckpt_files:
@@ -550,6 +684,22 @@ def train(
     eval_frequency: int = 10,
     backbone_type: Literal["mamba", "gru", "attention"] = "mamba",
     verbose: bool = False,
+    snr_range: Tuple[float, float] | None = None,
+    snr_range_extreme: Tuple[float, float] | None = None,
+    p_extreme_snr: float | None = None,
+    speech_gain_range: Tuple[float, float] | None = None,
+    noise_gain_range: Tuple[float, float] | None = None,
+    vad_loss_weight: float = 0.05,
+    vad_threshold: float = 0.6,
+    vad_margin: float = 0.05,
+    vad_warmup_epochs: int = 5,
+    vad_snr_gate_db: float = -10.0,
+    vad_snr_gate_width: float = 6.0,
+    vad_band_low_hz: float = 300.0,
+    vad_band_high_hz: float = 3400.0,
+    vad_z_threshold: float = 0.0,
+    vad_z_slope: float = 1.0,
+    eval_sisdr: bool = False,
 ) -> None:
     """Train DfNet4 model with dynamic on-the-fly mixing.
 
@@ -582,6 +732,22 @@ def train(
         grad_accumulation_steps: Number of steps to accumulate gradients (effective batch = batch_size * grad_accumulation_steps)
         eval_frequency: Evaluate loss every N batches (reduces synchronization overhead)
         verbose: Enable detailed timing and diagnostic output
+        snr_range: Optional override for base SNR range (dB)
+        snr_range_extreme: Optional override for extreme SNR range (dB)
+        p_extreme_snr: Optional override for extreme SNR sampling probability
+        speech_gain_range: Optional override for speech gain range (dB)
+        noise_gain_range: Optional override for noise gain range (dB)
+        vad_loss_weight: Weight for VAD speech-preservation loss
+        vad_threshold: VAD probability threshold for speech gating
+        vad_margin: Margin for VAD consistency loss
+        vad_warmup_epochs: Warmup epochs for ramping VAD loss weight
+        vad_snr_gate_db: SNR threshold for VAD gating (dB)
+        vad_snr_gate_width: SNR gate softness (dB)
+        vad_band_low_hz: Low cutoff for speech band (Hz)
+        vad_band_high_hz: High cutoff for speech band (Hz)
+        vad_z_threshold: Z-score threshold for VAD sigmoid
+        vad_z_slope: Z-score slope for VAD sigmoid
+        eval_sisdr: Compute SI-SDR during validation (slower)
     """
     from df_mlx.config import get_default_config
     from df_mlx.dynamic_dataset import (
@@ -643,9 +809,33 @@ def train(
             num_workers=num_workers,
         )
 
+    if snr_range is not None:
+        config.snr_range = snr_range
+    if snr_range_extreme is not None:
+        config.snr_range_extreme = snr_range_extreme
+    if p_extreme_snr is not None:
+        config.p_extreme_snr = p_extreme_snr
+    if speech_gain_range is not None:
+        config.speech_gain_range = speech_gain_range
+    if noise_gain_range is not None:
+        config.noise_gain_range = noise_gain_range
+
     # Create dataset (this populates config.*_files from cache index if using cache)
     print("\nInitializing dynamic dataset...")
     dataset = DynamicDataset(config)
+
+    use_vad_loss = vad_loss_weight > 0
+    if use_vad_loss:
+        n_freqs = config.fft_size // 2 + 1
+        vad_band_mask, vad_band_bins = _build_speech_band_mask(
+            n_freqs,
+            config.sample_rate,
+            vad_band_low_hz,
+            vad_band_high_hz,
+        )
+    else:
+        vad_band_mask = mx.array(0.0)
+        vad_band_bins = 1.0
 
     # Print file counts after dataset init (so cache files are included)
     print(f"Speech files:   {len(config.speech_files):,}")
@@ -657,7 +847,32 @@ def train(
     print(f"Checkpoint dir: {checkpoint_dir}")
     print(f"P(reverb):      {config.p_reverb}")
     print(f"P(clipping):    {config.p_clipping}")
+    print(f"SNR range:      {config.snr_range} dB")
+    print(f"SNR extreme:    {config.snr_range_extreme} dB (p={config.p_extreme_snr})")
+    print(f"Speech gain:    {config.speech_gain_range} dB")
+    print(f"Noise gain:     {config.noise_gain_range} dB")
+    print(f"VAD loss:       {'on' if vad_loss_weight > 0 else 'off'} (w={vad_loss_weight})")
+    if vad_loss_weight > 0:
+        print(f"  VAD threshold: {vad_threshold} | margin: {vad_margin}")
+        print(f"  VAD warmup:    {vad_warmup_epochs} epochs")
+        print(f"  VAD SNR gate:  {vad_snr_gate_db} dB (width {vad_snr_gate_width} dB)")
+        print(f"  VAD band:      {vad_band_low_hz:.0f}-{vad_band_high_hz:.0f} Hz")
     print("=" * 60)
+
+    train_config = {
+        **config.__dict__,
+        "vad_loss_weight": vad_loss_weight,
+        "vad_threshold": vad_threshold,
+        "vad_margin": vad_margin,
+        "vad_warmup_epochs": vad_warmup_epochs,
+        "vad_snr_gate_db": vad_snr_gate_db,
+        "vad_snr_gate_width": vad_snr_gate_width,
+        "vad_band_low_hz": vad_band_low_hz,
+        "vad_band_high_hz": vad_band_high_hz,
+        "vad_z_threshold": vad_z_threshold,
+        "vad_z_slope": vad_z_slope,
+        "eval_sisdr": eval_sisdr,
+    }
 
     dataset.set_split("train")
 
@@ -737,6 +952,7 @@ def train(
     steps_per_epoch = approx_samples_per_epoch // batch_size
     total_steps = epochs * steps_per_epoch
     warmup_steps = warmup_epochs * steps_per_epoch
+    vad_warmup_steps = vad_warmup_epochs * steps_per_epoch if use_vad_loss else 0
 
     schedule = WarmupCosineSchedule(
         base_lr=learning_rate,
@@ -759,17 +975,62 @@ def train(
         state = load_checkpoint(model, resume_from, optimizer=optimizer)
         start_epoch = state.get("epoch", 0)
         best_valid_loss = state.get("best_valid_loss", float("inf"))
+        completed = bool(state.get("completed", False))
         print(f"  Resumed from: {resume_from} (epoch {start_epoch})")
+        if completed and start_epoch >= epochs:
+            print(f"✅ Training already complete (checkpoint epoch {start_epoch}/{epochs}).")
+            return
+        if not completed and start_epoch >= epochs:
+            print(
+                f"⚠️  Checkpoint epoch {start_epoch} >= requested {epochs} but not marked complete; "
+                f"resuming from epoch {max(epochs - 1, 0)}."
+            )
+            start_epoch = max(epochs - 1, 0)
 
     # Loss function - define as a pure function for compilation
-    def loss_fn(model, noisy_real, noisy_imag, feat_erb, feat_spec, clean_real, clean_imag):
+    # Loss formula:
+    #   L_total = L_spec + w_vad * L_vad
+    #   L_vad = mean( gate * relu(p_ref - p_out - margin) )
+    #   gate = sigmoid((snr - snr_gate_db)/snr_gate_width) * clip((p_ref - vad_thr)/(1 - vad_thr))
+    #   p_ref/p_out from speech-band log-energy (z-scored per utterance)
+    def loss_fn(
+        model,
+        noisy_real,
+        noisy_imag,
+        feat_erb,
+        feat_spec,
+        clean_real,
+        clean_imag,
+        snr,
+        vad_weight,
+    ):
         """Compute training loss."""
         # Model expects spec as tuple (real, imag)
         noisy_spec = (noisy_real, noisy_imag)
         target_spec = (clean_real, clean_imag)
 
         out = model(noisy_spec, feat_erb, feat_spec)
-        return spectral_loss(out, target_spec)
+        spec_loss = spectral_loss(out, target_spec)
+
+        if use_vad_loss:
+            vad_loss, _, _, _ = _compute_vad_loss(
+                clean_real,
+                clean_imag,
+                out[0],
+                out[1],
+                snr,
+                vad_band_mask,
+                vad_band_bins,
+                vad_threshold,
+                vad_margin,
+                vad_snr_gate_db,
+                vad_snr_gate_width,
+                vad_z_threshold,
+                vad_z_slope,
+            )
+            return spec_loss + vad_weight * vad_loss
+
+        return spec_loss
 
     loss_and_grad = nn.value_and_grad(model, loss_fn)
 
@@ -780,7 +1041,17 @@ def train(
     from functools import partial
 
     @partial(mx.compile, inputs=state, outputs=state)
-    def compiled_step(noisy_real, noisy_imag, feat_erb, feat_spec, clean_real, clean_imag, max_grad_norm_val):
+    def compiled_step(
+        noisy_real,
+        noisy_imag,
+        feat_erb,
+        feat_spec,
+        clean_real,
+        clean_imag,
+        snr,
+        vad_weight,
+        max_grad_norm_val,
+    ):
         """JIT-compiled training step for faster training.
 
         This compiles the forward pass, backward pass, and optimizer update
@@ -794,6 +1065,8 @@ def train(
             feat_spec,
             clean_real,
             clean_imag,
+            snr,
+            vad_weight,
         )
         # Gradient clipping inline
         if max_grad_norm_val > 0:
@@ -801,13 +1074,150 @@ def train(
         optimizer.update(model, grads)
         return loss
 
+    def run_validation(label: str = "  Validating") -> float:
+        """Run validation on the fixed validation split and return average loss."""
+        model.eval()
+
+        dataset.set_split("valid")
+        dataset.set_epoch(0)  # Fixed epoch for reproducible validation
+
+        if len(dataset) == 0:
+            return float("inf")
+
+        valid_loss = 0.0
+        valid_spec_loss = 0.0
+        valid_vad_loss = 0.0
+        valid_p_ref = 0.0
+        valid_p_out = 0.0
+        valid_gate_pct = 0.0
+        valid_residual = 0.0
+        valid_sisdr = 0.0
+        num_valid_batches = 0
+        valid_steps = len(dataset) // batch_size
+
+        valid_loader = PrefetchDataLoader(
+            dataset,
+            batch_size=batch_size,
+            num_workers=2,
+            prefetch_factor=1,
+        )
+
+        valid_pbar = tqdm(
+            valid_loader,
+            total=valid_steps,
+            desc=label,
+            unit="batch",
+            leave=False,
+            **_TQDM_KWARGS,
+        )
+
+        sisdr_fn = None
+        if eval_sisdr:
+            from df_mlx.loss import si_sdr
+            from df_mlx.ops import istft
+
+            sisdr_fn = (si_sdr, istft)
+
+        for batch in valid_pbar:
+            noisy_real = batch["noisy_real"]
+            noisy_imag = batch["noisy_imag"]
+            clean_real = batch["clean_real"]
+            clean_imag = batch["clean_imag"]
+            feat_erb = batch["feat_erb"]
+            feat_spec = batch["feat_spec"]
+            snr = batch["snr"]
+
+            # Model expects spec as tuple (real, imag)
+            noisy_spec = (noisy_real, noisy_imag)
+            target_spec = (clean_real, clean_imag)
+
+            out = model(noisy_spec, feat_erb, feat_spec)
+            spec_loss = spectral_loss(out, target_spec)
+
+            if use_vad_loss:
+                vad_loss, p_ref, p_out, gate = _compute_vad_loss(
+                    clean_real,
+                    clean_imag,
+                    out[0],
+                    out[1],
+                    snr,
+                    vad_band_mask,
+                    vad_band_bins,
+                    vad_threshold,
+                    vad_margin,
+                    vad_snr_gate_db,
+                    vad_snr_gate_width,
+                    vad_z_threshold,
+                    vad_z_slope,
+                )
+                loss = spec_loss + vad_loss_weight * vad_loss
+            else:
+                vad_loss = mx.array(0.0)
+                p_ref = mx.array(0.0)
+                p_out = mx.array(0.0)
+                gate = mx.array(0.0)
+                loss = spec_loss
+
+            residual = mx.mean((out[0] - clean_real) ** 2 + (out[1] - clean_imag) ** 2)
+
+            loss_val = float(loss)
+            spec_loss_val = float(spec_loss)
+            vad_loss_val = float(vad_loss)
+            residual_val = float(residual)
+
+            valid_loss += loss_val
+            valid_spec_loss += spec_loss_val
+            valid_vad_loss += vad_loss_val
+            valid_residual += residual_val
+            num_valid_batches += 1
+
+            if use_vad_loss:
+                valid_p_ref += float(mx.mean(p_ref))
+                valid_p_out += float(mx.mean(p_out))
+                valid_gate_pct += float(mx.mean(mx.where(gate > 0.0, 1.0, 0.0)))
+
+            if sisdr_fn is not None:
+                si_sdr_fn, istft_fn = sisdr_fn
+                clean_wav = istft_fn(target_spec, n_fft=config.fft_size, hop_length=config.hop_size)
+                out_wav = istft_fn(out, n_fft=config.fft_size, hop_length=config.hop_size)
+                sisdr_val = float(si_sdr_fn(out_wav, clean_wav))
+                valid_sisdr += sisdr_val
+
+            valid_pbar.set_postfix(
+                loss=f"{loss_val:.4f}",
+                avg=f"{valid_loss / num_valid_batches:.4f}",
+            )
+
+        valid_pbar.close()
+
+        if num_valid_batches > 0:
+            avg_spec = valid_spec_loss / num_valid_batches
+            avg_vad = valid_vad_loss / num_valid_batches
+            avg_residual = valid_residual / num_valid_batches
+            avg_p_ref = valid_p_ref / num_valid_batches if use_vad_loss else 0.0
+            avg_p_out = valid_p_out / num_valid_batches if use_vad_loss else 0.0
+            avg_gate = valid_gate_pct / num_valid_batches if use_vad_loss else 0.0
+            avg_sisdr = valid_sisdr / num_valid_batches if eval_sisdr else None
+
+            if use_vad_loss or eval_sisdr:
+                extras = [f"spec={avg_spec:.4f}", f"vad={avg_vad:.4f}", f"resid={avg_residual:.4f}"]
+                if use_vad_loss:
+                    extras.append(f"p_ref={avg_p_ref:.2f}")
+                    extras.append(f"p_out={avg_p_out:.2f}")
+                    extras.append(f"gate={avg_gate:.0f}%")
+                if avg_sisdr is not None:
+                    extras.append(f"si-sdr={avg_sisdr:.2f}dB")
+                print(f"{label} metrics: " + " | ".join(extras))
+
+        return valid_loss / max(num_valid_batches, 1)
+
     # Flag to use compiled step (can be disabled for debugging)
     use_compiled_step = True
     print(f"  Using compiled training step: {use_compiled_step}")
 
     # Register SIGINT handler for graceful shutdown
-    _register_sigint_handler(model, optimizer, ckpt_dir, config.__dict__)
-    print(f"  SIGINT handler registered (CTRL+C will save checkpoint before exit)")
+    _register_sigint_handler(model, optimizer, ckpt_dir, train_config)
+    print("  SIGINT handler registered (CTRL+C will save checkpoint before exit)")
 
     # Training loop
     print(f"\nStarting training (epoch {start_epoch + 1} to {epochs})...")
@@ -817,6 +1227,9 @@ def train(
 
     global_step = start_epoch * steps_per_epoch
     final_epoch = start_epoch
+    avg_train_loss = float("nan")
+    last_valid_loss: float | None = None
+    last_valid_epoch: int | None = None
 
     for epoch in range(start_epoch, epochs):
         epoch_start = time.time()
@@ -829,6 +1242,12 @@ def train(
         # ====== Training ======
         model.train()
         train_loss = 0.0
+        train_spec_loss = 0.0
+        train_vad_loss = 0.0
+        train_p_ref = 0.0
+        train_p_out = 0.0
+        train_gate_pct = 0.0
+        num_vad_logs = 0
         num_train_batches = 0
         samples_processed = 0
         grad_norm = 0.0
@@ -863,8 +1282,8 @@ def train(
             total=steps_per_epoch,
             desc=f"Epoch {epoch + 1}/{epochs}",
             unit="batch",
-            dynamic_ncols=True,
             leave=True,
+            **_TQDM_KWARGS,
         )
 
         data_start = time.time()
@@ -880,6 +1299,7 @@ def train(
             clean_imag = batch["clean_imag"]
             feat_erb = batch["feat_erb"]
             feat_spec = batch["feat_spec"]
+            snr = batch["snr"]
 
             # Convert to FP16 if enabled (mixed precision training)
             if use_fp16:
@@ -896,6 +1316,12 @@ def train(
             current_lr = schedule(global_step)
             optimizer.learning_rate = current_lr
 
+            vad_weight = vad_loss_weight
+            if use_vad_loss and vad_warmup_steps > 0:
+                warmup_frac = min(1.0, global_step / max(vad_warmup_steps, 1))
+                vad_weight = vad_loss_weight * warmup_frac
+            vad_weight_mx = mx.array(vad_weight, dtype=mx.float32)
+
             # Forward, backward, and update (either compiled or standard)
             fwd_start = time.time()
 
@@ -908,6 +1334,8 @@ def train(
                     feat_spec,
                     clean_real,
                     clean_imag,
+                    snr,
+                    vad_weight_mx,
                     max_grad_norm,
                 )
                 # OPTIMIZATION: Only sync periodically to reduce GPU stalls
@@ -926,6 +1354,8 @@ def train(
                     feat_spec,
                     clean_real,
                     clean_imag,
+                    snr,
+                    vad_weight_mx,
                 )
                 # Only sync periodically
                 should_sync = (batch_idx + 1) % eval_frequency == 0
@@ -965,9 +1395,43 @@ def train(
                     (current_batch_size * eval_frequency) / (step_time * eval_frequency) if step_time > 0 else 0
                 )
 
+                if use_vad_loss:
+                    # Extra forward pass for component logging (only on sync steps)
+                    out = model((noisy_real, noisy_imag), feat_erb, feat_spec)
+                    spec_loss = spectral_loss(out, (clean_real, clean_imag))
+                    vad_loss, p_ref, p_out, gate = _compute_vad_loss(
+                        clean_real,
+                        clean_imag,
+                        out[0],
+                        out[1],
+                        snr,
+                        vad_band_mask,
+                        vad_band_bins,
+                        vad_threshold,
+                        vad_margin,
+                        vad_snr_gate_db,
+                        vad_snr_gate_width,
+                        vad_z_threshold,
+                        vad_z_slope,
+                    )
+                    spec_loss_val = float(spec_loss)
+                    vad_loss_val = float(vad_loss)
+                    p_ref_mean = float(mx.mean(p_ref))
+                    p_out_mean = float(mx.mean(p_out))
+                    gate_pct = float(mx.mean(mx.where(gate > 0.0, 1.0, 0.0)))
+
+                    train_spec_loss += spec_loss_val * eval_frequency
+                    train_vad_loss += vad_loss_val * eval_frequency
+                    train_p_ref += p_ref_mean
+                    train_p_out += p_out_mean
+                    train_gate_pct += gate_pct
+                    num_vad_logs += 1
+
                 if verbose:
                     train_pbar.set_postfix(
                         loss=f"{loss_val:.4f}",
+                        spec=f"{spec_loss_val:.4f}" if use_vad_loss else f"{loss_val:.4f}",
+                        vad=f"{vad_loss_val:.4f}" if use_vad_loss else "0.0000",
                         lr=f"{lr:.1e}",
                         data=f"{data_time * 1000:.0f}ms",
                         step=f"{fwd_time * 1000:.0f}ms",
@@ -978,6 +1442,10 @@ def train(
                     train_pbar.set_postfix(
                         loss=f"{loss_val:.4f}",
                         avg=f"{train_loss / num_train_batches:.4f}",
+                        vad=f"{vad_loss_val:.4f}" if use_vad_loss else "0.0000",
+                        p_ref=f"{p_ref_mean:.2f}" if use_vad_loss else "0.00",
+                        p_out=f"{p_out_mean:.2f}" if use_vad_loss else "0.00",
+                        gate=f"{gate_pct:.0f}%" if use_vad_loss else "0%",
                         lr=f"{lr:.1e}",
                         grad=f"{grad_norm:.2f}",
                         speed=f"{samples_per_sec:.0f}s/s",
@@ -1001,7 +1469,7 @@ def train(
                     epoch=epoch + 1,
                     loss=train_loss / num_train_batches if num_train_batches > 0 else loss_val,
                     best_valid_loss=best_valid_loss,
-                    config=config.__dict__,
+                    config=train_config,
                     optimizer=optimizer,
                 )
                 print(f"\n  📦 Checkpoint saved: {ckpt_path.name} (step {global_step})")
@@ -1023,6 +1491,11 @@ def train(
             train_stream.save_checkpoint(data_checkpoint_path)
 
         avg_train_loss = train_loss / max(num_train_batches, 1)
+        avg_train_spec_loss = train_spec_loss / max(num_train_batches, 1)
+        avg_train_vad_loss = train_vad_loss / max(num_train_batches, 1)
+        avg_train_p_ref = train_p_ref / max(num_vad_logs, 1)
+        avg_train_p_out = train_p_out / max(num_vad_logs, 1)
+        avg_train_gate = train_gate_pct / max(num_vad_logs, 1)
 
         # Print detailed timing breakdown in verbose mode
         if verbose and num_train_batches > 0:
@@ -1040,59 +1513,9 @@ def train(
         # ====== Validation ======
         avg_valid_loss = float("inf")
         if (epoch + 1) % validate_every == 0:
-            model.eval()
-
-            dataset.set_split("valid")
-            dataset.set_epoch(0)  # Fixed epoch for reproducible validation
-
-            valid_loss = 0.0
-            num_valid_batches = 0
-            valid_steps = len(dataset) // batch_size
-
-            valid_loader = PrefetchDataLoader(
-                dataset,
-                batch_size=batch_size,
-                num_workers=2,
-                prefetch_factor=1,
-            )
-
-            # Validation progress bar
-            valid_pbar = tqdm(
-                valid_loader,
-                total=valid_steps,
-                desc="  Validating",
-                unit="batch",
-                dynamic_ncols=True,
-                leave=False,
-            )
-
-            for batch in valid_pbar:
-                noisy_real = batch["noisy_real"]
-                noisy_imag = batch["noisy_imag"]
-                clean_real = batch["clean_real"]
-                clean_imag = batch["clean_imag"]
-                feat_erb = batch["feat_erb"]
-                feat_spec = batch["feat_spec"]
-
-                # Model expects spec as tuple (real, imag)
-                noisy_spec = (noisy_real, noisy_imag)
-                target_spec = (clean_real, clean_imag)
-
-                out = model(noisy_spec, feat_erb, feat_spec)
-                loss = spectral_loss(out, target_spec)
-
-                loss_val = float(loss)
-                valid_loss += loss_val
-                num_valid_batches += 1
-
-                # Update validation progress
-                valid_pbar.set_postfix(
-                    loss=f"{loss_val:.4f}",
-                    avg=f"{valid_loss / num_valid_batches:.4f}",
-                )
-
-            valid_pbar.close()
-            avg_valid_loss = valid_loss / max(num_valid_batches, 1)
+            avg_valid_loss = run_validation("  Validating")
+            last_valid_loss = avg_valid_loss
+            last_valid_epoch = epoch
 
             # Early stopping check
             if avg_valid_loss < best_valid_loss:
@@ -1107,7 +1530,7 @@ def train(
                     epoch=epoch + 1,
                     loss=avg_train_loss,
                     best_valid_loss=best_valid_loss,
-                    config=config.__dict__,
+                    config=train_config,
                     optimizer=optimizer,
                 )
             else:
@@ -1122,14 +1545,24 @@ def train(
 
         # Improved epoch summary with throughput
         improvement_marker = "★" if avg_valid_loss <= best_valid_loss else ""
+        vad_summary = ""
+        if use_vad_loss:
+            vad_summary = f" | Spec: {avg_train_spec_loss:.4f} | VAD: {avg_train_vad_loss:.4f}"
+
         print(
             f"✓ Epoch {epoch + 1}/{epochs} complete | "
-            f"Train: {avg_train_loss:.4f} | "
+            f"Train: {avg_train_loss:.4f}{vad_summary} | "
             f"Valid: {avg_valid_loss:.4f} {improvement_marker}| "
             f"Best: {best_valid_loss:.4f} | "
             f"{samples_processed:,} samples @ {epoch_throughput:.0f}/s | "
             f"{epoch_time:.1f}s"
         )
+
+        if use_vad_loss and verbose:
+            print(
+                f"  VAD stats: p_ref={avg_train_p_ref:.2f} | "
+                f"p_out={avg_train_p_out:.2f} | gate={avg_train_gate:.0f}%"
+            )
 
         # ====== Epoch-based Checkpointing ======
         if save_strategy == "epoch":
@@ -1140,7 +1573,7 @@ def train(
                 epoch=epoch + 1,
                 loss=avg_train_loss,
                 best_valid_loss=best_valid_loss,
-                config=config.__dict__,
+                config=train_config,
                 optimizer=optimizer,
             )
             print(f"  📦 Checkpoint saved: {ckpt_path.name}")
@@ -1156,12 +1589,56 @@ def train(
         if (epoch + 1) % 10 == 0:
             gc.collect()
 
+    # Final validation to compare against best checkpoint.
+    final_valid_loss = float("inf")
+    if last_valid_epoch == final_epoch and last_valid_loss is not None:
+        final_valid_loss = last_valid_loss
+    else:
+        final_valid_loss = run_validation("  Final validation")
+        last_valid_loss = final_valid_loss
+        last_valid_epoch = final_epoch
+
+    if final_valid_loss < best_valid_loss:
+        best_valid_loss = final_valid_loss
+        best_path = ckpt_dir / "best.safetensors"
+        save_checkpoint(
+            model,
+            best_path,
+            epoch=final_epoch + 1,
+            loss=avg_train_loss,
+            best_valid_loss=best_valid_loss,
+            config=train_config,
+            optimizer=optimizer,
+        )
+        print(f"  ✅ Final weights set new best: {best_valid_loss:.4f}")
+
+    # Save final weights (even if not aligned to checkpoint interval).
+    mx.eval(state)
+    final_path = ckpt_dir / "final.safetensors"
+    save_checkpoint(
+        model,
+        final_path,
+        epoch=final_epoch + 1,
+        loss=avg_train_loss,
+        best_valid_loss=best_valid_loss,
+        config=train_config,
+        optimizer=optimizer,
+        completed=True,
+    )
+    print(f"  📦 Final checkpoint saved: {final_path.name}")
+
     # ====== Final Summary ======
     print("\n" + "=" * 60)
     print("Training Complete")
     print("=" * 60)
     print(f"Final epoch:     {final_epoch + 1}")
     print(f"Best valid loss: {best_valid_loss:.4f}")
+    if final_valid_loss != float("inf"):
+        print(f"Final valid loss: {final_valid_loss:.4f}")
+    else:
+        print("Final valid loss: N/A")
+    print(f"Final checkpoint: {final_path}")
+    print(f"Best checkpoint: {ckpt_dir / 'best.safetensors'}")
     print(f"Checkpoints:     {ckpt_dir}")
 
 
@@ -1347,6 +1824,104 @@ def main():
         help="Backbone type: 'mamba' (parallel scan SSM), 'gru' (recurrent), or 'attention' (fastest backward)",
     )
     parser.add_argument(
+        "--snr-range",
+        type=float,
+        nargs=2,
+        metavar=("MIN", "MAX"),
+        help="Override base SNR range in dB (e.g., --snr-range -5 40)",
+    )
+    parser.add_argument(
+        "--snr-range-extreme",
+        type=float,
+        nargs=2,
+        metavar=("MIN", "MAX"),
+        help="Override extreme SNR range in dB (e.g., --snr-range-extreme -20 -5)",
+    )
+    parser.add_argument(
+        "--p-extreme-snr",
+        type=float,
+        help="Probability of sampling from extreme SNR range (0-1)",
+    )
+    parser.add_argument(
+        "--speech-gain-range",
+        type=float,
+        nargs=2,
+        metavar=("MIN", "MAX"),
+        help="Override speech gain range in dB (e.g., --speech-gain-range -12 12)",
+    )
+    parser.add_argument(
+        "--noise-gain-range",
+        type=float,
+        nargs=2,
+        metavar=("MIN", "MAX"),
+        help="Override noise gain range in dB (e.g., --noise-gain-range -12 12)",
+    )
+    parser.add_argument(
+        "--vad-loss-weight",
+        type=float,
+        default=0.05,
+        help="Weight for VAD speech-preservation loss (0 disables)",
+    )
+    parser.add_argument(
+        "--vad-threshold",
+        type=float,
+        default=0.6,
+        help="VAD probability threshold for speech gating",
+    )
+    parser.add_argument(
+        "--vad-margin",
+        type=float,
+        default=0.05,
+        help="Margin for VAD consistency loss",
+    )
+    parser.add_argument(
+        "--vad-warmup-epochs",
+        type=int,
+        default=5,
+        help="Warmup epochs to ramp VAD loss from 0 to target weight",
+    )
+    parser.add_argument(
+        "--vad-snr-gate",
+        type=float,
+        default=-10.0,
+        help="SNR threshold (dB) for VAD gating",
+    )
+    parser.add_argument(
+        "--vad-snr-gate-width",
+        type=float,
+        default=6.0,
+        help="Softness of SNR gating in dB",
+    )
+    parser.add_argument(
+        "--vad-band-low",
+        type=float,
+        default=300.0,
+        help="Low cutoff for speech band in Hz",
+    )
+    parser.add_argument(
+        "--vad-band-high",
+        type=float,
+        default=3400.0,
+        help="High cutoff for speech band in Hz",
+    )
+    parser.add_argument(
+        "--vad-z-threshold",
+        type=float,
+        default=0.0,
+        help="Z-score threshold for VAD sigmoid",
+    )
+    parser.add_argument(
+        "--vad-z-slope",
+        type=float,
+        default=1.0,
+        help="Z-score slope for VAD sigmoid",
+    )
+    parser.add_argument(
+        "--eval-sisdr",
+        action="store_true",
+        help="Compute SI-SDR during validation (slower)",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -1422,6 +1997,22 @@ def main():
         eval_frequency=args.eval_frequency,
         backbone_type=cast(Literal["mamba", "gru", "attention"], args.backbone_type),
         verbose=args.verbose,
+        snr_range=tuple(args.snr_range) if args.snr_range else None,
+        snr_range_extreme=tuple(args.snr_range_extreme) if args.snr_range_extreme else None,
+        p_extreme_snr=args.p_extreme_snr,
+        speech_gain_range=tuple(args.speech_gain_range) if args.speech_gain_range else None,
+        noise_gain_range=tuple(args.noise_gain_range) if args.noise_gain_range else None,
+        vad_loss_weight=args.vad_loss_weight,
+        vad_threshold=args.vad_threshold,
+        vad_margin=args.vad_margin,
+        vad_warmup_epochs=args.vad_warmup_epochs,
+        vad_snr_gate_db=args.vad_snr_gate,
+        vad_snr_gate_width=args.vad_snr_gate_width,
+        vad_band_low_hz=args.vad_band_low,
+        vad_band_high_hz=args.vad_band_high,
+        vad_z_threshold=args.vad_z_threshold,
+        vad_z_slope=args.vad_z_slope,
+        eval_sisdr=args.eval_sisdr,
     )
 
 
