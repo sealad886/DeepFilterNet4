@@ -173,6 +173,29 @@ def _compute_vad_loss(
     return vad_loss, p_ref, p_out, gate
 
 
+def _compute_speech_band_logmag_loss(
+    clean_real: mx.array,
+    clean_imag: mx.array,
+    out_real: mx.array,
+    out_imag: mx.array,
+    band_mask: mx.array,
+    band_bins: float,
+    gate: mx.array,
+    eps: float = _EPS,
+) -> mx.array:
+    """Compute speech-band log-magnitude L1 loss weighted by VAD gate."""
+    clean_mag = mx.sqrt(clean_real**2 + clean_imag**2 + eps)
+    out_mag = mx.sqrt(out_real**2 + out_imag**2 + eps)
+
+    clean_log = mx.log10(clean_mag + eps)
+    out_log = mx.log10(out_mag + eps)
+
+    clean_band = mx.sum(clean_log * band_mask, axis=-1) / (band_bins + eps)
+    out_band = mx.sum(out_log * band_mask, axis=-1) / (band_bins + eps)
+
+    return mx.mean(mx.abs(out_band - clean_band) * gate)
+
+
 # ============================================================================
 # Signal Handling for Graceful Interrupt
 # ============================================================================
@@ -692,6 +715,7 @@ def train(
     vad_loss_weight: float = 0.05,
     vad_threshold: float = 0.6,
     vad_margin: float = 0.05,
+    vad_speech_loss_weight: float = 0.0,
     vad_warmup_epochs: int = 5,
     vad_snr_gate_db: float = -10.0,
     vad_snr_gate_width: float = 6.0,
@@ -740,6 +764,7 @@ def train(
         vad_loss_weight: Weight for VAD speech-preservation loss
         vad_threshold: VAD probability threshold for speech gating
         vad_margin: Margin for VAD consistency loss
+        vad_speech_loss_weight: Weight for VAD-weighted speech-structure loss
         vad_warmup_epochs: Warmup epochs for ramping VAD loss weight
         vad_snr_gate_db: SNR threshold for VAD gating (dB)
         vad_snr_gate_width: SNR gate softness (dB)
@@ -824,7 +849,7 @@ def train(
     print("\nInitializing dynamic dataset...")
     dataset = DynamicDataset(config)
 
-    use_vad_loss = vad_loss_weight > 0
+    use_vad_loss = vad_loss_weight > 0 or vad_speech_loss_weight > 0
     if use_vad_loss:
         n_freqs = config.fft_size // 2 + 1
         vad_band_mask, vad_band_bins = _build_speech_band_mask(
@@ -851,8 +876,12 @@ def train(
     print(f"SNR extreme:    {config.snr_range_extreme} dB (p={config.p_extreme_snr})")
     print(f"Speech gain:    {config.speech_gain_range} dB")
     print(f"Noise gain:     {config.noise_gain_range} dB")
-    print(f"VAD loss:       {'on' if vad_loss_weight > 0 else 'off'} (w={vad_loss_weight})")
-    if vad_loss_weight > 0:
+    vad_enabled = vad_loss_weight > 0 or vad_speech_loss_weight > 0
+    print(
+        f"VAD loss:       {'on' if vad_enabled else 'off'} "
+        f"(w_vad={vad_loss_weight}, w_speech={vad_speech_loss_weight})"
+    )
+    if vad_enabled:
         print(f"  VAD threshold: {vad_threshold} | margin: {vad_margin}")
         print(f"  VAD warmup:    {vad_warmup_epochs} epochs")
         print(f"  VAD SNR gate:  {vad_snr_gate_db} dB (width {vad_snr_gate_width} dB)")
@@ -864,6 +893,7 @@ def train(
         "vad_loss_weight": vad_loss_weight,
         "vad_threshold": vad_threshold,
         "vad_margin": vad_margin,
+        "vad_speech_loss_weight": vad_speech_loss_weight,
         "vad_warmup_epochs": vad_warmup_epochs,
         "vad_snr_gate_db": vad_snr_gate_db,
         "vad_snr_gate_width": vad_snr_gate_width,
@@ -989,10 +1019,11 @@ def train(
 
     # Loss function - define as a pure function for compilation
     # Loss formula:
-    #   L_total = L_spec + w_vad * L_vad
+    #   L_total = L_spec + w_vad * L_vad + w_speech * L_speech
     #   L_vad = mean( gate * relu(p_ref - p_out - margin) )
     #   gate = sigmoid((snr - snr_gate_db)/snr_gate_width) * clip((p_ref - vad_thr)/(1 - vad_thr))
     #   p_ref/p_out from speech-band log-energy (z-scored per utterance)
+    #   L_speech = mean( gate * |log_mag_out - log_mag_ref|_speechband )
     def loss_fn(
         model,
         noisy_real,
@@ -1003,6 +1034,7 @@ def train(
         clean_imag,
         snr,
         vad_weight,
+        speech_weight,
     ):
         """Compute training loss."""
         # Model expects spec as tuple (real, imag)
@@ -1013,7 +1045,7 @@ def train(
         spec_loss = spectral_loss(out, target_spec)
 
         if use_vad_loss:
-            vad_loss, _, _, _ = _compute_vad_loss(
+            vad_loss, _, _, gate = _compute_vad_loss(
                 clean_real,
                 clean_imag,
                 out[0],
@@ -1028,7 +1060,19 @@ def train(
                 vad_z_threshold,
                 vad_z_slope,
             )
-            return spec_loss + vad_weight * vad_loss
+            speech_loss = mx.array(0.0)
+            if vad_speech_loss_weight > 0:
+                speech_loss = _compute_speech_band_logmag_loss(
+                    clean_real,
+                    clean_imag,
+                    out[0],
+                    out[1],
+                    vad_band_mask,
+                    vad_band_bins,
+                    gate,
+                )
+
+            return spec_loss + vad_weight * vad_loss + speech_weight * speech_loss
 
         return spec_loss
 
@@ -1050,6 +1094,7 @@ def train(
         clean_imag,
         snr,
         vad_weight,
+        speech_weight,
         max_grad_norm_val,
     ):
         """JIT-compiled training step for faster training.
@@ -1067,6 +1112,7 @@ def train(
             clean_imag,
             snr,
             vad_weight,
+            speech_weight,
         )
         # Gradient clipping inline
         if max_grad_norm_val > 0:
@@ -1087,6 +1133,7 @@ def train(
         valid_loss = 0.0
         valid_spec_loss = 0.0
         valid_vad_loss = 0.0
+        valid_speech_loss = 0.0
         valid_p_ref = 0.0
         valid_p_out = 0.0
         valid_gate_pct = 0.0
@@ -1150,9 +1197,22 @@ def train(
                     vad_z_threshold,
                     vad_z_slope,
                 )
+                speech_loss = mx.array(0.0)
+                if vad_speech_loss_weight > 0:
+                    speech_loss = _compute_speech_band_logmag_loss(
+                        clean_real,
+                        clean_imag,
+                        out[0],
+                        out[1],
+                        vad_band_mask,
+                        vad_band_bins,
+                        gate,
+                    )
                 loss = spec_loss + vad_loss_weight * vad_loss
+                loss = loss + vad_speech_loss_weight * speech_loss
             else:
                 vad_loss = mx.array(0.0)
+                speech_loss = mx.array(0.0)
                 p_ref = mx.array(0.0)
                 p_out = mx.array(0.0)
                 gate = mx.array(0.0)
@@ -1163,11 +1223,13 @@ def train(
             loss_val = float(loss)
             spec_loss_val = float(spec_loss)
             vad_loss_val = float(vad_loss)
+            speech_loss_val = float(speech_loss)
             residual_val = float(residual)
 
             valid_loss += loss_val
             valid_spec_loss += spec_loss_val
             valid_vad_loss += vad_loss_val
+            valid_speech_loss += speech_loss_val
             valid_residual += residual_val
             num_valid_batches += 1
 
@@ -1193,6 +1255,7 @@ def train(
         if num_valid_batches > 0:
             avg_spec = valid_spec_loss / num_valid_batches
             avg_vad = valid_vad_loss / num_valid_batches
+            avg_speech = valid_speech_loss / num_valid_batches
             avg_residual = valid_residual / num_valid_batches
             avg_p_ref = valid_p_ref / num_valid_batches if use_vad_loss else 0.0
             avg_p_out = valid_p_out / num_valid_batches if use_vad_loss else 0.0
@@ -1200,7 +1263,12 @@ def train(
             avg_sisdr = valid_sisdr / num_valid_batches if eval_sisdr else None
 
             if use_vad_loss or eval_sisdr:
-                extras = [f"spec={avg_spec:.4f}", f"vad={avg_vad:.4f}", f"resid={avg_residual:.4f}"]
+                extras = [
+                    f"spec={avg_spec:.4f}",
+                    f"vad={avg_vad:.4f}",
+                    f"speech={avg_speech:.4f}",
+                    f"resid={avg_residual:.4f}",
+                ]
                 if use_vad_loss:
                     extras.append(f"p_ref={avg_p_ref:.2f}")
                     extras.append(f"p_out={avg_p_out:.2f}")
@@ -1244,6 +1312,7 @@ def train(
         train_loss = 0.0
         train_spec_loss = 0.0
         train_vad_loss = 0.0
+        train_speech_loss = 0.0
         train_p_ref = 0.0
         train_p_out = 0.0
         train_gate_pct = 0.0
@@ -1316,11 +1385,14 @@ def train(
             current_lr = schedule(global_step)
             optimizer.learning_rate = current_lr
 
-            vad_weight = vad_loss_weight
+            warmup_frac = 1.0
             if use_vad_loss and vad_warmup_steps > 0:
                 warmup_frac = min(1.0, global_step / max(vad_warmup_steps, 1))
-                vad_weight = vad_loss_weight * warmup_frac
+
+            vad_weight = vad_loss_weight * warmup_frac
+            speech_weight = vad_speech_loss_weight * warmup_frac
             vad_weight_mx = mx.array(vad_weight, dtype=mx.float32)
+            speech_weight_mx = mx.array(speech_weight, dtype=mx.float32)
 
             # Forward, backward, and update (either compiled or standard)
             fwd_start = time.time()
@@ -1336,6 +1408,7 @@ def train(
                     clean_imag,
                     snr,
                     vad_weight_mx,
+                    speech_weight_mx,
                     max_grad_norm,
                 )
                 # OPTIMIZATION: Only sync periodically to reduce GPU stalls
@@ -1356,6 +1429,7 @@ def train(
                     clean_imag,
                     snr,
                     vad_weight_mx,
+                    speech_weight_mx,
                 )
                 # Only sync periodically
                 should_sync = (batch_idx + 1) % eval_frequency == 0
@@ -1414,14 +1488,27 @@ def train(
                         vad_z_threshold,
                         vad_z_slope,
                     )
+                    speech_loss = mx.array(0.0)
+                    if vad_speech_loss_weight > 0:
+                        speech_loss = _compute_speech_band_logmag_loss(
+                            clean_real,
+                            clean_imag,
+                            out[0],
+                            out[1],
+                            vad_band_mask,
+                            vad_band_bins,
+                            gate,
+                        )
                     spec_loss_val = float(spec_loss)
                     vad_loss_val = float(vad_loss)
+                    speech_loss_val = float(speech_loss)
                     p_ref_mean = float(mx.mean(p_ref))
                     p_out_mean = float(mx.mean(p_out))
                     gate_pct = float(mx.mean(mx.where(gate > 0.0, 1.0, 0.0)))
 
                     train_spec_loss += spec_loss_val * eval_frequency
                     train_vad_loss += vad_loss_val * eval_frequency
+                    train_speech_loss += speech_loss_val * eval_frequency
                     train_p_ref += p_ref_mean
                     train_p_out += p_out_mean
                     train_gate_pct += gate_pct
@@ -1432,6 +1519,7 @@ def train(
                         loss=f"{loss_val:.4f}",
                         spec=f"{spec_loss_val:.4f}" if use_vad_loss else f"{loss_val:.4f}",
                         vad=f"{vad_loss_val:.4f}" if use_vad_loss else "0.0000",
+                        speech=f"{speech_loss_val:.4f}" if use_vad_loss else "0.0000",
                         lr=f"{lr:.1e}",
                         data=f"{data_time * 1000:.0f}ms",
                         step=f"{fwd_time * 1000:.0f}ms",
@@ -1443,6 +1531,7 @@ def train(
                         loss=f"{loss_val:.4f}",
                         avg=f"{train_loss / num_train_batches:.4f}",
                         vad=f"{vad_loss_val:.4f}" if use_vad_loss else "0.0000",
+                        speech=f"{speech_loss_val:.4f}" if use_vad_loss else "0.0000",
                         p_ref=f"{p_ref_mean:.2f}" if use_vad_loss else "0.00",
                         p_out=f"{p_out_mean:.2f}" if use_vad_loss else "0.00",
                         gate=f"{gate_pct:.0f}%" if use_vad_loss else "0%",
@@ -1493,6 +1582,7 @@ def train(
         avg_train_loss = train_loss / max(num_train_batches, 1)
         avg_train_spec_loss = train_spec_loss / max(num_train_batches, 1)
         avg_train_vad_loss = train_vad_loss / max(num_train_batches, 1)
+        avg_train_speech_loss = train_speech_loss / max(num_train_batches, 1)
         avg_train_p_ref = train_p_ref / max(num_vad_logs, 1)
         avg_train_p_out = train_p_out / max(num_vad_logs, 1)
         avg_train_gate = train_gate_pct / max(num_vad_logs, 1)
@@ -1547,7 +1637,11 @@ def train(
         improvement_marker = "★" if avg_valid_loss <= best_valid_loss else ""
         vad_summary = ""
         if use_vad_loss:
-            vad_summary = f" | Spec: {avg_train_spec_loss:.4f} | VAD: {avg_train_vad_loss:.4f}"
+            vad_summary = (
+                f" | Spec: {avg_train_spec_loss:.4f}"
+                f" | VAD: {avg_train_vad_loss:.4f}"
+                f" | Speech: {avg_train_speech_loss:.4f}"
+            )
 
         print(
             f"✓ Epoch {epoch + 1}/{epochs} complete | "
@@ -1875,6 +1969,12 @@ def main():
         help="Margin for VAD consistency loss",
     )
     parser.add_argument(
+        "--vad-speech-loss-weight",
+        type=float,
+        default=0.0,
+        help="Weight for VAD-weighted speech-structure loss",
+    )
+    parser.add_argument(
         "--vad-warmup-epochs",
         type=int,
         default=5,
@@ -2005,6 +2105,7 @@ def main():
         vad_loss_weight=args.vad_loss_weight,
         vad_threshold=args.vad_threshold,
         vad_margin=args.vad_margin,
+        vad_speech_loss_weight=args.vad_speech_loss_weight,
         vad_warmup_epochs=args.vad_warmup_epochs,
         vad_snr_gate_db=args.vad_snr_gate,
         vad_snr_gate_width=args.vad_snr_gate_width,

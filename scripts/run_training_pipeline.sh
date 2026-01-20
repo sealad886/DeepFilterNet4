@@ -52,6 +52,7 @@ DYNAMIC_NOISE_GAIN_MAX="${DYNAMIC_NOISE_GAIN_MAX:-12}"
 DYNAMIC_VAD_LOSS_WEIGHT="${DYNAMIC_VAD_LOSS_WEIGHT:-0.05}"
 DYNAMIC_VAD_THRESHOLD="${DYNAMIC_VAD_THRESHOLD:-0.6}"
 DYNAMIC_VAD_MARGIN="${DYNAMIC_VAD_MARGIN:-0.05}"
+DYNAMIC_VAD_SPEECH_LOSS_WEIGHT="${DYNAMIC_VAD_SPEECH_LOSS_WEIGHT:-0.0}"
 DYNAMIC_VAD_WARMUP_EPOCHS="${DYNAMIC_VAD_WARMUP_EPOCHS:-5}"
 DYNAMIC_VAD_SNR_GATE="${DYNAMIC_VAD_SNR_GATE:--10}"
 DYNAMIC_VAD_SNR_GATE_WIDTH="${DYNAMIC_VAD_SNR_GATE_WIDTH:-6}"
@@ -192,6 +193,10 @@ while [[ $# -gt 0 ]]; do
       DYNAMIC_VAD_MARGIN="$2"
       shift 2
       ;;
+    --dynamic-vad-speech-loss-weight)
+      DYNAMIC_VAD_SPEECH_LOSS_WEIGHT="$2"
+      shift 2
+      ;;
     --dynamic-vad-warmup-epochs)
       DYNAMIC_VAD_WARMUP_EPOCHS="$2"
       shift 2
@@ -250,6 +255,7 @@ Options:
   --dynamic-vad-loss-weight W  VAD loss weight (default: $DYNAMIC_VAD_LOSS_WEIGHT)
   --dynamic-vad-threshold T    VAD threshold for gating (default: $DYNAMIC_VAD_THRESHOLD)
   --dynamic-vad-margin M       VAD margin (default: $DYNAMIC_VAD_MARGIN)
+  --dynamic-vad-speech-loss-weight W  VAD speech-structure loss weight (default: $DYNAMIC_VAD_SPEECH_LOSS_WEIGHT)
   --dynamic-vad-warmup-epochs N  VAD warmup epochs (default: $DYNAMIC_VAD_WARMUP_EPOCHS)
   --dynamic-vad-snr-gate DB    VAD SNR gate threshold dB (default: $DYNAMIC_VAD_SNR_GATE)
   --dynamic-vad-snr-gate-width DB  VAD SNR gate width dB (default: $DYNAMIC_VAD_SNR_GATE_WIDTH)
@@ -499,6 +505,7 @@ DYNAMIC_CMD=(
   --vad-loss-weight "$DYNAMIC_VAD_LOSS_WEIGHT"
   --vad-threshold "$DYNAMIC_VAD_THRESHOLD"
   --vad-margin "$DYNAMIC_VAD_MARGIN"
+  --vad-speech-loss-weight "$DYNAMIC_VAD_SPEECH_LOSS_WEIGHT"
   --vad-warmup-epochs "$DYNAMIC_VAD_WARMUP_EPOCHS"
   --vad-snr-gate "$DYNAMIC_VAD_SNR_GATE"
   --vad-snr-gate-width "$DYNAMIC_VAD_SNR_GATE_WIDTH"
