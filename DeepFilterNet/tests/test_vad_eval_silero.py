@@ -49,11 +49,10 @@ def test_silero_cli_smoke(tmp_path):
 
     speech_list = tmp_path / "speech.txt"
     noise_list = tmp_path / "noise.txt"
-    speech_list.write_text(str(speech_path))
+    speech_list.write_text("\n".join([str(speech_path)] * 20))
     noise_list.write_text(str(noise_path))
 
-    root = Path(__file__).resolve().parents[1]
-    pkg_root = root / "DeepFilterNet"
+    pkg_root = Path(__file__).resolve().parents[1]
     cmd = [
         sys.executable,
         "-m",
