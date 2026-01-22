@@ -10,6 +10,7 @@ Usage:
 
 import argparse
 import json
+import os
 import signal
 import sys
 import time
@@ -22,12 +23,35 @@ import mlx.nn as nn
 import mlx.optimizers as optim
 import numpy as np
 from mlx.utils import tree_unflatten
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 # Add DeepFilterNet to path
 SCRIPT_DIR = Path(__file__).parent
 DFNET_DIR = SCRIPT_DIR.parent / "DeepFilterNet"
 sys.path.insert(0, str(DFNET_DIR))
+
+# =============================================================================
+# tqdm configuration
+# =============================================================================
+# Write progress bars to stderr so stdout can be redirected to a log file without
+# capturing the progress bar spam. Also auto-disable tqdm when stderr isn't a TTY
+# (e.g., when piping/redirecting), which prevents log files from being flooded.
+_tqdm_env = os.getenv("DFNET_TQDM", "").strip().lower()
+if _tqdm_env in {"1", "true", "yes", "on"}:
+    _tqdm_disable = False
+elif _tqdm_env in {"0", "false", "no", "off"}:
+    _tqdm_disable = True
+else:
+    # Default: disable when stderr isn't interactive (prevents log spam when piped).
+    _tqdm_disable = not sys.stderr.isatty()
+
+_TQDM_KWARGS = {
+    "file": sys.stderr,
+    "disable": _tqdm_disable,
+    "mininterval": 1.0,
+    "maxinterval": 10.0,
+    "dynamic_ncols": True,
+}
 
 
 @dataclass
@@ -60,6 +84,7 @@ class TrainingConfig:
     # Logging
     log_interval: int = 10
     save_interval: int = 500
+    save_total_limit: int = 5
     val_interval: int = 100
 
 
@@ -323,7 +348,7 @@ def validate(
     total_metrics = {"total": 0.0, "l1": 0.0, "spec": 0.0, "log_spec": 0.0}
     count = 0
 
-    with tqdm(total=num_batches, desc="Validation", leave=False, unit="batch") as pbar:
+    with tqdm(total=num_batches, desc="Validation", leave=False, unit="batch", **_TQDM_KWARGS) as pbar:
         for _ in range(num_batches):
             batch = val_dataset.get_batch(config.batch_size)
             if batch is None:
@@ -455,8 +480,13 @@ def load_checkpoint(
             try:
                 optimizer_state_dict = state.get("optimizer_state", {})
                 if optimizer_state_dict:
+                    # Convert all values back to mx.array (including scalars from .tolist())
+                    restored = {}
+                    for k, v in optimizer_state_dict.items():
+                        # All serialized optimizer state values should become mx.array
+                        restored[k] = mx.array(v)
                     # Reconstruct optimizer state from flat dict using tree_unflatten
-                    state_pairs = list(optimizer_state_dict.items())
+                    state_pairs = list(restored.items())
                     nested_state = tree_unflatten(state_pairs)
                     optimizer.state = nested_state
                     print(f"✅ Restored optimizer state (step {step})")
@@ -477,6 +507,7 @@ def save_checkpoint(
     epoch: int,
     metrics: Dict[str, float],
     checkpoint_dir: Path,
+    completed: bool = False,
 ):
     """Save training checkpoint including optimizer state.
 
@@ -487,6 +518,7 @@ def save_checkpoint(
         epoch: Current epoch
         metrics: Dictionary of training metrics
         checkpoint_dir: Directory to save checkpoint to
+        completed: Whether this checkpoint marks a completed training run
     """
     from mlx.utils import tree_flatten
 
@@ -503,8 +535,12 @@ def save_checkpoint(
         try:
             # Flatten optimizer state for JSON serialization
             flat_state = tree_flatten(optimizer.state)
-            # Convert to dict for JSON saving
-            optimizer_state_dict = {name: str(value) for name, value in flat_state}
+            # Convert arrays to lists, preserve scalar types (int, float, bool)
+            for k, v in flat_state:
+                if isinstance(v, mx.array):
+                    optimizer_state_dict[k] = v.tolist()  # Array → list
+                else:
+                    optimizer_state_dict[k] = v  # Scalar → keep as-is
         except Exception as e:
             print(f"⚠️  Failed to serialize optimizer state: {e}")
 
@@ -514,6 +550,7 @@ def save_checkpoint(
         "epoch": epoch,
         "metrics": metrics,
         "optimizer_state": optimizer_state_dict,
+        "completed": completed,
     }
     state_path = checkpoint_dir / f"step_{step:06d}_state.json"
     with open(state_path, "w") as f:
@@ -616,6 +653,12 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--resume", action="store_true", help="Resume from latest checkpoint")
+    parser.add_argument(
+        "--save-total-limit",
+        type=int,
+        default=5,
+        help="Keep only the most recent N checkpoints in the main checkpoint directory (best checkpoint is kept separately)",
+    )
 
     args = parser.parse_args()
 
@@ -631,6 +674,7 @@ def main():
         batch_size=args.batch_size,
         learning_rate=args.lr,
         num_epochs=args.epochs,
+        save_total_limit=args.save_total_limit,
     )
 
     print("\nConfiguration:")
@@ -700,6 +744,27 @@ def main():
                 step = loaded_step
                 resume_epoch = loaded_epoch
                 print(f"📂 Resuming from checkpoint: step={step}, epoch={loaded_epoch}")
+
+                # Check if the latest checkpoint marks a completed run.
+                state_path = checkpoint_path / f"step_{step:06d}_state.json"
+                completed = False
+                if state_path.exists():
+                    try:
+                        with open(state_path) as f:
+                            state = json.load(f)
+                        completed = bool(state.get("completed", False))
+                    except Exception as e:
+                        print(f"⚠️  Failed to read checkpoint state: {e}")
+
+                if completed:
+                    if loaded_epoch + 1 >= config.num_epochs:
+                        print(
+                            f"✅ Training already complete at epoch {loaded_epoch + 1}/{config.num_epochs}. "
+                            "Nothing to do."
+                        )
+                        return
+                    resume_epoch = loaded_epoch + 1
+                    print(f"-> Checkpoint marked complete; continuing at epoch {resume_epoch + 1}/{config.num_epochs}")
         else:
             print(f"⚠️  No checkpoint directory found at {checkpoint_path}, starting fresh")
 
@@ -707,11 +772,20 @@ def main():
     print("\nStarting training...")
     print("-" * 60)
 
+    # Track the latest metrics so we can always save a final checkpoint on clean exit.
+    last_metrics: Dict[str, float] = {}
+    last_epoch: int = resume_epoch
+
     # Register signal handler for graceful CTRL+C handling
     _register_sigint_handler(model, optimizer, Path(config.checkpoint_dir))
 
     with tqdm(
-        total=config.num_epochs - resume_epoch, desc="Training", unit="epoch", position=0, initial=resume_epoch
+        total=config.num_epochs - resume_epoch,
+        desc="Training",
+        unit="epoch",
+        position=0,
+        initial=resume_epoch,
+        **_TQDM_KWARGS,
     ) as epoch_pbar:
         for epoch in range(resume_epoch, config.num_epochs):
             epoch_start = time.time()
@@ -727,6 +801,7 @@ def main():
                 leave=False,
                 unit="batch",
                 position=1,
+                **_TQDM_KWARGS,
             ) as step_pbar:
                 for batch_idx in range(steps_per_epoch):
                     batch = train_dataset.get_batch(config.batch_size)
@@ -744,6 +819,9 @@ def main():
                     for k, v in metrics.items():
                         epoch_metrics[k] += v
 
+                    # Update latest metrics for final checkpoint
+                    last_metrics = metrics
+                    last_epoch = epoch
                     # Update interrupt state with current training progress
                     _update_interrupt_state(step, epoch, metrics)
 
@@ -768,13 +846,19 @@ def main():
 
                         if val_metrics["total"] < best_val_loss:
                             best_val_loss = val_metrics["total"]
+                            best_dir = Path(config.checkpoint_dir) / "best"
+                            best_dir.mkdir(parents=True, exist_ok=True)
+                            for p in best_dir.glob("step_*.safetensors"):
+                                p.unlink(missing_ok=True)
+                            for p in best_dir.glob("step_*_state.json"):
+                                p.unlink(missing_ok=True)
                             save_checkpoint(
                                 model,
                                 optimizer,
                                 step,
                                 epoch,
                                 val_metrics,
-                                Path(config.checkpoint_dir) / "best",
+                                best_dir,
                             )
                             step_pbar.write(f"  ✅ New best validation loss: {best_val_loss:.4f}")
 
@@ -789,6 +873,18 @@ def main():
                             Path(config.checkpoint_dir),
                         )
                         step_pbar.write(f"  💾 Checkpoint saved at step {step}")
+                        # Keep only the most recent N checkpoints (weights + state) in the main dir.
+                        # Best checkpoint is stored separately under checkpoint_dir/best.
+                        if getattr(config, "save_total_limit", 0) and config.save_total_limit > 0:
+                            ckpt_dir = Path(config.checkpoint_dir)
+                            ckpt_files = list(ckpt_dir.glob("step_*.safetensors"))
+                            # Sort by step number encoded in the filename: step_000500.safetensors
+                            ckpt_files.sort(key=lambda p: int(p.stem.split("_")[1]))
+                            to_remove = ckpt_files[: -config.save_total_limit]
+                            for weights_path in to_remove:
+                                weights_path.unlink(missing_ok=True)
+                                state_path = weights_path.with_name(f"{weights_path.stem}_state.json")
+                                state_path.unlink(missing_ok=True)
 
             # Epoch summary
             epoch_time = time.time() - epoch_start
@@ -805,6 +901,76 @@ def main():
                 }
             )
             epoch_pbar.update(1)
+
+    # Final validation to compare against best checkpoint.
+    if len(val_dataset) > 0:
+        try:
+            final_val_metrics = validate(model, val_dataset, erb_fb, erb_inv, config)
+            if final_val_metrics["total"] < best_val_loss:
+                best_val_loss = final_val_metrics["total"]
+                best_dir = Path(config.checkpoint_dir) / "best"
+                best_dir.mkdir(parents=True, exist_ok=True)
+                for p in best_dir.glob("step_*.safetensors"):
+                    p.unlink(missing_ok=True)
+                for p in best_dir.glob("step_*_state.json"):
+                    p.unlink(missing_ok=True)
+                save_checkpoint(
+                    model,
+                    optimizer,
+                    step,
+                    last_epoch,
+                    final_val_metrics,
+                    best_dir,
+                )
+                print(f"✅ Final weights set new best validation loss: {best_val_loss:.4f}")
+        except Exception as e:
+            print(f"⚠️  Final validation failed: {e}")
+
+    # Always save a final checkpoint on clean completion.
+    # This guarantees the last in-memory weights are persisted even if `step` isn't
+    # aligned to `save_interval` and no new best checkpoint happened at the end.
+    try:
+        ckpt_dir = Path(config.checkpoint_dir)
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+        weights_path = ckpt_dir / f"step_{step:06d}.safetensors"
+        state_path = ckpt_dir / f"step_{step:06d}_state.json"
+
+        # Avoid redundant writes if the final step already produced a checkpoint.
+        if not (weights_path.exists() and state_path.exists()):
+            save_checkpoint(
+                model,
+                optimizer,
+                step,
+                last_epoch,
+                last_metrics or {"total": float("nan")},
+                ckpt_dir,
+                completed=True,
+            )
+            print(f"💾 Final checkpoint saved at step {step}")
+        else:
+            try:
+                with open(state_path) as f:
+                    state = json.load(f)
+                if not state.get("completed", False):
+                    state["completed"] = True
+                    with open(state_path, "w") as f:
+                        json.dump(state, f, indent=2)
+                    print("✅ Marked final checkpoint as completed")
+            except Exception as e:
+                print(f"⚠️  Failed to mark final checkpoint as completed: {e}")
+
+        # Enforce checkpoint retention after the final save.
+        if getattr(config, "save_total_limit", 0) and config.save_total_limit > 0:
+            ckpt_files = list(ckpt_dir.glob("step_*.safetensors"))
+            ckpt_files.sort(key=lambda p: int(p.stem.split("_")[1]))
+            to_remove = ckpt_files[: -config.save_total_limit]
+            for weights_path in to_remove:
+                weights_path.unlink(missing_ok=True)
+                state_path = weights_path.with_name(f"{weights_path.stem}_state.json")
+                state_path.unlink(missing_ok=True)
+    except Exception as e:
+        print(f"⚠️  Failed to save/prune final checkpoint: {e}")
 
     print("=" * 60)
     print("Training complete!")

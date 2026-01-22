@@ -228,7 +228,7 @@ class PytorchDataLoader:
                 except StopIteration:
                     batch = ExceptionWrapper(where="in pin memory worker queue")
                 self.idx += 1
-                return idx, batch
+                return idx, batch  # type: ignore
 
         q = _Queue()
         return q

@@ -1470,6 +1470,9 @@ def train(
     vad_eval_mode: Literal["auto", "proxy", "silero", "off"] = "auto",
     vad_eval_every: int = 1,
     vad_eval_batches: int = 8,
+    vad_eval_max_seconds: float = 0.0,
+    vad_silero_model_path: str | None = None,
+    vad_silero_sample_rate: int = 16000,
     vad_train_prob: float = 0.0,
     vad_train_every_steps: int = 0,
     eval_sisdr: bool = False,
@@ -1532,6 +1535,9 @@ def train(
         vad_eval_mode: VAD evaluation mode ("auto", "proxy", "silero", "off")
         vad_eval_every: Evaluate VAD metrics every N epochs
         vad_eval_batches: Number of validation batches used for VAD metrics
+        vad_eval_max_seconds: Max seconds per clip for VAD eval (0 disables)
+        vad_silero_model_path: Optional path to silero_vad.onnx
+        vad_silero_sample_rate: Sample rate for Silero VAD (Hz)
         vad_train_prob: Probability of applying sparse VAD regularizer per batch
         vad_train_every_steps: Apply VAD regularizer every N steps (0 disables)
         eval_sisdr: Compute SI-SDR during validation (slower)
@@ -1619,9 +1625,18 @@ def train(
     if vad_eval_mode == "auto":
         vad_eval_mode = "proxy" if use_awesome_loss else "off"
     vad_eval_enabled = vad_eval_mode != "off"
+    silero_vad = None
     if vad_eval_mode == "silero":
-        print("⚠️  Silero VAD not integrated in-core; falling back to proxy VAD for eval metrics.")
-        vad_eval_mode = "proxy"
+        from df_mlx.vad_silero import SileroVAD, SileroVADConfig
+
+        silero_vad = SileroVAD(
+            SileroVADConfig(
+                sample_rate=vad_silero_sample_rate,
+                model_path=vad_silero_model_path,
+                max_seconds=vad_eval_max_seconds if vad_eval_max_seconds > 0 else None,
+                force_cpu=True,
+            )
+        )
 
     use_vad_loss = vad_loss_weight > 0 or vad_speech_loss_weight > 0
     use_vad_train_reg = (vad_train_prob > 0 or vad_train_every_steps > 0) and vad_loss_weight > 0
@@ -1671,6 +1686,13 @@ def train(
         print(f"  VAD band:      {vad_band_low_hz:.0f}-{vad_band_high_hz:.0f} Hz")
     if vad_eval_enabled:
         print(f"  VAD eval:      mode={vad_eval_mode} every={vad_eval_every} epochs batches={vad_eval_batches}")
+        if vad_eval_mode == "silero":
+            max_sec = vad_eval_max_seconds if vad_eval_max_seconds > 0 else "full"
+            print(
+                "  Silero VAD:    "
+                f"sr={vad_silero_sample_rate}Hz, max_sec={max_sec}, "
+                f"model={vad_silero_model_path or 'package'}"
+            )
     if use_vad_train_reg:
         print(
             "  VAD train:     " f"prob={vad_train_prob} every_steps={vad_train_every_steps} (weight={vad_loss_weight})"
@@ -1698,6 +1720,9 @@ def train(
         "vad_eval_mode": vad_eval_mode,
         "vad_eval_every": vad_eval_every,
         "vad_eval_batches": vad_eval_batches,
+        "vad_eval_max_seconds": vad_eval_max_seconds,
+        "vad_silero_model_path": vad_silero_model_path,
+        "vad_silero_sample_rate": vad_silero_sample_rate,
         "vad_train_prob": vad_train_prob,
         "vad_train_every_steps": vad_train_every_steps,
         "eval_sisdr": eval_sisdr,
@@ -2082,6 +2107,8 @@ def train(
         vad_eval_p_out = 0.0
         vad_eval_delta = 0.0
         vad_eval_batches_done = 0
+        vad_eval_seconds = 0.0
+        vad_eval_clips = 0
         num_valid_batches = 0
         valid_steps = len(dataset) // batch_size
         if max_valid_batches is not None:
@@ -2109,6 +2136,12 @@ def train(
             from df_mlx.ops import istft
 
             sisdr_fn = (si_sdr, istft)
+
+        silero_istft = None
+        if do_vad_eval and vad_eval_mode == "silero":
+            from df_mlx.ops import istft
+
+            silero_istft = istft
 
         for batch_idx, batch in enumerate(valid_pbar):
             noisy_real = batch["noisy_real"]
@@ -2309,6 +2342,23 @@ def train(
                     vad_eval_p_out += float(p_out_mean)
                     vad_eval_delta += float(vad_dec)
                     vad_eval_batches_done += 1
+                elif vad_eval_mode == "silero":
+                    if silero_vad is None or silero_istft is None:
+                        raise RuntimeError("Silero VAD requested but not initialized")
+                    vad_start = time.time()
+                    clean_wav = silero_istft(target_spec, n_fft=config.fft_size, hop_length=config.hop_size)
+                    out_wav = silero_istft(out, n_fft=config.fft_size, hop_length=config.hop_size)
+                    mx.eval(clean_wav, out_wav)
+                    clean_np = np.asarray(clean_wav, dtype=np.float32)
+                    out_np = np.asarray(out_wav, dtype=np.float32)
+                    p_ref_batch = silero_vad.mean_probs(clean_np, config.sample_rate)
+                    p_out_batch = silero_vad.mean_probs(out_np, config.sample_rate)
+                    vad_eval_p_ref += float(np.mean(p_ref_batch))
+                    vad_eval_p_out += float(np.mean(p_out_batch))
+                    vad_eval_delta += float(np.mean(np.maximum(p_ref_batch - p_out_batch - vad_margin, 0.0)))
+                    vad_eval_batches_done += 1
+                    vad_eval_clips += int(len(p_ref_batch))
+                    vad_eval_seconds += time.time() - vad_start
 
             if sisdr_fn is not None:
                 si_sdr_fn, istft_fn = sisdr_fn
@@ -2360,6 +2410,8 @@ def train(
             avg_vad_eval_delta = (
                 vad_eval_delta / vad_eval_batches_done if do_vad_eval and vad_eval_batches_done > 0 else 0.0
             )
+            vad_eval_time = vad_eval_seconds
+            vad_eval_clips_total = vad_eval_clips
 
             if use_vad_loss or eval_sisdr or use_awesome_loss or use_vad_train_reg or do_vad_eval:
                 extras = [f"spec={avg_spec:.4f}", f"resid={avg_residual:.4f}"]
@@ -2399,6 +2451,9 @@ def train(
                     extras.append(f"vad_eval_ref={avg_vad_eval_p_ref:.2f}")
                     extras.append(f"vad_eval_out={avg_vad_eval_p_out:.2f}")
                     extras.append(f"vad_eval_dec={avg_vad_eval_delta:.2f}")
+                    if vad_eval_mode == "silero":
+                        extras.append(f"vad_eval_s={vad_eval_time:.1f}")
+                        extras.append(f"vad_eval_clips={vad_eval_clips_total}")
                 if avg_sisdr is not None:
                     extras.append(f"si-sdr={avg_sisdr:.2f}dB")
                 print(f"{label} metrics: " + " | ".join(extras))
@@ -3492,6 +3547,24 @@ def main():
         help="Number of validation batches used for VAD metrics",
     )
     parser.add_argument(
+        "--vad-eval-max-seconds",
+        type=float,
+        default=0.0,
+        help="Max seconds per clip for VAD eval (0 disables)",
+    )
+    parser.add_argument(
+        "--vad-silero-model-path",
+        type=str,
+        default=None,
+        help="Path to silero_vad.onnx (defaults to silero-vad package data)",
+    )
+    parser.add_argument(
+        "--vad-silero-sample-rate",
+        type=int,
+        default=16000,
+        help="Sample rate for Silero VAD evaluation (Hz)",
+    )
+    parser.add_argument(
         "--vad-train-prob",
         type=float,
         default=0.0,
@@ -3625,6 +3698,9 @@ def main():
         vad_eval_mode=cast(Literal["auto", "proxy", "silero", "off"], args.vad_eval_mode),
         vad_eval_every=args.vad_eval_every,
         vad_eval_batches=args.vad_eval_batches,
+        vad_eval_max_seconds=args.vad_eval_max_seconds,
+        vad_silero_model_path=args.vad_silero_model_path,
+        vad_silero_sample_rate=args.vad_silero_sample_rate,
         vad_train_prob=args.vad_train_prob,
         vad_train_every_steps=args.vad_train_every_steps,
         eval_sisdr=args.eval_sisdr,

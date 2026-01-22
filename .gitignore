@@ -10,6 +10,12 @@ assets/valid_cache*
 DeepFilterNet/poetry.lock
 .vscode
 data/
+.*ignore
+!.gitignore
+
+.ruff_cache/
+.fastembed_cache
+.codanna/
 
 ### Rust gitignore ###
 

@@ -185,7 +185,7 @@ python -m df_mlx.train_dynamic \
     --checkpoint-batches 100  # Save every 100 batches
 ```
 
-4. **Lightweight Runtime**: MLX has minimal Python overhead compared to
+- **Lightweight Runtime**: MLX has minimal Python overhead compared to
    PyTorch's more general-purpose framework.
 
 ### When to Use Each Framework

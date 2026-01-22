@@ -112,6 +112,13 @@ Optional VAD controls (all optional; defaults are safe):
 # Periodic VAD eval metrics (proxy-based, lightweight)
 --vad-eval-mode auto --vad-eval-every 1 --vad-eval-batches 8
 
+# Silero VAD eval (requires optional deps; no network at runtime)
+# pip install silero-vad onnxruntime torch
+--vad-eval-mode silero --vad-eval-batches 8 --vad-eval-max-seconds 10 \
+    --vad-silero-sample-rate 16000
+# Optionally point to a custom ONNX model file:
+--vad-silero-model-path /path/to/silero_vad.onnx
+
 # Sparse training-time VAD regularizer (disabled by default)
 --vad-train-prob 0.01  # or --vad-train-every-steps 500
 

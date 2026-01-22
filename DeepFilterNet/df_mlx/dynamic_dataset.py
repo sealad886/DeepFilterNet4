@@ -39,7 +39,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Queue
-from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union, cast
 
 import mlx.core as mx
 import numpy as np
@@ -50,6 +50,8 @@ try:
     import mlx.data as dx
 
     HAS_MLX_DATA = True
+    # mlx-data does not ship complete type information; cast to Any for attribute access
+    dx = cast(Any, dx)
 except ImportError:
     dx = None
     HAS_MLX_DATA = False
@@ -65,7 +67,7 @@ try:
             audio = audio.mean(axis=1)
         if file_sr != sr:
             num_samples = int(len(audio) * sr / file_sr)
-            audio = np.asarray(scipy_signal.resample(audio, num_samples))
+            audio = np.asarray(scipy_signal.resample(audio, num_samples), dtype=np.float32)
         return audio.astype(np.float32)
 
 except ImportError:
@@ -82,7 +84,7 @@ except ImportError:
             audio = audio.mean(axis=1)
         if file_sr != sr:
             num_samples = int(len(audio) * sr / file_sr)
-            audio = np.asarray(scipy_signal.resample(audio, num_samples))
+            audio = np.asarray(scipy_signal.resample(audio, num_samples), dtype=np.float32)
         return audio.astype(np.float32)
 
 
@@ -108,7 +110,11 @@ class DatasetConfig:
 
     # Mixing parameters
     snr_range: Tuple[float, float] = (-5.0, 40.0)  # dB, matching Rust [-5, 0, 5, 10, 20, 40]
-    gain_range: Tuple[float, float] = (-6.0, 6.0)  # dB
+    snr_range_extreme: Tuple[float, float] = (-20.0, -5.0)  # dB, near-obscured speech
+    p_extreme_snr: float = 0.1  # Probability of sampling from snr_range_extreme
+    gain_range: Tuple[float, float] = (-6.0, 6.0)  # dB (legacy; retained for compatibility)
+    speech_gain_range: Tuple[float, float] = (-12.0, 12.0)  # dB, varies absolute speech loudness
+    noise_gain_range: Tuple[float, float] = (-12.0, 12.0)  # dB, varies relative noise contributions
 
     # Augmentation probabilities
     p_reverb: float = 0.5  # Probability of applying RIR
@@ -226,7 +232,7 @@ class ShardedAudioCache:
         shard_name, key = self.index[path]
         npz_file = self._get_shard(shard_name)
         # Access the specific array - this triggers lazy load of just that array
-        return np.asarray(npz_file[key])
+        return np.asarray(npz_file[key], dtype=np.float32)
 
     def load_random(self) -> np.ndarray:
         """Load a random audio file from the cache."""
@@ -1059,7 +1065,7 @@ class DynamicDataset:
         path = self._rng.choice(noise_files)
         try:
             noise = self._load_audio(path, "noise")
-            gain = self._rng.uniform(*self.config.gain_range)
+            gain = self._rng.uniform(*self.config.noise_gain_range)
             return noise, gain
         except Exception:
             # Fallback
@@ -1098,8 +1104,11 @@ class DynamicDataset:
             return None
 
         # Sample SNR and gain
-        snr = self._rng.uniform(*self.config.snr_range)
-        gain = self._rng.uniform(*self.config.gain_range)
+        if self.config.p_extreme_snr > 0 and self._rng.random() < self.config.p_extreme_snr:
+            snr = self._rng.uniform(*self.config.snr_range_extreme)
+        else:
+            snr = self._rng.uniform(*self.config.snr_range)
+        gain = self._rng.uniform(*self.config.speech_gain_range)
 
         # Load and combine multiple noises (2-5 like Rust)
         n_noises = self._rng.randint(self.config.n_noise_min, self.config.n_noise_max)
@@ -1563,6 +1572,10 @@ class MLXDataStream:
         Returns:
             Configured mlx-data Stream ready for iteration
         """
+        if not HAS_MLX_DATA or dx is None:
+            raise ImportError(
+                "mlx-data is required for streaming dataset iteration. Install 'mlx-data' or set DynamicDataset(..., use_mlx_data=False)."
+            )
         # Get shuffled indices for current epoch
         n_samples = len(self.dataset)
         indices = list(range(n_samples))
@@ -1576,22 +1589,20 @@ class MLXDataStream:
         if skip_samples > 0 and skip_samples < len(indices):
             indices = indices[skip_samples:]
 
-        # Create sample metadata buffer with fallback indices for retry
+        # Create sample metadata generator with fallback indices for retry
         # Each sample carries a list of indices to try if primary fails
-        samples = []
-        for i, primary_idx in enumerate(indices):
-            # Create fallback indices (next 10 samples in shuffled order)
-            fallbacks = [indices[(i + j) % len(indices)] for j in range(1, 11)]
-            samples.append(
-                {
+        def _sample_metadata_iter() -> Iterator[Dict[str, np.ndarray]]:
+            n = len(indices)
+            for i, primary_idx in enumerate(indices):
+                # Create fallback indices (next 10 samples in shuffled order)
+                fallbacks = [indices[(i + j) % n] for j in range(1, 11)]
+                yield {
                     "idx": np.array([primary_idx], dtype=np.int32),
                     "fallbacks": np.array(fallbacks, dtype=np.int32),
                 }
-            )
 
-        # Build mlx-data pipeline
-        stream = dx.buffer_from_vector(samples)
-        stream = stream.to_stream()
+        # Build mlx-data pipeline lazily from a Python iterable
+        stream = dx.stream_python_iterable(_sample_metadata_iter)  # type: ignore[attr-defined]
 
         # Apply our processing function (parallelized by prefetch!)
         stream = stream.sample_transform(self._sample_transform)
@@ -1661,6 +1672,8 @@ class MLXDataStream:
         # Create stream, skipping already-processed batches on resume
         self._stream = self._create_stream(self._checkpoint.batch_idx)
         self._batch_count = self._checkpoint.batch_idx
+
+        assert self._stream is not None
 
         for batch in self._stream:
             # Update checkpoint state

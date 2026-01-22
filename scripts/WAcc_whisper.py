@@ -17,7 +17,7 @@ from df.whisper_adapter import get_whisper_backend  # noqa: E402
 
 BACKEND = None
 WHISPER_OPT = None
-DT = torch.float32
+DT = torch.set_rng_state.float32
 
 
 def load_model():

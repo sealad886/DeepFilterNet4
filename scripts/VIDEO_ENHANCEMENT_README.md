@@ -23,8 +23,10 @@ Complete guide for using DeepFilterNet4 to enhance video audio and play it back 
 
 This system provides three integrated components:
 
-1. **Training Pipeline**: Automated 100-epoch training for wall and dynamic models
+1. **Training Pipeline**: Automated 100-epoch training for DfNetMF (wall cameras) and Dynamic (Blink cameras) models
 2. **Video Enhancement**: Batch audio extraction, enhancement, and AAC encoding
+   - Wall videos → DfNetMF model (specialized for stationary camera noise)
+   - Blink videos → Dynamic model (general-purpose enhancement)
 3. **Playback Integration**: VLC/MPV playlists with switchable original/enhanced audio tracks
 
 ---
@@ -404,16 +406,31 @@ chmod 644 *.m4a
 
 ### 2. Enhance Video Audio
 
+#### Wall Videos (DfNetMF model)
+
 ```bash
 python scripts/enhance_video_audio.py \
   --video-dir /Volumes/HomeSecurityVideos/Wall \
-  --model-checkpoint checkpoints/dfnet4_dynamic/best.safetensors \
+  --model-checkpoint checkpoints/dfnetmf_wall/best.safetensors \
   --output-format aac
 ```
 
 **Output**:
 - Enhanced audio files: `/Volumes/HomeSecurityVideos/Wall/*_enhanced.m4a`
 - Manifest: `/Volumes/HomeSecurityVideos/Wall/enhancement_manifest.json`
+
+#### Blink Videos (Dynamic model)
+
+```bash
+python scripts/enhance_video_audio.py \
+  --video-dir /Volumes/HomeSecurityVideos/Blink \
+  --model-checkpoint checkpoints/dfnet4_dynamic/best.safetensors \
+  --output-format aac
+```
+
+**Output**:
+- Enhanced audio files: `/Volumes/HomeSecurityVideos/Blink/*_enhanced.m4a`
+- Manifest: `/Volumes/HomeSecurityVideos/Blink/enhancement_manifest.json`
 
 ---
 

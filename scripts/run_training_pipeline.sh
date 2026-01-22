@@ -61,6 +61,7 @@ DYNAMIC_VAD_BAND_HIGH="${DYNAMIC_VAD_BAND_HIGH:-3400}"
 DYNAMIC_VAD_Z_THRESHOLD="${DYNAMIC_VAD_Z_THRESHOLD:-0.0}"
 DYNAMIC_VAD_Z_SLOPE="${DYNAMIC_VAD_Z_SLOPE:-1.0}"
 DYNAMIC_EVAL_SISDR="${DYNAMIC_EVAL_SISDR:-0}"
+DYNAMIC_CHECK_CHKPTS="${DYNAMIC_CHECK_CHKPTS:-0}"
 
 # ============================================================================
 # Ensure one pipeline run at a time (lock file)
@@ -229,6 +230,10 @@ while [[ $# -gt 0 ]]; do
       DYNAMIC_EVAL_SISDR=1
       shift 1
       ;;
+    --check-chkpts)
+      DYNAMIC_CHECK_CHKPTS=1
+      shift 1
+      ;;
     --wall-method)
       WALL_METHOD="$2"
       shift 2
@@ -264,6 +269,7 @@ Options:
   --dynamic-vad-z-threshold Z  VAD z-threshold (default: $DYNAMIC_VAD_Z_THRESHOLD)
   --dynamic-vad-z-slope S      VAD z-slope (default: $DYNAMIC_VAD_Z_SLOPE)
   --dynamic-eval-sisdr         Enable SI-SDR validation metric (default: $DYNAMIC_EVAL_SISDR)
+  --check-chkpts               Validate dynamic checkpoints before resume/start (default: $DYNAMIC_CHECK_CHKPTS)
   --wall-method METHOD         Wall training method: WF or MVDR (default: $WALL_METHOD)
   -h, --help                   Show this help message
 
@@ -519,6 +525,9 @@ DYNAMIC_CMD=(
 
 if [[ "$DYNAMIC_EVAL_SISDR" == "1" ]]; then
   DYNAMIC_CMD+=(--eval-sisdr)
+fi
+if [[ "$DYNAMIC_CHECK_CHKPTS" == "1" ]]; then
+  DYNAMIC_CMD+=(--check-chkpts)
 fi
 
 # Keep tqdm interactive on the terminal (stderr), while logging stdout to the dynamic log.
