@@ -91,6 +91,21 @@ python -m df_mlx.train_dynamic \
     --p-reverb 0.5
 ```
 
+#### Run-config (CLI/runtime settings)
+
+`--config` remains the dataset/mixer JSON. Use `--run-config` for all CLI/runtime
+settings (TOML). Precedence: defaults < run-config < explicit CLI flags.
+
+```bash
+# Generate a fully-commented example config
+python -m df_mlx.train_dynamic --print-run-config > run.toml
+
+# Use both configs together
+python -m df_mlx.train_dynamic \
+    --run-config run.toml \
+    --config ./file_lists/config.json
+```
+
 #### Awesome dynamic loss (speech-preserving)
 
 Enable the speech-preserving contrastive loss and cheap VAD proxy gating:

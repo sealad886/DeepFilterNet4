@@ -55,6 +55,14 @@ from tqdm.auto import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from df_mlx.run_config import (  # noqa: E402
+    RunConfig,
+    generate_run_config_example,
+    load_run_config,
+    set_by_path,
+    validate_run_config,
+)
+
 # =============================================================================
 # tqdm configuration
 # =============================================================================
@@ -216,6 +224,121 @@ def _tree_all_finite(tree: Any) -> bool:
         if not bool(mx.all(mx.isfinite(value))):
             return False
     return True
+
+
+def _flag_in_argv(flags: list[str], argv: list[str]) -> bool:
+    for arg in argv:
+        for flag in flags:
+            if arg == flag or arg.startswith(f"{flag}="):
+                return True
+    return False
+
+
+def _apply_cli_overrides(cfg: RunConfig, args: argparse.Namespace, argv: list[str]) -> None:
+    overrides: list[tuple[list[str], str, Any]] = [
+        (["--cache-dir"], "dataset.cache_dir", getattr(args, "cache_dir", None)),
+        (["--speech-list"], "dataset.speech_list", getattr(args, "speech_list", None)),
+        (["--noise-list"], "dataset.noise_list", getattr(args, "noise_list", None)),
+        (["--rir-list"], "dataset.rir_list", getattr(args, "rir_list", None)),
+        (["--config"], "dataset.config", getattr(args, "config", None)),
+        (["--snr-range"], "dataset.snr_range", getattr(args, "snr_range", None)),
+        (["--snr-range-extreme"], "dataset.snr_range_extreme", getattr(args, "snr_range_extreme", None)),
+        (["--p-extreme-snr"], "dataset.p_extreme_snr", getattr(args, "p_extreme_snr", None)),
+        (["--speech-gain-range"], "dataset.speech_gain_range", getattr(args, "speech_gain_range", None)),
+        (["--noise-gain-range"], "dataset.noise_gain_range", getattr(args, "noise_gain_range", None)),
+        (["--p-reverb"], "augmentation.p_reverb", getattr(args, "p_reverb", None)),
+        (["--p-clipping"], "augmentation.p_clipping", getattr(args, "p_clipping", None)),
+        (["--epochs"], "training.epochs", getattr(args, "epochs", None)),
+        (["--batch-size"], "training.batch_size", getattr(args, "batch_size", None)),
+        (["--learning-rate"], "training.learning_rate", getattr(args, "learning_rate", None)),
+        (["--warmup-epochs"], "training.warmup_epochs", getattr(args, "warmup_epochs", None)),
+        (["--patience"], "training.patience", getattr(args, "patience", None)),
+        (
+            ["--grad-accumulation-steps"],
+            "training.grad_accumulation_steps",
+            getattr(args, "grad_accumulation_steps", None),
+        ),
+        (["--max-grad-norm"], "training.max_grad_norm", getattr(args, "max_grad_norm", None)),
+        (["--eval-frequency"], "training.eval_frequency", getattr(args, "eval_frequency", None)),
+        (["--seed"], "training.seed", getattr(args, "seed", None)),
+        (["--num-workers"], "dataloader.num_workers", getattr(args, "num_workers", None)),
+        (["--prefetch-size"], "dataloader.prefetch_size", getattr(args, "prefetch_size", None)),
+        (["--max-train-batches"], "dataloader.max_train_batches", getattr(args, "max_train_batches", None)),
+        (["--max-valid-batches"], "dataloader.max_valid_batches", getattr(args, "max_valid_batches", None)),
+        (["--checkpoint-dir"], "checkpoint.checkpoint_dir", getattr(args, "checkpoint_dir", None)),
+        (["--save-strategy"], "checkpoint.save_strategy", getattr(args, "save_strategy", None)),
+        (["--save-steps"], "checkpoint.save_steps", getattr(args, "save_steps", None)),
+        (["--save-total-limit"], "checkpoint.save_total_limit", getattr(args, "save_total_limit", None)),
+        (["--checkpoint-batches"], "checkpoint.checkpoint_batches", getattr(args, "checkpoint_batches", None)),
+        (["--validate-every"], "checkpoint.validate_every", getattr(args, "validate_every", None)),
+        (["--resume"], "checkpoint.resume", getattr(args, "resume", None)),
+        (["--resume-data"], "checkpoint.resume_data", getattr(args, "resume_data", None)),
+        (["--check-chkpts"], "checkpoint.check_chkpts", getattr(args, "check_chkpts", None)),
+        (["--backbone-type"], "model.backbone_type", getattr(args, "backbone_type", None)),
+        (["--dynamic-loss"], "loss.dynamic_loss", getattr(args, "dynamic_loss", None)),
+        (["--awesome-loss-weight"], "loss.awesome.loss_weight", getattr(args, "awesome_loss_weight", None)),
+        (["--awesome-mask-sharpness"], "loss.awesome.mask_sharpness", getattr(args, "awesome_mask_sharpness", None)),
+        (["--awesome-warmup-steps"], "loss.awesome.warmup_steps", getattr(args, "awesome_warmup_steps", None)),
+        (["--vad-loss-weight"], "vad.loss_weight", getattr(args, "vad_loss_weight", None)),
+        (["--vad-threshold"], "vad.threshold", getattr(args, "vad_threshold", None)),
+        (["--vad-margin"], "vad.margin", getattr(args, "vad_margin", None)),
+        (["--vad-speech-loss-weight"], "vad.speech_loss_weight", getattr(args, "vad_speech_loss_weight", None)),
+        (["--vad-warmup-epochs"], "vad.warmup_epochs", getattr(args, "vad_warmup_epochs", None)),
+        (["--vad-snr-gate"], "vad.snr_gate_db", getattr(args, "vad_snr_gate", None)),
+        (["--vad-snr-gate-width"], "vad.snr_gate_width", getattr(args, "vad_snr_gate_width", None)),
+        (["--vad-band-low"], "vad.band_low_hz", getattr(args, "vad_band_low", None)),
+        (["--vad-band-high"], "vad.band_high_hz", getattr(args, "vad_band_high", None)),
+        (["--vad-z-threshold"], "vad.z_threshold", getattr(args, "vad_z_threshold", None)),
+        (["--vad-z-slope"], "vad.z_slope", getattr(args, "vad_z_slope", None)),
+        (["--vad-eval-mode"], "vad.eval.mode", getattr(args, "vad_eval_mode", None)),
+        (["--vad-eval-every"], "vad.eval.every", getattr(args, "vad_eval_every", None)),
+        (["--vad-eval-batches"], "vad.eval.batches", getattr(args, "vad_eval_batches", None)),
+        (["--vad-eval-max-seconds"], "vad.eval.max_seconds", getattr(args, "vad_eval_max_seconds", None)),
+        (["--vad-silero-model-path"], "vad.eval.silero_model_path", getattr(args, "vad_silero_model_path", None)),
+        (["--vad-silero-sample-rate"], "vad.eval.silero_sample_rate", getattr(args, "vad_silero_sample_rate", None)),
+        (["--vad-train-prob"], "vad.train.prob", getattr(args, "vad_train_prob", None)),
+        (["--vad-train-every-steps"], "vad.train.every_steps", getattr(args, "vad_train_every_steps", None)),
+        (["--eval-sisdr"], "metrics.eval_sisdr", getattr(args, "eval_sisdr", None)),
+        (["-v", "--verbose"], "debug.verbose", getattr(args, "verbose", None)),
+        (["--debug-numerics"], "debug.debug_numerics", getattr(args, "debug_numerics", None)),
+        (
+            ["--debug-numerics-no-fail-fast"],
+            "debug.debug_numerics_fail_fast",
+            not getattr(args, "debug_numerics_no_fail_fast", False),
+        ),
+        (["--debug-numerics-every"], "debug.debug_numerics_every", getattr(args, "debug_numerics_every", None)),
+        (
+            ["--debug-numerics-dump-dir"],
+            "debug.debug_numerics_dump_dir",
+            getattr(args, "debug_numerics_dump_dir", None),
+        ),
+        (
+            ["--debug-numerics-dump-arrays"],
+            "debug.debug_numerics_dump_arrays",
+            getattr(args, "debug_numerics_dump_arrays", None),
+        ),
+        (
+            ["--debug-numerics-max-dumps"],
+            "debug.debug_numerics_max_dumps",
+            getattr(args, "debug_numerics_max_dumps", None),
+        ),
+        (["--nan-skip-batch"], "debug.nan_skip_batch", getattr(args, "nan_skip_batch", None)),
+    ]
+
+    if _flag_in_argv(["--fp16"], argv) and _flag_in_argv(["--no-fp16"], argv):
+        raise ValueError("Cannot pass both --fp16 and --no-fp16.")
+    if _flag_in_argv(["--fp16"], argv):
+        set_by_path(cfg, "training.fp16", True)
+    if _flag_in_argv(["--no-fp16"], argv):
+        set_by_path(cfg, "training.fp16", False)
+    if _flag_in_argv(["--no-mlx-data"], argv):
+        set_by_path(cfg, "dataloader.use_mlx_data", False)
+    if _flag_in_argv(["--no-vad-proxy"], argv):
+        set_by_path(cfg, "loss.awesome.proxy_enabled", False)
+
+    for flags, path, value in overrides:
+        if _flag_in_argv(flags, argv):
+            set_by_path(cfg, path, value)
 
 
 def _build_speech_band_mask(
@@ -3754,7 +3877,13 @@ def train(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train DfNet4 with dynamic on-the-fly mixing")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Train DfNet4 with dynamic on-the-fly mixing. "
+            "--config refers to the dataset/mixer JSON config, "
+            "while --run-config refers to CLI/runtime settings (TOML)."
+        )
+    )
 
     # Data sources (priority: cache_dir > config > file lists)
     parser.add_argument(
@@ -3780,7 +3909,17 @@ def main():
     parser.add_argument(
         "--config",
         type=str,
-        help="Path to JSON config file (alternative to file lists)",
+        help="Path to dataset/mixer JSON config file (alternative to file lists)",
+    )
+    parser.add_argument(
+        "--run-config",
+        type=str,
+        help="Path to run-config TOML file (CLI/runtime settings)",
+    )
+    parser.add_argument(
+        "--print-run-config",
+        action="store_true",
+        help="Print a commented run-config TOML example and exit",
     )
 
     # Training parameters
@@ -4192,114 +4331,116 @@ def main():
 
     args = parser.parse_args()
 
-    # Determine FP16 setting from arguments
-    use_fp16: bool | None = None
-    if args.fp16:
-        use_fp16 = True
-    elif args.no_fp16:
-        use_fp16 = False
+    if args.print_run_config:
+        print(generate_run_config_example(), end="")
+        return
 
-    # Resolve resume paths
-    # --resume can be: False (not set), True (flag only), or str (explicit path)
-    resume_from: str | None = None
-    if args.resume:
-        if isinstance(args.resume, str):
-            resume_from = args.resume
-        else:
-            # Auto-find latest checkpoint in checkpoint_dir
-            ckpt_dir = Path(args.checkpoint_dir)
+    run_cfg = RunConfig()
+    if args.run_config:
+        run_cfg = load_run_config(args.run_config, base=run_cfg)
+    _apply_cli_overrides(run_cfg, args, sys.argv[1:])
+    validate_run_config(run_cfg)
+
+    def _resolve_resume(resume_setting: bool | str, checkpoint_dir: str, label: str) -> str | None:
+        if not resume_setting:
+            return None
+        if isinstance(resume_setting, str):
+            return resume_setting
+        ckpt_dir = Path(checkpoint_dir)
+        if label == "resume":
             latest = find_latest_checkpoint(ckpt_dir)
             if latest:
-                resume_from = str(latest)
-                print(f"Auto-resuming from: {resume_from}")
-            else:
-                print(f"Warning: --resume specified but no checkpoint found in {ckpt_dir}")
+                resume_path = str(latest)
+                print(f"Auto-resuming from: {resume_path}")
+                return resume_path
+            print(f"Warning: resume requested but no checkpoint found in {ckpt_dir}")
+            return None
+        data_ckpt = ckpt_dir / "data_checkpoint.json"
+        if data_ckpt.exists():
+            resume_path = str(data_ckpt)
+            print(f"Auto-resuming data from: {resume_path}")
+            return resume_path
+        print(f"Warning: resume-data requested but {data_ckpt} not found")
+        return None
 
-    # --resume-data can be: False (not set), True (flag only), or str (explicit path)
-    resume_data_from: str | None = None
-    if args.resume_data:
-        if isinstance(args.resume_data, str):
-            resume_data_from = args.resume_data
-        else:
-            # Auto-use data_checkpoint.json in checkpoint_dir
-            data_ckpt = Path(args.checkpoint_dir) / "data_checkpoint.json"
-            if data_ckpt.exists():
-                resume_data_from = str(data_ckpt)
-                print(f"Auto-resuming data from: {resume_data_from}")
-            else:
-                print(f"Warning: --resume-data specified but {data_ckpt} not found")
+    resume_from = _resolve_resume(run_cfg.checkpoint.resume, run_cfg.checkpoint.checkpoint_dir, "resume")
+    resume_data_from = _resolve_resume(
+        run_cfg.checkpoint.resume_data,
+        run_cfg.checkpoint.checkpoint_dir,
+        "resume_data",
+    )
 
     train(
-        cache_dir=args.cache_dir,
-        speech_list=args.speech_list,
-        noise_list=args.noise_list,
-        rir_list=args.rir_list,
-        config_path=args.config,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        learning_rate=args.learning_rate,
-        checkpoint_dir=args.checkpoint_dir,
+        cache_dir=run_cfg.dataset.cache_dir,
+        speech_list=run_cfg.dataset.speech_list,
+        noise_list=run_cfg.dataset.noise_list,
+        rir_list=run_cfg.dataset.rir_list,
+        config_path=run_cfg.dataset.config,
+        epochs=run_cfg.training.epochs,
+        batch_size=run_cfg.training.batch_size,
+        learning_rate=run_cfg.training.learning_rate,
+        checkpoint_dir=run_cfg.checkpoint.checkpoint_dir,
         resume_from=resume_from,
         resume_data_from=resume_data_from,
-        validate_every=args.validate_every,
-        save_strategy=cast(Literal["no", "epoch", "steps"], args.save_strategy),
-        save_steps=args.save_steps,
-        save_total_limit=args.save_total_limit,
-        checkpoint_batches=args.checkpoint_batches,
-        max_grad_norm=args.max_grad_norm,
-        warmup_epochs=args.warmup_epochs,
-        patience=args.patience,
-        num_workers=args.num_workers,
-        prefetch_size=args.prefetch_size,
-        p_reverb=args.p_reverb,
-        p_clipping=args.p_clipping,
-        use_mlx_data=not args.no_mlx_data,
-        use_fp16=use_fp16,
-        grad_accumulation_steps=args.grad_accumulation_steps,
-        eval_frequency=args.eval_frequency,
-        backbone_type=cast(Literal["mamba", "gru", "attention"], args.backbone_type),
-        verbose=args.verbose,
-        snr_range=tuple(args.snr_range) if args.snr_range else None,
-        snr_range_extreme=tuple(args.snr_range_extreme) if args.snr_range_extreme else None,
-        p_extreme_snr=args.p_extreme_snr,
-        speech_gain_range=tuple(args.speech_gain_range) if args.speech_gain_range else None,
-        noise_gain_range=tuple(args.noise_gain_range) if args.noise_gain_range else None,
-        dynamic_loss=cast(Literal["baseline", "awesome"], args.dynamic_loss),
-        awesome_loss_weight=args.awesome_loss_weight,
-        awesome_mask_sharpness=args.awesome_mask_sharpness,
-        awesome_warmup_steps=args.awesome_warmup_steps,
-        vad_proxy_enabled=not args.no_vad_proxy,
-        vad_loss_weight=args.vad_loss_weight,
-        vad_threshold=args.vad_threshold,
-        vad_margin=args.vad_margin,
-        vad_speech_loss_weight=args.vad_speech_loss_weight,
-        vad_warmup_epochs=args.vad_warmup_epochs,
-        vad_snr_gate_db=args.vad_snr_gate,
-        vad_snr_gate_width=args.vad_snr_gate_width,
-        vad_band_low_hz=args.vad_band_low,
-        vad_band_high_hz=args.vad_band_high,
-        vad_z_threshold=args.vad_z_threshold,
-        vad_z_slope=args.vad_z_slope,
-        vad_eval_mode=cast(Literal["auto", "proxy", "silero", "off"], args.vad_eval_mode),
-        vad_eval_every=args.vad_eval_every,
-        vad_eval_batches=args.vad_eval_batches,
-        vad_eval_max_seconds=args.vad_eval_max_seconds,
-        vad_silero_model_path=args.vad_silero_model_path,
-        vad_silero_sample_rate=args.vad_silero_sample_rate,
-        vad_train_prob=args.vad_train_prob,
-        vad_train_every_steps=args.vad_train_every_steps,
-        eval_sisdr=args.eval_sisdr,
-        check_chkpts=args.check_chkpts,
-        max_train_batches=args.max_train_batches,
-        max_valid_batches=args.max_valid_batches,
-        seed=args.seed,
-        debug_numerics=args.debug_numerics,
-        debug_numerics_fail_fast=not args.debug_numerics_no_fail_fast,
-        debug_numerics_every=args.debug_numerics_every,
-        debug_numerics_dump_dir=args.debug_numerics_dump_dir,
-        debug_numerics_dump_arrays=args.debug_numerics_dump_arrays,
-        debug_numerics_max_dumps=args.debug_numerics_max_dumps,
-        nan_skip_batch=args.nan_skip_batch,
+        validate_every=run_cfg.checkpoint.validate_every,
+        save_strategy=cast(Literal["no", "epoch", "steps"], run_cfg.checkpoint.save_strategy),
+        save_steps=run_cfg.checkpoint.save_steps,
+        save_total_limit=run_cfg.checkpoint.save_total_limit,
+        checkpoint_batches=run_cfg.checkpoint.checkpoint_batches,
+        max_grad_norm=run_cfg.training.max_grad_norm,
+        warmup_epochs=run_cfg.training.warmup_epochs,
+        patience=run_cfg.training.patience,
+        num_workers=run_cfg.dataloader.num_workers,
+        prefetch_size=run_cfg.dataloader.prefetch_size,
+        p_reverb=run_cfg.augmentation.p_reverb,
+        p_clipping=run_cfg.augmentation.p_clipping,
+        use_mlx_data=run_cfg.dataloader.use_mlx_data,
+        use_fp16=run_cfg.training.fp16,
+        grad_accumulation_steps=run_cfg.training.grad_accumulation_steps,
+        eval_frequency=run_cfg.training.eval_frequency,
+        backbone_type=cast(Literal["mamba", "gru", "attention"], run_cfg.model.backbone_type),
+        verbose=run_cfg.debug.verbose,
+        snr_range=run_cfg.dataset.snr_range,
+        snr_range_extreme=run_cfg.dataset.snr_range_extreme,
+        p_extreme_snr=run_cfg.dataset.p_extreme_snr,
+        speech_gain_range=run_cfg.dataset.speech_gain_range,
+        noise_gain_range=run_cfg.dataset.noise_gain_range,
+        dynamic_loss=cast(Literal["baseline", "awesome"], run_cfg.loss.dynamic_loss),
+        awesome_loss_weight=run_cfg.loss.awesome.loss_weight,
+        awesome_mask_sharpness=run_cfg.loss.awesome.mask_sharpness,
+        awesome_warmup_steps=run_cfg.loss.awesome.warmup_steps,
+        vad_proxy_enabled=run_cfg.loss.awesome.proxy_enabled,
+        vad_loss_weight=run_cfg.vad.loss_weight,
+        vad_threshold=run_cfg.vad.threshold,
+        vad_margin=run_cfg.vad.margin,
+        vad_speech_loss_weight=run_cfg.vad.speech_loss_weight,
+        vad_warmup_epochs=run_cfg.vad.warmup_epochs,
+        vad_snr_gate_db=run_cfg.vad.snr_gate_db,
+        vad_snr_gate_width=run_cfg.vad.snr_gate_width,
+        vad_band_low_hz=run_cfg.vad.band_low_hz,
+        vad_band_high_hz=run_cfg.vad.band_high_hz,
+        vad_z_threshold=run_cfg.vad.z_threshold,
+        vad_z_slope=run_cfg.vad.z_slope,
+        vad_eval_mode=cast(Literal["auto", "proxy", "silero", "off"], run_cfg.vad.eval.mode),
+        vad_eval_every=run_cfg.vad.eval.every,
+        vad_eval_batches=run_cfg.vad.eval.batches,
+        vad_eval_max_seconds=run_cfg.vad.eval.max_seconds,
+        vad_silero_model_path=run_cfg.vad.eval.silero_model_path,
+        vad_silero_sample_rate=run_cfg.vad.eval.silero_sample_rate,
+        vad_train_prob=run_cfg.vad.train.prob,
+        vad_train_every_steps=run_cfg.vad.train.every_steps,
+        eval_sisdr=run_cfg.metrics.eval_sisdr,
+        check_chkpts=run_cfg.checkpoint.check_chkpts,
+        max_train_batches=run_cfg.dataloader.max_train_batches,
+        max_valid_batches=run_cfg.dataloader.max_valid_batches,
+        seed=run_cfg.training.seed,
+        debug_numerics=run_cfg.debug.debug_numerics,
+        debug_numerics_fail_fast=run_cfg.debug.debug_numerics_fail_fast,
+        debug_numerics_every=run_cfg.debug.debug_numerics_every,
+        debug_numerics_dump_dir=run_cfg.debug.debug_numerics_dump_dir,
+        debug_numerics_dump_arrays=run_cfg.debug.debug_numerics_dump_arrays,
+        debug_numerics_max_dumps=run_cfg.debug.debug_numerics_max_dumps,
+        nan_skip_batch=run_cfg.debug.nan_skip_batch,
     )
 
 
