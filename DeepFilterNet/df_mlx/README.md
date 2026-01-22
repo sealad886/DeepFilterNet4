@@ -91,6 +91,34 @@ python -m df_mlx.train_dynamic \
     --p-reverb 0.5
 ```
 
+#### Awesome dynamic loss (speech-preserving)
+
+Enable the speech-preserving contrastive loss and cheap VAD proxy gating:
+
+```bash
+python -m df_mlx.train_dynamic \
+    --config ./file_lists/config.json \
+    --epochs 100 \
+    --batch-size 8 \
+    --dynamic-loss awesome \
+    --awesome-loss-weight 0.4 \
+    --awesome-mask-sharpness 6.0 \
+    --awesome-warmup-steps 2000
+```
+
+Optional VAD controls (all optional; defaults are safe):
+
+```bash
+# Periodic VAD eval metrics (proxy-based, lightweight)
+--vad-eval-mode auto --vad-eval-every 1 --vad-eval-batches 8
+
+# Sparse training-time VAD regularizer (disabled by default)
+--vad-train-prob 0.01  # or --vad-train-every-steps 500
+
+# Disable proxy gating if needed
+--no-vad-proxy
+```
+
 Or specify file lists directly:
 
 ```bash

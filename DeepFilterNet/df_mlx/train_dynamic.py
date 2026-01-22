@@ -36,6 +36,7 @@ import argparse
 import gc
 import json
 import os
+import random
 import re
 import signal
 import subprocess
@@ -81,6 +82,23 @@ _TQDM_KWARGS = {
 # =============================================================================
 
 _EPS = 1e-8
+
+# =============================================================================
+# Awesome loss (speech-preserving contrastive) + proxy VAD constants
+# =============================================================================
+_AWESOME_PROXY_RATIO_FLOOR = 0.3
+_AWESOME_PROXY_RATIO_SCALE = 0.7
+_AWESOME_LOW_ENERGY_WEIGHT = 0.7
+_AWESOME_LOW_SNR_WEIGHT = 0.7
+_AWESOME_MOD_THRESHOLD = 0.25
+_AWESOME_MOD_WIDTH = 0.15
+_AWESOME_ENERGY_BOOST_DB = -3.5
+_AWESOME_ENERGY_BOOST_WIDTH = 1.5
+_AWESOME_SMOOTH_WEIGHT = 0.2
+_AWESOME_MUSICNESS_THR = 0.55
+_AWESOME_MUSICNESS_WIDTH = 0.15
+_AWESOME_MUSIC_FLUX_THR = 0.08
+_AWESOME_MUSIC_FLUX_WIDTH = 0.05
 
 
 def _build_speech_band_mask(
@@ -196,6 +214,296 @@ def _compute_speech_band_logmag_loss(
     out_band = mx.sum(out_log * band_mask, axis=-1) / (band_bins + eps)
 
     return mx.mean(mx.abs(out_band - clean_band) * gate)
+
+
+def _log1p_mag(real: mx.array, imag: mx.array, eps: float = _EPS) -> mx.array:
+    """Compute log1p magnitude for complex STFT."""
+    mag = mx.sqrt(real**2 + imag**2 + eps)
+    return mx.log1p(mag)
+
+
+def _compute_musicness(
+    mag: mx.array,
+    band_mask: mx.array,
+    band_bins: float,
+    eps: float = _EPS,
+) -> tuple[mx.array, mx.array]:
+    """Compute a cheap musicness score and its inverse gate.
+
+    Uses spectral flatness (tonalness) and temporal flux stability.
+    Returns per-sample musicness and a [0,1] gate (1 = keep speech bias).
+    """
+    # Spectral flatness over speech band
+    log_mag = mx.log(mag + eps)
+    mean_log = mx.sum(log_mag * band_mask, axis=-1) / (band_bins + eps)
+    geom_mean = mx.exp(mean_log)
+    arith_mean = mx.sum(mag * band_mask, axis=-1) / (band_bins + eps)
+    flatness = geom_mean / (arith_mean + eps)
+    tonal = 1.0 - mx.clip(flatness, 0.0, 1.0)
+    tonal_mean = mx.mean(tonal, axis=1, keepdims=True)
+
+    # Temporal flux (lower flux => more music-like)
+    band_mag = mag * band_mask
+    flux = mx.sum(mx.abs(band_mag[:, 1:, :] - band_mag[:, :-1, :]), axis=-1) / (band_bins + eps)
+    flux = mx.mean(flux, axis=1, keepdims=True)
+    flux_gate = mx.sigmoid((_AWESOME_MUSIC_FLUX_THR - flux) / _AWESOME_MUSIC_FLUX_WIDTH)
+
+    musicness = mx.clip(tonal_mean * flux_gate, 0.0, 1.0)
+    music_gate = 1.0 - mx.sigmoid((musicness - _AWESOME_MUSICNESS_THR) / _AWESOME_MUSICNESS_WIDTH)
+    return musicness.squeeze(-1), music_gate.squeeze(-1)
+
+
+def _compute_proxy_gates(
+    clean_real: mx.array,
+    clean_imag: mx.array,
+    noisy_real: mx.array,
+    noisy_imag: mx.array,
+    snr: mx.array,
+    band_mask: mx.array,
+    band_bins: float,
+    vad_z_threshold: float,
+    vad_z_slope: float,
+    vad_snr_gate_db: float,
+    vad_snr_gate_width: float,
+    proxy_enabled: bool,
+    eps: float = _EPS,
+) -> tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array, mx.array]:
+    """Compute proxy VAD gates and statistics.
+
+    Returns:
+        proxy_frame: (B, T) speech presence proxy
+        speech_ratio: (B, T) speech energy ratio in speech band
+        music_gate: (B,) gate to downweight music-like frames
+        musicness: (B,) musicness score
+        mod_energy: (B, 1) modulation energy proxy
+        energy_boost: (B, 1) low-energy boost
+        snr_boost: (B, 1) low-SNR boost
+    """
+    clean_power = clean_real**2 + clean_imag**2
+    noise_real = noisy_real - clean_real
+    noise_imag = noisy_imag - clean_imag
+    noise_power = noise_real**2 + noise_imag**2
+
+    clean_band = mx.sum(clean_power * band_mask, axis=-1) / (band_bins + eps)
+    noise_band = mx.sum(noise_power * band_mask, axis=-1) / (band_bins + eps)
+    speech_ratio = clean_band / (clean_band + noise_band + eps)
+
+    log_clean = mx.log10(clean_band + eps)
+    mu = mx.mean(log_clean, axis=1, keepdims=True)
+    sigma = mx.sqrt(mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True) + eps)
+    z_ref = (log_clean - mu) / (sigma + eps)
+
+    z_slope = max(vad_z_slope, 1e-3)
+    p_ref = mx.sigmoid((z_ref - vad_z_threshold) / z_slope)
+
+    # Modulation proxy from z-scored energy trajectory
+    mod_energy = mx.mean(mx.abs(z_ref[:, 1:] - z_ref[:, :-1]), axis=1, keepdims=True)
+    mod_gate = mx.sigmoid((mod_energy - _AWESOME_MOD_THRESHOLD) / _AWESOME_MOD_WIDTH)
+
+    mean_log = mx.mean(log_clean, axis=1, keepdims=True)
+    energy_boost = mx.sigmoid((_AWESOME_ENERGY_BOOST_DB - mean_log) / _AWESOME_ENERGY_BOOST_WIDTH)
+
+    snr_scale = max(vad_snr_gate_width, 1e-3)
+    snr_boost = mx.sigmoid((vad_snr_gate_db - snr[:, None]) / snr_scale)
+
+    # Musicness gate from noisy magnitude
+    noisy_mag = mx.sqrt(noisy_real**2 + noisy_imag**2 + eps)
+    musicness, music_gate = _compute_musicness(noisy_mag, band_mask, band_bins, eps=eps)
+
+    if not proxy_enabled:
+        proxy_frame = mx.ones_like(clean_band)
+    else:
+        proxy_frame = p_ref * (_AWESOME_PROXY_RATIO_FLOOR + _AWESOME_PROXY_RATIO_SCALE * speech_ratio)
+        proxy_frame = proxy_frame * mod_gate * music_gate[:, None]
+        proxy_frame = proxy_frame * (
+            1.0 + _AWESOME_LOW_ENERGY_WEIGHT * energy_boost + _AWESOME_LOW_SNR_WEIGHT * snr_boost
+        )
+        proxy_frame = mx.clip(proxy_frame, 0.0, 5.0)
+
+    proxy_frame = mx.stop_gradient(proxy_frame)
+    return proxy_frame, speech_ratio, music_gate, musicness, mod_energy, energy_boost, snr_boost
+
+
+def _compute_awesome_losses(
+    noisy_real: mx.array,
+    noisy_imag: mx.array,
+    clean_real: mx.array,
+    clean_imag: mx.array,
+    out_real: mx.array,
+    out_imag: mx.array,
+    snr: mx.array,
+    band_mask: mx.array,
+    band_bins: float,
+    mask_sharpness: float,
+    vad_z_threshold: float,
+    vad_z_slope: float,
+    vad_snr_gate_db: float,
+    vad_snr_gate_width: float,
+    proxy_enabled: bool,
+    eps: float = _EPS,
+) -> tuple[
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+]:
+    """Compute awesome loss components and diagnostic gates."""
+    clean_log = _log1p_mag(clean_real, clean_imag, eps=eps)
+    out_log = _log1p_mag(out_real, out_imag, eps=eps)
+
+    noise_real = noisy_real - clean_real
+    noise_imag = noisy_imag - clean_imag
+    noise_log = _log1p_mag(noise_real, noise_imag, eps=eps)
+
+    mask = mx.sigmoid(mask_sharpness * (clean_log - noise_log))
+    mask = mx.stop_gradient(mask)
+
+    (
+        proxy_frame,
+        speech_ratio,
+        music_gate,
+        musicness,
+        mod_energy,
+        energy_boost,
+        snr_boost,
+    ) = _compute_proxy_gates(
+        clean_real,
+        clean_imag,
+        noisy_real,
+        noisy_imag,
+        snr,
+        band_mask,
+        band_bins,
+        vad_z_threshold,
+        vad_z_slope,
+        vad_snr_gate_db,
+        vad_snr_gate_width,
+        proxy_enabled,
+        eps=eps,
+    )
+
+    proxy_frame = proxy_frame[:, :, None]
+    speech_loss = mx.mean(mx.abs(out_log - clean_log) * mask * proxy_frame)
+    noise_loss = mx.mean(mx.abs(out_log) * (1.0 - mask))
+
+    if out_log.shape[1] > 1:
+        smooth_mask = 1.0 - mask[:, 1:, :]
+        smooth_loss = mx.mean(mx.abs(out_log[:, 1:, :] - out_log[:, :-1, :]) * smooth_mask)
+    else:
+        smooth_loss = mx.array(0.0)
+
+    awesome_loss = speech_loss + noise_loss + _AWESOME_SMOOTH_WEIGHT * smooth_loss
+
+    return (
+        awesome_loss,
+        speech_loss,
+        noise_loss,
+        smooth_loss,
+        mask,
+        proxy_frame.squeeze(-1),
+        speech_ratio,
+        music_gate,
+        musicness,
+        mod_energy,
+        energy_boost,
+        snr_boost,
+    )
+
+
+def _compute_vad_reg_loss(
+    clean_real: mx.array,
+    clean_imag: mx.array,
+    noisy_real: mx.array,
+    noisy_imag: mx.array,
+    out_real: mx.array,
+    out_imag: mx.array,
+    snr: mx.array,
+    band_mask: mx.array,
+    band_bins: float,
+    vad_threshold: float,
+    vad_margin: float,
+    vad_z_threshold: float,
+    vad_z_slope: float,
+    vad_snr_gate_db: float,
+    vad_snr_gate_width: float,
+    eps: float = _EPS,
+) -> tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array, mx.array]:
+    """Compute sparse VAD regularizer loss gated by speech ratio and musicness.
+
+    Uses VAD probabilities only as stop-grad weights (non-differentiable).
+    """
+    p_ref, p_out = _compute_vad_probs(
+        clean_real,
+        clean_imag,
+        out_real,
+        out_imag,
+        band_mask,
+        band_bins,
+        vad_z_threshold,
+        vad_z_slope,
+        eps=eps,
+    )
+
+    vad_decrease = mx.maximum(p_ref - p_out - vad_margin, 0.0)
+
+    proxy_frame, speech_ratio, music_gate, musicness, _, _, _ = _compute_proxy_gates(
+        clean_real,
+        clean_imag,
+        noisy_real,
+        noisy_imag,
+        snr,
+        band_mask,
+        band_bins,
+        vad_z_threshold,
+        vad_z_slope,
+        vad_snr_gate_db,
+        vad_snr_gate_width,
+        proxy_enabled=True,
+        eps=eps,
+    )
+
+    ratio_gate = mx.sigmoid((speech_ratio - vad_threshold) / 0.1)
+    gate = mx.stop_gradient(vad_decrease * ratio_gate * music_gate[:, None])
+
+    speech_loss = _compute_speech_band_logmag_loss(
+        clean_real,
+        clean_imag,
+        out_real,
+        out_imag,
+        band_mask,
+        band_bins,
+        gate,
+        eps=eps,
+    )
+
+    return (
+        speech_loss,
+        vad_decrease,
+        gate,
+        p_ref,
+        p_out,
+        speech_ratio,
+        musicness,
+    )
+
+
+def _compute_vad_eval_metrics(
+    p_ref: mx.array,
+    p_out: mx.array,
+    vad_margin: float,
+) -> tuple[mx.array, mx.array, mx.array]:
+    """Compute VAD evaluation metrics (mean p_ref/p_out and decrease)."""
+    p_ref_mean = mx.mean(p_ref)
+    p_out_mean = mx.mean(p_out)
+    vad_decrease = mx.mean(mx.maximum(p_ref - p_out - vad_margin, 0.0))
+    return p_ref_mean, p_out_mean, vad_decrease
 
 
 # ============================================================================
@@ -1143,6 +1451,11 @@ def train(
     p_extreme_snr: float | None = None,
     speech_gain_range: Tuple[float, float] | None = None,
     noise_gain_range: Tuple[float, float] | None = None,
+    dynamic_loss: Literal["baseline", "awesome"] = "baseline",
+    awesome_loss_weight: float = 0.4,
+    awesome_mask_sharpness: float = 6.0,
+    awesome_warmup_steps: int = 0,
+    vad_proxy_enabled: bool = True,
     vad_loss_weight: float = 0.05,
     vad_threshold: float = 0.6,
     vad_margin: float = 0.05,
@@ -1154,6 +1467,11 @@ def train(
     vad_band_high_hz: float = 3400.0,
     vad_z_threshold: float = 0.0,
     vad_z_slope: float = 1.0,
+    vad_eval_mode: Literal["auto", "proxy", "silero", "off"] = "auto",
+    vad_eval_every: int = 1,
+    vad_eval_batches: int = 8,
+    vad_train_prob: float = 0.0,
+    vad_train_every_steps: int = 0,
     eval_sisdr: bool = False,
     max_train_batches: int | None = None,
     max_valid_batches: int | None = None,
@@ -1195,6 +1513,11 @@ def train(
         p_extreme_snr: Optional override for extreme SNR sampling probability
         speech_gain_range: Optional override for speech gain range (dB)
         noise_gain_range: Optional override for noise gain range (dB)
+        dynamic_loss: Which dynamic loss to use ("baseline" or "awesome")
+        awesome_loss_weight: Weight for awesome loss term (only if enabled)
+        awesome_mask_sharpness: Sharpness for speech/noise dominance mask
+        awesome_warmup_steps: Warmup steps for awesome loss weight ramp
+        vad_proxy_enabled: Enable cheap VAD proxy gating for awesome loss
         vad_loss_weight: Weight for VAD speech-preservation loss
         vad_threshold: VAD probability threshold for speech gating
         vad_margin: Margin for VAD consistency loss
@@ -1206,6 +1529,11 @@ def train(
         vad_band_high_hz: High cutoff for speech band (Hz)
         vad_z_threshold: Z-score threshold for VAD sigmoid
         vad_z_slope: Z-score slope for VAD sigmoid
+        vad_eval_mode: VAD evaluation mode ("auto", "proxy", "silero", "off")
+        vad_eval_every: Evaluate VAD metrics every N epochs
+        vad_eval_batches: Number of validation batches used for VAD metrics
+        vad_train_prob: Probability of applying sparse VAD regularizer per batch
+        vad_train_every_steps: Apply VAD regularizer every N steps (0 disables)
         eval_sisdr: Compute SI-SDR during validation (slower)
         max_train_batches: Limit number of train batches per epoch (None = full epoch)
         max_valid_batches: Limit number of validation batches (None = full validation)
@@ -1286,8 +1614,20 @@ def train(
     print("\nInitializing dynamic dataset...")
     dataset = DynamicDataset(config)
 
+    use_awesome_loss = dynamic_loss == "awesome"
+
+    if vad_eval_mode == "auto":
+        vad_eval_mode = "proxy" if use_awesome_loss else "off"
+    vad_eval_enabled = vad_eval_mode != "off"
+    if vad_eval_mode == "silero":
+        print("⚠️  Silero VAD not integrated in-core; falling back to proxy VAD for eval metrics.")
+        vad_eval_mode = "proxy"
+
     use_vad_loss = vad_loss_weight > 0 or vad_speech_loss_weight > 0
-    if use_vad_loss:
+    use_vad_train_reg = (vad_train_prob > 0 or vad_train_every_steps > 0) and vad_loss_weight > 0
+
+    need_band_mask = use_vad_loss or use_awesome_loss or vad_eval_enabled or use_vad_train_reg
+    if need_band_mask:
         n_freqs = config.fft_size // 2 + 1
         vad_band_mask, vad_band_bins = _build_speech_band_mask(
             n_freqs,
@@ -1313,6 +1653,12 @@ def train(
     print(f"SNR extreme:    {config.snr_range_extreme} dB (p={config.p_extreme_snr})")
     print(f"Speech gain:    {config.speech_gain_range} dB")
     print(f"Noise gain:     {config.noise_gain_range} dB")
+    print(f"Dynamic loss:   {dynamic_loss}")
+    if use_awesome_loss:
+        print(
+            f"  Awesome loss: weight={awesome_loss_weight}, mask_sharpness={awesome_mask_sharpness}, "
+            f"warmup_steps={awesome_warmup_steps}, proxy={'on' if vad_proxy_enabled else 'off'}"
+        )
     vad_enabled = vad_loss_weight > 0 or vad_speech_loss_weight > 0
     print(
         f"VAD loss:       {'on' if vad_enabled else 'off'} "
@@ -1323,10 +1669,21 @@ def train(
         print(f"  VAD warmup:    {vad_warmup_epochs} epochs")
         print(f"  VAD SNR gate:  {vad_snr_gate_db} dB (width {vad_snr_gate_width} dB)")
         print(f"  VAD band:      {vad_band_low_hz:.0f}-{vad_band_high_hz:.0f} Hz")
+    if vad_eval_enabled:
+        print(f"  VAD eval:      mode={vad_eval_mode} every={vad_eval_every} epochs batches={vad_eval_batches}")
+    if use_vad_train_reg:
+        print(
+            "  VAD train:     " f"prob={vad_train_prob} every_steps={vad_train_every_steps} (weight={vad_loss_weight})"
+        )
     print("=" * 60)
 
     train_config = {
         **config.__dict__,
+        "dynamic_loss": dynamic_loss,
+        "awesome_loss_weight": awesome_loss_weight,
+        "awesome_mask_sharpness": awesome_mask_sharpness,
+        "awesome_warmup_steps": awesome_warmup_steps,
+        "vad_proxy_enabled": vad_proxy_enabled,
         "vad_loss_weight": vad_loss_weight,
         "vad_threshold": vad_threshold,
         "vad_margin": vad_margin,
@@ -1338,6 +1695,11 @@ def train(
         "vad_band_high_hz": vad_band_high_hz,
         "vad_z_threshold": vad_z_threshold,
         "vad_z_slope": vad_z_slope,
+        "vad_eval_mode": vad_eval_mode,
+        "vad_eval_every": vad_eval_every,
+        "vad_eval_batches": vad_eval_batches,
+        "vad_train_prob": vad_train_prob,
+        "vad_train_every_steps": vad_train_every_steps,
         "eval_sisdr": eval_sisdr,
         "max_train_batches": max_train_batches,
         "max_valid_batches": max_valid_batches,
@@ -1454,6 +1816,7 @@ def train(
     total_steps = epochs * steps_per_epoch
     warmup_steps = warmup_epochs * steps_per_epoch
     vad_warmup_steps = vad_warmup_epochs * steps_per_epoch if use_vad_loss else 0
+    awesome_warmup_steps = max(int(awesome_warmup_steps), 0) if use_awesome_loss else 0
 
     schedule = WarmupCosineSchedule(
         base_lr=learning_rate,
@@ -1530,11 +1893,15 @@ def train(
 
     # Loss function - define as a pure function for compilation
     # Loss formula:
-    #   L_total = L_spec + w_vad * L_vad + w_speech * L_speech
+    #   L_total = L_spec
+    #           + w_awesome * L_awesome
+    #           + w_vad * L_vad + w_speech * L_speech
+    #           + w_vad_reg * L_vad_reg (sparse, proxy-gated)
     #   L_vad = mean( gate * relu(p_ref - p_out - margin) )
     #   gate = sigmoid((snr - snr_gate_db)/snr_gate_width) * clip((p_ref - vad_thr)/(1 - vad_thr))
     #   p_ref/p_out from speech-band log-energy (z-scored per utterance)
     #   L_speech = mean( gate * |log_mag_out - log_mag_ref|_speechband )
+    #   L_awesome = speech-preserving contrastive log-mag + noise suppression + smoothness
     def loss_fn(
         model,
         noisy_real,
@@ -1546,6 +1913,8 @@ def train(
         snr,
         vad_weight,
         speech_weight,
+        awesome_weight,
+        vad_reg_weight,
     ):
         """Compute training loss."""
         # Model expects spec as tuple (real, imag)
@@ -1554,6 +1923,27 @@ def train(
 
         out = model(noisy_spec, feat_erb, feat_spec)
         spec_loss = spectral_loss(out, target_spec)
+        total_loss = spec_loss
+
+        if use_awesome_loss:
+            awesome_loss, _, _, _, _, _, _, _, _, _, _, _ = _compute_awesome_losses(
+                noisy_real,
+                noisy_imag,
+                clean_real,
+                clean_imag,
+                out[0],
+                out[1],
+                snr,
+                vad_band_mask,
+                vad_band_bins,
+                awesome_mask_sharpness,
+                vad_z_threshold,
+                vad_z_slope,
+                vad_snr_gate_db,
+                vad_snr_gate_width,
+                vad_proxy_enabled,
+            )
+            total_loss = total_loss + awesome_weight * awesome_loss
 
         if use_vad_loss:
             vad_loss, _, _, gate = _compute_vad_loss(
@@ -1582,10 +1972,29 @@ def train(
                     vad_band_bins,
                     gate,
                 )
+            total_loss = total_loss + vad_weight * vad_loss + speech_weight * speech_loss
 
-            return spec_loss + vad_weight * vad_loss + speech_weight * speech_loss
+        if use_vad_train_reg:
+            vad_reg_loss, _, _, _, _, _, _ = _compute_vad_reg_loss(
+                clean_real,
+                clean_imag,
+                noisy_real,
+                noisy_imag,
+                out[0],
+                out[1],
+                snr,
+                vad_band_mask,
+                vad_band_bins,
+                vad_threshold,
+                vad_margin,
+                vad_z_threshold,
+                vad_z_slope,
+                vad_snr_gate_db,
+                vad_snr_gate_width,
+            )
+            total_loss = total_loss + vad_reg_weight * vad_reg_loss
 
-        return spec_loss
+        return total_loss
 
     loss_and_grad = nn.value_and_grad(model, loss_fn)
 
@@ -1606,6 +2015,8 @@ def train(
         snr,
         vad_weight,
         speech_weight,
+        awesome_weight,
+        vad_reg_weight,
         max_grad_norm_val,
     ):
         """JIT-compiled training step for faster training.
@@ -1624,6 +2035,8 @@ def train(
             snr,
             vad_weight,
             speech_weight,
+            awesome_weight,
+            vad_reg_weight,
         )
         # Gradient clipping inline
         if max_grad_norm_val > 0:
@@ -1631,7 +2044,7 @@ def train(
         optimizer.update(model, grads)
         return loss
 
-    def run_validation(label: str = "  Validating") -> float:
+    def run_validation(label: str = "  Validating", *, do_vad_eval: bool = False) -> float:
         """Run validation on the fixed validation split and return average loss."""
         model.eval()
 
@@ -1645,11 +2058,30 @@ def train(
         valid_spec_loss = 0.0
         valid_vad_loss = 0.0
         valid_speech_loss = 0.0
+        valid_awesome_loss = 0.0
+        valid_awesome_speech = 0.0
+        valid_awesome_noise = 0.0
+        valid_awesome_smooth = 0.0
+        valid_mask_mean = 0.0
+        valid_mask_high = 0.0
+        valid_mask_low = 0.0
+        valid_proxy_mean = 0.0
+        valid_speech_ratio = 0.0
+        valid_music_gate = 0.0
+        valid_musicness = 0.0
+        valid_mod_energy = 0.0
+        valid_energy_boost = 0.0
+        valid_snr_boost = 0.0
+        valid_vad_reg_loss = 0.0
         valid_p_ref = 0.0
         valid_p_out = 0.0
         valid_gate_pct = 0.0
         valid_residual = 0.0
         valid_sisdr = 0.0
+        vad_eval_p_ref = 0.0
+        vad_eval_p_out = 0.0
+        vad_eval_delta = 0.0
+        vad_eval_batches_done = 0
         num_valid_batches = 0
         valid_steps = len(dataset) // batch_size
         if max_valid_batches is not None:
@@ -1694,6 +2126,51 @@ def train(
             out = model(noisy_spec, feat_erb, feat_spec)
             spec_loss = spectral_loss(out, target_spec)
 
+            awesome_loss = mx.array(0.0)
+            awesome_speech = mx.array(0.0)
+            awesome_noise = mx.array(0.0)
+            awesome_smooth = mx.array(0.0)
+            mask = mx.array(0.0)
+            proxy_frame = mx.array(0.0)
+            speech_ratio = mx.array(0.0)
+            music_gate = mx.array(0.0)
+            musicness = mx.array(0.0)
+            mod_energy = mx.array(0.0)
+            energy_boost = mx.array(0.0)
+            snr_boost = mx.array(0.0)
+
+            if use_awesome_loss:
+                (
+                    awesome_loss,
+                    awesome_speech,
+                    awesome_noise,
+                    awesome_smooth,
+                    mask,
+                    proxy_frame,
+                    speech_ratio,
+                    music_gate,
+                    musicness,
+                    mod_energy,
+                    energy_boost,
+                    snr_boost,
+                ) = _compute_awesome_losses(
+                    noisy_real,
+                    noisy_imag,
+                    clean_real,
+                    clean_imag,
+                    out[0],
+                    out[1],
+                    snr,
+                    vad_band_mask,
+                    vad_band_bins,
+                    awesome_mask_sharpness,
+                    vad_z_threshold,
+                    vad_z_slope,
+                    vad_snr_gate_db,
+                    vad_snr_gate_width,
+                    vad_proxy_enabled,
+                )
+
             if use_vad_loss:
                 vad_loss, p_ref, p_out, gate = _compute_vad_loss(
                     clean_real,
@@ -1721,15 +2198,42 @@ def train(
                         vad_band_bins,
                         gate,
                     )
-                loss = spec_loss + vad_loss_weight * vad_loss
-                loss = loss + vad_speech_loss_weight * speech_loss
             else:
                 vad_loss = mx.array(0.0)
                 speech_loss = mx.array(0.0)
                 p_ref = mx.array(0.0)
                 p_out = mx.array(0.0)
                 gate = mx.array(0.0)
-                loss = spec_loss
+
+            vad_reg_loss = mx.array(0.0)
+            if use_vad_train_reg:
+                vad_reg_loss, _, _, _, _, _, _ = _compute_vad_reg_loss(
+                    clean_real,
+                    clean_imag,
+                    noisy_real,
+                    noisy_imag,
+                    out[0],
+                    out[1],
+                    snr,
+                    vad_band_mask,
+                    vad_band_bins,
+                    vad_threshold,
+                    vad_margin,
+                    vad_z_threshold,
+                    vad_z_slope,
+                    vad_snr_gate_db,
+                    vad_snr_gate_width,
+                )
+
+            awesome_weight_val = awesome_loss_weight
+            if use_awesome_loss and awesome_warmup_steps > 0:
+                awesome_weight_val = awesome_loss_weight * min(1.0, global_step / max(awesome_warmup_steps, 1))
+
+            loss = spec_loss
+            if use_awesome_loss:
+                loss = loss + awesome_weight_val * awesome_loss
+            if use_vad_loss:
+                loss = loss + vad_loss_weight * vad_loss + vad_speech_loss_weight * speech_loss
 
             residual = mx.mean((out[0] - clean_real) ** 2 + (out[1] - clean_imag) ** 2)
 
@@ -1737,19 +2241,74 @@ def train(
             spec_loss_val = float(spec_loss)
             vad_loss_val = float(vad_loss)
             speech_loss_val = float(speech_loss)
+            awesome_loss_val = float(awesome_loss)
+            awesome_speech_val = float(awesome_speech)
+            awesome_noise_val = float(awesome_noise)
+            awesome_smooth_val = float(awesome_smooth)
+            vad_reg_loss_val = float(vad_reg_loss)
             residual_val = float(residual)
 
             valid_loss += loss_val
             valid_spec_loss += spec_loss_val
             valid_vad_loss += vad_loss_val
             valid_speech_loss += speech_loss_val
+            valid_awesome_loss += awesome_loss_val
+            valid_awesome_speech += awesome_speech_val
+            valid_awesome_noise += awesome_noise_val
+            valid_awesome_smooth += awesome_smooth_val
+            valid_vad_reg_loss += vad_reg_loss_val
             valid_residual += residual_val
             num_valid_batches += 1
 
             if use_vad_loss:
                 valid_p_ref += float(mx.mean(p_ref))
                 valid_p_out += float(mx.mean(p_out))
-                valid_gate_pct += float(mx.mean(mx.where(gate > 0.0, 1.0, 0.0)))
+                valid_gate_pct += 100.0 * float(mx.mean(mx.where(gate > 0.0, 1.0, 0.0)))
+
+            if use_awesome_loss:
+                mask_mean = float(mx.mean(mask))
+                mask_high = 100.0 * float(mx.mean(mx.where(mask > 0.8, 1.0, 0.0)))
+                mask_low = 100.0 * float(mx.mean(mx.where(mask < 0.2, 1.0, 0.0)))
+                proxy_mean = float(mx.mean(proxy_frame))
+                speech_ratio_mean = float(mx.mean(speech_ratio))
+                music_gate_mean = float(mx.mean(music_gate))
+                musicness_mean = float(mx.mean(musicness))
+                mod_energy_mean = float(mx.mean(mod_energy))
+                energy_boost_mean = float(mx.mean(energy_boost))
+                snr_boost_mean = float(mx.mean(snr_boost))
+
+                valid_mask_mean += mask_mean
+                valid_mask_high += mask_high
+                valid_mask_low += mask_low
+                valid_proxy_mean += proxy_mean
+                valid_speech_ratio += speech_ratio_mean
+                valid_music_gate += music_gate_mean
+                valid_musicness += musicness_mean
+                valid_mod_energy += mod_energy_mean
+                valid_energy_boost += energy_boost_mean
+                valid_snr_boost += snr_boost_mean
+
+            if do_vad_eval and vad_eval_batches_done < vad_eval_batches:
+                if vad_eval_mode == "proxy":
+                    p_ref_eval, p_out_eval = _compute_vad_probs(
+                        clean_real.astype(mx.float32),
+                        clean_imag.astype(mx.float32),
+                        out[0].astype(mx.float32),
+                        out[1].astype(mx.float32),
+                        vad_band_mask,
+                        vad_band_bins,
+                        vad_z_threshold,
+                        vad_z_slope,
+                    )
+                    p_ref_mean, p_out_mean, vad_dec = _compute_vad_eval_metrics(
+                        p_ref_eval,
+                        p_out_eval,
+                        vad_margin,
+                    )
+                    vad_eval_p_ref += float(p_ref_mean)
+                    vad_eval_p_out += float(p_out_mean)
+                    vad_eval_delta += float(vad_dec)
+                    vad_eval_batches_done += 1
 
             if sisdr_fn is not None:
                 si_sdr_fn, istft_fn = sisdr_fn
@@ -1772,23 +2331,74 @@ def train(
             avg_spec = valid_spec_loss / num_valid_batches
             avg_vad = valid_vad_loss / num_valid_batches
             avg_speech = valid_speech_loss / num_valid_batches
+            avg_awesome = valid_awesome_loss / num_valid_batches
+            avg_awesome_speech = valid_awesome_speech / num_valid_batches
+            avg_awesome_noise = valid_awesome_noise / num_valid_batches
+            avg_awesome_smooth = valid_awesome_smooth / num_valid_batches
+            avg_vad_reg = valid_vad_reg_loss / num_valid_batches
             avg_residual = valid_residual / num_valid_batches
             avg_p_ref = valid_p_ref / num_valid_batches if use_vad_loss else 0.0
             avg_p_out = valid_p_out / num_valid_batches if use_vad_loss else 0.0
             avg_gate = valid_gate_pct / num_valid_batches if use_vad_loss else 0.0
             avg_sisdr = valid_sisdr / num_valid_batches if eval_sisdr else None
+            avg_mask_mean = valid_mask_mean / num_valid_batches if use_awesome_loss else 0.0
+            avg_mask_high = valid_mask_high / num_valid_batches if use_awesome_loss else 0.0
+            avg_mask_low = valid_mask_low / num_valid_batches if use_awesome_loss else 0.0
+            avg_proxy = valid_proxy_mean / num_valid_batches if use_awesome_loss else 0.0
+            avg_speech_ratio = valid_speech_ratio / num_valid_batches if use_awesome_loss else 0.0
+            avg_music_gate = valid_music_gate / num_valid_batches if use_awesome_loss else 0.0
+            avg_musicness = valid_musicness / num_valid_batches if use_awesome_loss else 0.0
+            avg_mod = valid_mod_energy / num_valid_batches if use_awesome_loss else 0.0
+            avg_energy_boost = valid_energy_boost / num_valid_batches if use_awesome_loss else 0.0
+            avg_snr_boost = valid_snr_boost / num_valid_batches if use_awesome_loss else 0.0
+            avg_vad_eval_p_ref = (
+                vad_eval_p_ref / vad_eval_batches_done if do_vad_eval and vad_eval_batches_done > 0 else 0.0
+            )
+            avg_vad_eval_p_out = (
+                vad_eval_p_out / vad_eval_batches_done if do_vad_eval and vad_eval_batches_done > 0 else 0.0
+            )
+            avg_vad_eval_delta = (
+                vad_eval_delta / vad_eval_batches_done if do_vad_eval and vad_eval_batches_done > 0 else 0.0
+            )
 
-            if use_vad_loss or eval_sisdr:
-                extras = [
-                    f"spec={avg_spec:.4f}",
-                    f"vad={avg_vad:.4f}",
-                    f"speech={avg_speech:.4f}",
-                    f"resid={avg_residual:.4f}",
-                ]
+            if use_vad_loss or eval_sisdr or use_awesome_loss or use_vad_train_reg or do_vad_eval:
+                extras = [f"spec={avg_spec:.4f}", f"resid={avg_residual:.4f}"]
+                if use_vad_loss:
+                    extras.extend([f"vad={avg_vad:.4f}", f"speech={avg_speech:.4f}"])
+                if use_awesome_loss:
+                    extras.extend(
+                        [
+                            f"awesome={avg_awesome:.4f}",
+                            f"aw_s={avg_awesome_speech:.4f}",
+                            f"aw_n={avg_awesome_noise:.4f}",
+                            f"aw_sm={avg_awesome_smooth:.4f}",
+                        ]
+                    )
+                if use_vad_train_reg:
+                    extras.append(f"vad_reg={avg_vad_reg:.4f}")
                 if use_vad_loss:
                     extras.append(f"p_ref={avg_p_ref:.2f}")
                     extras.append(f"p_out={avg_p_out:.2f}")
                     extras.append(f"gate={avg_gate:.0f}%")
+                if use_awesome_loss:
+                    extras.extend(
+                        [
+                            f"mask={avg_mask_mean:.2f}",
+                            f"mask_hi={avg_mask_high:.0f}%",
+                            f"mask_lo={avg_mask_low:.0f}%",
+                            f"proxy={avg_proxy:.2f}",
+                            f"ratio={avg_speech_ratio:.2f}",
+                            f"music_gate={avg_music_gate:.2f}",
+                            f"music={avg_musicness:.2f}",
+                            f"mod={avg_mod:.2f}",
+                            f"e_boost={avg_energy_boost:.2f}",
+                            f"snr_boost={avg_snr_boost:.2f}",
+                        ]
+                    )
+                if do_vad_eval and vad_eval_batches_done > 0:
+                    extras.append(f"vad_eval_ref={avg_vad_eval_p_ref:.2f}")
+                    extras.append(f"vad_eval_out={avg_vad_eval_p_out:.2f}")
+                    extras.append(f"vad_eval_dec={avg_vad_eval_delta:.2f}")
                 if avg_sisdr is not None:
                     extras.append(f"si-sdr={avg_sisdr:.2f}dB")
                 print(f"{label} metrics: " + " | ".join(extras))
@@ -1837,10 +2447,26 @@ def train(
         train_spec_loss = 0.0
         train_vad_loss = 0.0
         train_speech_loss = 0.0
+        train_awesome_loss = 0.0
+        train_awesome_speech = 0.0
+        train_awesome_noise = 0.0
+        train_awesome_smooth = 0.0
+        train_vad_reg_loss = 0.0
+        train_mask_mean = 0.0
+        train_mask_high = 0.0
+        train_mask_low = 0.0
+        train_proxy_mean = 0.0
+        train_speech_ratio = 0.0
+        train_music_gate = 0.0
+        train_musicness = 0.0
+        train_mod_energy = 0.0
+        train_energy_boost = 0.0
+        train_snr_boost = 0.0
         train_p_ref = 0.0
         train_p_out = 0.0
         train_gate_pct = 0.0
         num_vad_logs = 0
+        num_awesome_logs = 0
         num_train_batches = 0
         samples_processed = 0
         grad_norm = 0.0
@@ -1935,6 +2561,20 @@ def train(
             speech_weight = vad_speech_loss_weight * warmup_frac
             vad_weight_mx = mx.array(vad_weight, dtype=mx.float32)
             speech_weight_mx = mx.array(speech_weight, dtype=mx.float32)
+            awesome_frac = 1.0
+            if use_awesome_loss and awesome_warmup_steps > 0:
+                awesome_frac = min(1.0, global_step / max(awesome_warmup_steps, 1))
+            awesome_weight = awesome_loss_weight * awesome_frac
+            awesome_weight_mx = mx.array(awesome_weight, dtype=mx.float32)
+
+            apply_vad_reg = False
+            if use_vad_train_reg:
+                if vad_train_every_steps > 0 and global_step % vad_train_every_steps == 0:
+                    apply_vad_reg = True
+                elif vad_train_prob > 0:
+                    apply_vad_reg = random.random() < vad_train_prob
+            vad_reg_weight = vad_weight if apply_vad_reg else 0.0
+            vad_reg_weight_mx = mx.array(vad_reg_weight, dtype=mx.float32)
 
             # Forward, backward, and update (either compiled or standard)
             fwd_start = time.time()
@@ -1951,6 +2591,8 @@ def train(
                     snr,
                     vad_weight_mx,
                     speech_weight_mx,
+                    awesome_weight_mx,
+                    vad_reg_weight_mx,
                     max_grad_norm,
                 )
                 # OPTIMIZATION: Only sync periodically to reduce GPU stalls
@@ -1972,6 +2614,8 @@ def train(
                     snr,
                     vad_weight_mx,
                     speech_weight_mx,
+                    awesome_weight_mx,
+                    vad_reg_weight_mx,
                 )
                 # Only sync periodically
                 should_sync = (batch_idx + 1) % eval_frequency == 0
@@ -2025,10 +2669,37 @@ def train(
                     (current_batch_size * eval_frequency) / (step_time * eval_frequency) if step_time > 0 else 0
                 )
 
-                if use_vad_loss:
+                # Defaults for logging
+                spec_loss_val = loss_val
+                vad_loss_val = 0.0
+                speech_loss_val = 0.0
+                p_ref_mean = 0.0
+                p_out_mean = 0.0
+                gate_pct = 0.0
+                awesome_loss_val = 0.0
+                awesome_speech_val = 0.0
+                awesome_noise_val = 0.0
+                awesome_smooth_val = 0.0
+                mask_mean = 0.0
+                mask_high = 0.0
+                mask_low = 0.0
+                proxy_mean = 0.0
+                speech_ratio_mean = 0.0
+                music_gate_mean = 0.0
+                musicness_mean = 0.0
+                mod_energy_mean = 0.0
+                energy_boost_mean = 0.0
+                snr_boost_mean = 0.0
+                vad_reg_loss_val = 0.0
+
+                if use_vad_loss or use_awesome_loss or use_vad_train_reg:
                     # Extra forward pass for component logging (only on sync steps)
                     out = model((noisy_real, noisy_imag), feat_erb, feat_spec)
                     spec_loss = spectral_loss(out, (clean_real, clean_imag))
+                    spec_loss_val = float(spec_loss)
+                    train_spec_loss += spec_loss_val * eval_frequency
+
+                if use_vad_loss:
                     vad_loss, p_ref, p_out, gate = _compute_vad_loss(
                         clean_real,
                         clean_imag,
@@ -2055,14 +2726,12 @@ def train(
                             vad_band_bins,
                             gate,
                         )
-                    spec_loss_val = float(spec_loss)
                     vad_loss_val = float(vad_loss)
                     speech_loss_val = float(speech_loss)
                     p_ref_mean = float(mx.mean(p_ref))
                     p_out_mean = float(mx.mean(p_out))
-                    gate_pct = float(mx.mean(mx.where(gate > 0.0, 1.0, 0.0)))
+                    gate_pct = 100.0 * float(mx.mean(mx.where(gate > 0.0, 1.0, 0.0)))
 
-                    train_spec_loss += spec_loss_val * eval_frequency
                     train_vad_loss += vad_loss_val * eval_frequency
                     train_speech_loss += speech_loss_val * eval_frequency
                     train_p_ref += p_ref_mean
@@ -2070,12 +2739,102 @@ def train(
                     train_gate_pct += gate_pct
                     num_vad_logs += 1
 
+                if use_awesome_loss:
+                    (
+                        awesome_loss,
+                        awesome_speech,
+                        awesome_noise,
+                        awesome_smooth,
+                        mask,
+                        proxy_frame,
+                        speech_ratio,
+                        music_gate,
+                        musicness,
+                        mod_energy,
+                        energy_boost,
+                        snr_boost,
+                    ) = _compute_awesome_losses(
+                        noisy_real,
+                        noisy_imag,
+                        clean_real,
+                        clean_imag,
+                        out[0],
+                        out[1],
+                        snr,
+                        vad_band_mask,
+                        vad_band_bins,
+                        awesome_mask_sharpness,
+                        vad_z_threshold,
+                        vad_z_slope,
+                        vad_snr_gate_db,
+                        vad_snr_gate_width,
+                        vad_proxy_enabled,
+                    )
+                    awesome_loss_val = float(awesome_loss)
+                    awesome_speech_val = float(awesome_speech)
+                    awesome_noise_val = float(awesome_noise)
+                    awesome_smooth_val = float(awesome_smooth)
+
+                    mask_mean = float(mx.mean(mask))
+                    mask_high = 100.0 * float(mx.mean(mx.where(mask > 0.8, 1.0, 0.0)))
+                    mask_low = 100.0 * float(mx.mean(mx.where(mask < 0.2, 1.0, 0.0)))
+                    proxy_mean = float(mx.mean(proxy_frame))
+                    speech_ratio_mean = float(mx.mean(speech_ratio))
+                    music_gate_mean = float(mx.mean(music_gate))
+                    musicness_mean = float(mx.mean(musicness))
+                    mod_energy_mean = float(mx.mean(mod_energy))
+                    energy_boost_mean = float(mx.mean(energy_boost))
+                    snr_boost_mean = float(mx.mean(snr_boost))
+
+                    train_awesome_loss += awesome_loss_val * eval_frequency
+                    train_awesome_speech += awesome_speech_val * eval_frequency
+                    train_awesome_noise += awesome_noise_val * eval_frequency
+                    train_awesome_smooth += awesome_smooth_val * eval_frequency
+                    train_mask_mean += mask_mean
+                    train_mask_high += mask_high
+                    train_mask_low += mask_low
+                    train_proxy_mean += proxy_mean
+                    train_speech_ratio += speech_ratio_mean
+                    train_music_gate += music_gate_mean
+                    train_musicness += musicness_mean
+                    train_mod_energy += mod_energy_mean
+                    train_energy_boost += energy_boost_mean
+                    train_snr_boost += snr_boost_mean
+                    num_awesome_logs += 1
+
+                if use_vad_train_reg and apply_vad_reg:
+                    vad_reg_loss, vad_dec, gate, _, _, _, _ = _compute_vad_reg_loss(
+                        clean_real,
+                        clean_imag,
+                        noisy_real,
+                        noisy_imag,
+                        out[0],
+                        out[1],
+                        snr,
+                        vad_band_mask,
+                        vad_band_bins,
+                        vad_threshold,
+                        vad_margin,
+                        vad_z_threshold,
+                        vad_z_slope,
+                        vad_snr_gate_db,
+                        vad_snr_gate_width,
+                    )
+                    vad_reg_loss_val = float(vad_reg_loss)
+                    train_vad_reg_loss += vad_reg_loss_val * eval_frequency
+
                 if verbose:
                     train_pbar.set_postfix(
                         loss=f"{loss_val:.4f}",
-                        spec=f"{spec_loss_val:.4f}" if use_vad_loss else f"{loss_val:.4f}",
+                        spec=(
+                            f"{spec_loss_val:.4f}"
+                            if (use_vad_loss or use_awesome_loss or use_vad_train_reg)
+                            else f"{loss_val:.4f}"
+                        ),
                         vad=f"{vad_loss_val:.4f}" if use_vad_loss else "0.0000",
                         speech=f"{speech_loss_val:.4f}" if use_vad_loss else "0.0000",
+                        awesome=f"{awesome_loss_val:.4f}" if use_awesome_loss else "0.0000",
+                        mask=f"{mask_mean:.2f}" if use_awesome_loss else "0.00",
                         lr=f"{lr:.1e}",
                         data=f"{data_time * 1000:.0f}ms",
                         step=f"{fwd_time * 1000:.0f}ms",
@@ -2088,9 +2847,12 @@ def train(
                         avg=f"{train_loss / num_train_batches:.4f}",
                         vad=f"{vad_loss_val:.4f}" if use_vad_loss else "0.0000",
                         speech=f"{speech_loss_val:.4f}" if use_vad_loss else "0.0000",
+                        awesome=f"{awesome_loss_val:.4f}" if use_awesome_loss else "0.0000",
+                        mask=f"{mask_mean:.2f}" if use_awesome_loss else "0.00",
                         p_ref=f"{p_ref_mean:.2f}" if use_vad_loss else "0.00",
                         p_out=f"{p_out_mean:.2f}" if use_vad_loss else "0.00",
                         gate=f"{gate_pct:.0f}%" if use_vad_loss else "0%",
+                        vad_reg=f"{vad_reg_loss_val:.4f}" if use_vad_train_reg else "0.0000",
                         lr=f"{lr:.1e}",
                         grad=f"{grad_norm:.2f}",
                         speed=f"{samples_per_sec:.0f}s/s",
@@ -2146,9 +2908,24 @@ def train(
         avg_train_spec_loss = train_spec_loss / max(num_train_batches, 1)
         avg_train_vad_loss = train_vad_loss / max(num_train_batches, 1)
         avg_train_speech_loss = train_speech_loss / max(num_train_batches, 1)
+        avg_train_awesome_loss = train_awesome_loss / max(num_train_batches, 1)
+        avg_train_awesome_speech = train_awesome_speech / max(num_train_batches, 1)
+        avg_train_awesome_noise = train_awesome_noise / max(num_train_batches, 1)
+        avg_train_awesome_smooth = train_awesome_smooth / max(num_train_batches, 1)
+        avg_train_vad_reg_loss = train_vad_reg_loss / max(num_train_batches, 1)
         avg_train_p_ref = train_p_ref / max(num_vad_logs, 1)
         avg_train_p_out = train_p_out / max(num_vad_logs, 1)
         avg_train_gate = train_gate_pct / max(num_vad_logs, 1)
+        avg_train_mask_mean = train_mask_mean / max(num_awesome_logs, 1)
+        avg_train_mask_high = train_mask_high / max(num_awesome_logs, 1)
+        avg_train_mask_low = train_mask_low / max(num_awesome_logs, 1)
+        avg_train_proxy = train_proxy_mean / max(num_awesome_logs, 1)
+        avg_train_speech_ratio = train_speech_ratio / max(num_awesome_logs, 1)
+        avg_train_music_gate = train_music_gate / max(num_awesome_logs, 1)
+        avg_train_musicness = train_musicness / max(num_awesome_logs, 1)
+        avg_train_mod = train_mod_energy / max(num_awesome_logs, 1)
+        avg_train_energy_boost = train_energy_boost / max(num_awesome_logs, 1)
+        avg_train_snr_boost = train_snr_boost / max(num_awesome_logs, 1)
 
         # Print detailed timing breakdown in verbose mode
         if verbose and num_train_batches > 0:
@@ -2167,7 +2944,8 @@ def train(
         avg_valid_loss = float("inf")
         best_saved = False
         if (epoch + 1) % validate_every == 0:
-            avg_valid_loss = run_validation("  Validating")
+            do_vad_eval = vad_eval_enabled and (vad_eval_every > 0) and ((epoch + 1) % vad_eval_every == 0)
+            avg_valid_loss = run_validation("  Validating", do_vad_eval=do_vad_eval)
             last_valid_loss = avg_valid_loss
             last_valid_epoch = epoch
 
@@ -2222,17 +3000,32 @@ def train(
 
         # Improved epoch summary with throughput
         improvement_marker = "★" if avg_valid_loss <= best_valid_loss else ""
-        vad_summary = ""
-        if use_vad_loss:
-            vad_summary = (
-                f" | Spec: {avg_train_spec_loss:.4f}"
-                f" | VAD: {avg_train_vad_loss:.4f}"
-                f" | Speech: {avg_train_speech_loss:.4f}"
-            )
+        loss_summary = ""
+        if use_vad_loss or use_awesome_loss or use_vad_train_reg:
+            loss_parts = [f"Spec: {avg_train_spec_loss:.4f}"]
+            if use_vad_loss:
+                loss_parts.extend(
+                    [
+                        f"VAD: {avg_train_vad_loss:.4f}",
+                        f"Speech: {avg_train_speech_loss:.4f}",
+                    ]
+                )
+            if use_awesome_loss:
+                loss_parts.extend(
+                    [
+                        f"Awesome: {avg_train_awesome_loss:.4f}",
+                        f"AwS: {avg_train_awesome_speech:.4f}",
+                        f"AwN: {avg_train_awesome_noise:.4f}",
+                        f"AwSm: {avg_train_awesome_smooth:.4f}",
+                    ]
+                )
+            if use_vad_train_reg:
+                loss_parts.append(f"VADreg: {avg_train_vad_reg_loss:.4f}")
+            loss_summary = " | " + " | ".join(loss_parts)
 
         print(
             f"✓ Epoch {epoch + 1}/{epochs} complete | "
-            f"Train: {avg_train_loss:.4f}{vad_summary} | "
+            f"Train: {avg_train_loss:.4f}{loss_summary} | "
             f"Valid: {avg_valid_loss:.4f} {improvement_marker}| "
             f"Best: {best_valid_loss:.4f} | "
             f"{samples_processed:,} samples @ {epoch_throughput:.0f}/s | "
@@ -2243,6 +3036,14 @@ def train(
             print(
                 f"  VAD stats: p_ref={avg_train_p_ref:.2f} | "
                 f"p_out={avg_train_p_out:.2f} | gate={avg_train_gate:.0f}%"
+            )
+        if use_awesome_loss and verbose:
+            print(
+                "  Awesome stats: "
+                f"mask={avg_train_mask_mean:.2f} (hi {avg_train_mask_high:.0f}%, lo {avg_train_mask_low:.0f}%) | "
+                f"proxy={avg_train_proxy:.2f} ratio={avg_train_speech_ratio:.2f} | "
+                f"music_gate={avg_train_music_gate:.2f} music={avg_train_musicness:.2f} | "
+                f"mod={avg_train_mod:.2f} e_boost={avg_train_energy_boost:.2f} snr_boost={avg_train_snr_boost:.2f}"
             )
 
         # ====== End-of-Epoch Checkpointing (authoritative completion) ======
@@ -2295,7 +3096,7 @@ def train(
     if last_valid_epoch == final_epoch and last_valid_loss is not None:
         final_valid_loss = last_valid_loss
     else:
-        final_valid_loss = run_validation("  Final validation")
+        final_valid_loss = run_validation("  Final validation", do_vad_eval=vad_eval_enabled)
         last_valid_loss = final_valid_loss
         last_valid_epoch = final_epoch
 
@@ -2576,6 +3377,36 @@ def main():
         help="Override noise gain range in dB (e.g., --noise-gain-range -12 12)",
     )
     parser.add_argument(
+        "--dynamic-loss",
+        type=str,
+        choices=["baseline", "awesome"],
+        default="baseline",
+        help="Dynamic loss to use: 'baseline' (spectral + legacy VAD) or 'awesome'",
+    )
+    parser.add_argument(
+        "--awesome-loss-weight",
+        type=float,
+        default=0.4,
+        help="Weight for awesome speech-preserving contrastive loss",
+    )
+    parser.add_argument(
+        "--awesome-mask-sharpness",
+        type=float,
+        default=6.0,
+        help="Sharpness for speech/noise dominance mask in awesome loss",
+    )
+    parser.add_argument(
+        "--awesome-warmup-steps",
+        type=int,
+        default=0,
+        help="Warmup steps for ramping awesome loss weight",
+    )
+    parser.add_argument(
+        "--no-vad-proxy",
+        action="store_true",
+        help="Disable cheap VAD proxy gating in awesome loss",
+    )
+    parser.add_argument(
         "--vad-loss-weight",
         type=float,
         default=0.05,
@@ -2640,6 +3471,37 @@ def main():
         type=float,
         default=1.0,
         help="Z-score slope for VAD sigmoid",
+    )
+    parser.add_argument(
+        "--vad-eval-mode",
+        type=str,
+        choices=["auto", "proxy", "silero", "off"],
+        default="auto",
+        help="VAD eval mode for periodic metrics (auto enables proxy for awesome loss)",
+    )
+    parser.add_argument(
+        "--vad-eval-every",
+        type=int,
+        default=1,
+        help="Evaluate VAD metrics every N epochs",
+    )
+    parser.add_argument(
+        "--vad-eval-batches",
+        type=int,
+        default=8,
+        help="Number of validation batches used for VAD metrics",
+    )
+    parser.add_argument(
+        "--vad-train-prob",
+        type=float,
+        default=0.0,
+        help="Probability of applying sparse VAD regularizer per batch (0 disables)",
+    )
+    parser.add_argument(
+        "--vad-train-every-steps",
+        type=int,
+        default=0,
+        help="Apply sparse VAD regularizer every N steps (0 disables)",
     )
     parser.add_argument(
         "--max-train-batches",
@@ -2744,6 +3606,11 @@ def main():
         p_extreme_snr=args.p_extreme_snr,
         speech_gain_range=tuple(args.speech_gain_range) if args.speech_gain_range else None,
         noise_gain_range=tuple(args.noise_gain_range) if args.noise_gain_range else None,
+        dynamic_loss=cast(Literal["baseline", "awesome"], args.dynamic_loss),
+        awesome_loss_weight=args.awesome_loss_weight,
+        awesome_mask_sharpness=args.awesome_mask_sharpness,
+        awesome_warmup_steps=args.awesome_warmup_steps,
+        vad_proxy_enabled=not args.no_vad_proxy,
         vad_loss_weight=args.vad_loss_weight,
         vad_threshold=args.vad_threshold,
         vad_margin=args.vad_margin,
@@ -2755,6 +3622,11 @@ def main():
         vad_band_high_hz=args.vad_band_high,
         vad_z_threshold=args.vad_z_threshold,
         vad_z_slope=args.vad_z_slope,
+        vad_eval_mode=cast(Literal["auto", "proxy", "silero", "off"], args.vad_eval_mode),
+        vad_eval_every=args.vad_eval_every,
+        vad_eval_batches=args.vad_eval_batches,
+        vad_train_prob=args.vad_train_prob,
+        vad_train_every_steps=args.vad_train_every_steps,
         eval_sisdr=args.eval_sisdr,
         check_chkpts=args.check_chkpts,
         max_train_batches=args.max_train_batches,
