@@ -360,6 +360,11 @@ def spectral_loss(
     pred_real, pred_imag = pred
     target_real, target_imag = target
 
+    pred_real = pred_real.astype(mx.float32)
+    pred_imag = pred_imag.astype(mx.float32)
+    target_real = target_real.astype(mx.float32)
+    target_imag = target_imag.astype(mx.float32)
+
     # Magnitude loss
     pred_mag = mx.sqrt(pred_real**2 + pred_imag**2 + 1e-8)
     target_mag = mx.sqrt(target_real**2 + target_imag**2 + 1e-8)

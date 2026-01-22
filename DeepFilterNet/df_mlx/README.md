@@ -126,6 +126,26 @@ Optional VAD controls (all optional; defaults are safe):
 --no-vad-proxy
 ```
 
+#### Numeric debug mode (NaN/inf diagnosis)
+
+Use the built-in numeric debugger to find the first non-finite tensor and
+dump a compact snapshot for analysis. Debug mode runs a short, deterministic
+job and disables the compiled training step for better visibility.
+
+```bash
+python -m df_mlx.train_dynamic \
+    --config ./file_lists/config.json \
+    --dynamic-loss awesome \
+    --debug-numerics \
+    --debug-numerics-dump-arrays \
+    --no-fp16
+```
+
+Optional controls:
+- `--debug-numerics-every 1` (check every step)
+- `--nan-skip-batch` (skip optimizer update on non-finite)
+- `--seed 123` (deterministic sampling)
+
 Or specify file lists directly:
 
 ```bash

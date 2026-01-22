@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import math
 import os
 import random
 import re
@@ -99,6 +100,122 @@ _AWESOME_MUSICNESS_THR = 0.55
 _AWESOME_MUSICNESS_WIDTH = 0.15
 _AWESOME_MUSIC_FLUX_THR = 0.08
 _AWESOME_MUSIC_FLUX_WIDTH = 0.05
+_AWESOME_MASK_LOGIT_CLAMP = 30.0
+_VAD_LOGIT_CLAMP = 20.0
+
+
+@dataclass
+class NumericDebugConfig:
+    enabled: bool = False
+    fail_fast: bool = True
+    skip_batch: bool = False
+    every: int = 1
+    dump_dir: Path | None = None
+    dump_arrays: bool = False
+    max_dumps: int = 5
+    check_grads: bool = True
+
+
+class NumericDebugger:
+    """Helper for fail-fast finite checks and debug dumps."""
+
+    def __init__(self, config: NumericDebugConfig):
+        self.config = config
+        self.dump_count = 0
+
+    def _should_check(self, ctx: dict[str, Any] | None) -> bool:
+        if not self.config.enabled:
+            return False
+        if ctx is None:
+            return True
+        step = ctx.get("global_step")
+        if isinstance(step, int):
+            return (step % max(self.config.every, 1)) == 0
+        return True
+
+    def _dump_stats(self, name: str, tensor: mx.array, ctx: dict[str, Any] | None) -> None:
+        if self.config.dump_dir is None:
+            return
+        if self.dump_count >= self.config.max_dumps:
+            return
+        self.config.dump_dir.mkdir(parents=True, exist_ok=True)
+        arr = np.asarray(tensor, dtype=np.float32)
+        finite_mask = np.isfinite(arr)
+        finite_vals = arr[finite_mask]
+        if finite_vals.size > 0:
+            stats = {
+                "min": float(finite_vals.min()),
+                "max": float(finite_vals.max()),
+                "mean": float(finite_vals.mean()),
+            }
+        else:
+            stats = {"min": None, "max": None, "mean": None}
+        dump = {
+            "name": name,
+            "shape": list(arr.shape),
+            "dtype": str(arr.dtype),
+            "finite_pct": float(100.0 * finite_mask.mean()),
+            "nonfinite_count": int(arr.size - finite_mask.sum()),
+            "stats": stats,
+            "context": ctx or {},
+        }
+        out_path = self.config.dump_dir / f"nonfinite_{self.dump_count:03d}_{name}.json"
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(dump, f, indent=2)
+        if self.config.dump_arrays:
+            slices = tuple(slice(0, min(dim, 8)) for dim in arr.shape)
+            sample = arr[slices]
+            np.savez_compressed(
+                self.config.dump_dir / f"nonfinite_{self.dump_count:03d}_{name}.npz",
+                sample=sample,
+            )
+        self.dump_count += 1
+
+    def check(self, name: str, tensor: mx.array, ctx: dict[str, Any] | None = None) -> bool:
+        if not self._should_check(ctx):
+            return True
+        is_finite = mx.isfinite(tensor)
+        if bool(mx.all(is_finite)):
+            return True
+        self._dump_stats(name, tensor, ctx)
+        message = f"Non-finite detected in {name}"
+        if ctx:
+            message += f" | ctx={ctx}"
+        if self.config.fail_fast:
+            raise FloatingPointError(message)
+        return False
+
+    def check_tree(self, name: str, tree: Any, ctx: dict[str, Any] | None = None) -> bool:
+        if not self._should_check(ctx) or not self.config.check_grads:
+            return True
+        from mlx.utils import tree_flatten
+
+        all_finite = True
+        for key, value in tree_flatten(tree):
+            if value is None:
+                continue
+            if not bool(mx.all(mx.isfinite(value))):
+                key_name = f"{name}.{key}"
+                self._dump_stats(key_name, value, ctx)
+                all_finite = False
+                if self.config.fail_fast:
+                    message = f"Non-finite detected in {key_name}"
+                    if ctx:
+                        message += f" | ctx={ctx}"
+                    raise FloatingPointError(message)
+        return all_finite
+
+
+def _tree_all_finite(tree: Any) -> bool:
+    """Fast tree-wide finite check (no dumps)."""
+    from mlx.utils import tree_flatten
+
+    for _, value in tree_flatten(tree):
+        if value is None:
+            continue
+        if not bool(mx.all(mx.isfinite(value))):
+            return False
+    return True
 
 
 def _build_speech_band_mask(
@@ -128,8 +245,14 @@ def _compute_vad_probs(
     vad_z_threshold: float,
     vad_z_slope: float,
     eps: float = _EPS,
+    debug: NumericDebugger | None = None,
+    debug_ctx: dict[str, Any] | None = None,
 ) -> tuple[mx.array, mx.array]:
     """Compute soft VAD probabilities from log-band energy (z-scored per utterance)."""
+    clean_real = clean_real.astype(mx.float32)
+    clean_imag = clean_imag.astype(mx.float32)
+    out_real = out_real.astype(mx.float32)
+    out_imag = out_imag.astype(mx.float32)
     clean_power = clean_real**2 + clean_imag**2
     out_power = out_real**2 + out_imag**2
 
@@ -140,12 +263,25 @@ def _compute_vad_probs(
     mu = mx.mean(log_clean, axis=1, keepdims=True)
     sigma = mx.sqrt(mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True) + eps)
 
-    z_ref = (log_clean - mu) / (sigma + eps)
-    z_out = (mx.log10(out_band + eps) - mu) / (sigma + eps)
+    z_ref_raw = (log_clean - mu) / (sigma + eps)
+    z_out_raw = (mx.log10(out_band + eps) - mu) / (sigma + eps)
+    z_ref = mx.clip(z_ref_raw, -_VAD_LOGIT_CLAMP, _VAD_LOGIT_CLAMP)
+    z_out = mx.clip(z_out_raw, -_VAD_LOGIT_CLAMP, _VAD_LOGIT_CLAMP)
 
     z_slope = max(vad_z_slope, 1e-3)
     p_ref = mx.sigmoid((z_ref - vad_z_threshold) / z_slope)
     p_out = mx.sigmoid((z_out - vad_z_threshold) / z_slope)
+    if debug is not None:
+        debug.check("vad.clean_band", clean_band, debug_ctx)
+        debug.check("vad.out_band", out_band, debug_ctx)
+        debug.check("vad.log_clean", log_clean, debug_ctx)
+        debug.check("vad.sigma", sigma, debug_ctx)
+        debug.check("vad.z_ref_raw", z_ref_raw, debug_ctx)
+        debug.check("vad.z_out_raw", z_out_raw, debug_ctx)
+        debug.check("vad.z_ref", z_ref, debug_ctx)
+        debug.check("vad.z_out", z_out, debug_ctx)
+        debug.check("vad.p_ref", p_ref, debug_ctx)
+        debug.check("vad.p_out", p_out, debug_ctx)
     return p_ref, p_out
 
 
@@ -163,16 +299,13 @@ def _compute_vad_loss(
     vad_snr_gate_width: float,
     vad_z_threshold: float,
     vad_z_slope: float,
+    debug: NumericDebugger | None = None,
+    debug_ctx: dict[str, Any] | None = None,
 ) -> tuple[mx.array, mx.array, mx.array, mx.array]:
     """Compute soft VAD loss and diagnostics.
 
     Penalizes decreases in VAD probability relative to reference speech.
     """
-    clean_real = clean_real.astype(mx.float32)
-    clean_imag = clean_imag.astype(mx.float32)
-    out_real = out_real.astype(mx.float32)
-    out_imag = out_imag.astype(mx.float32)
-
     p_ref, p_out = _compute_vad_probs(
         clean_real,
         clean_imag,
@@ -182,6 +315,8 @@ def _compute_vad_loss(
         band_bins,
         vad_z_threshold,
         vad_z_slope,
+        debug=debug,
+        debug_ctx=debug_ctx,
     )
 
     speech_gate = mx.clip((p_ref - vad_threshold) / (1.0 - vad_threshold + _EPS), 0.0, 1.0)
@@ -190,6 +325,11 @@ def _compute_vad_loss(
     gate = mx.stop_gradient(speech_gate * snr_gate)
 
     vad_loss = mx.mean(mx.maximum(p_ref - p_out - vad_margin, 0.0) * gate)
+    if debug is not None:
+        debug.check("vad.speech_gate", speech_gate, debug_ctx)
+        debug.check("vad.snr_gate", snr_gate, debug_ctx)
+        debug.check("vad.gate", gate, debug_ctx)
+        debug.check("vad.loss", vad_loss, debug_ctx)
     return vad_loss, p_ref, p_out, gate
 
 
@@ -202,8 +342,14 @@ def _compute_speech_band_logmag_loss(
     band_bins: float,
     gate: mx.array,
     eps: float = _EPS,
+    debug: NumericDebugger | None = None,
+    debug_ctx: dict[str, Any] | None = None,
 ) -> mx.array:
     """Compute speech-band log-magnitude L1 loss weighted by VAD gate."""
+    clean_real = clean_real.astype(mx.float32)
+    clean_imag = clean_imag.astype(mx.float32)
+    out_real = out_real.astype(mx.float32)
+    out_imag = out_imag.astype(mx.float32)
     clean_mag = mx.sqrt(clean_real**2 + clean_imag**2 + eps)
     out_mag = mx.sqrt(out_real**2 + out_imag**2 + eps)
 
@@ -213,11 +359,18 @@ def _compute_speech_band_logmag_loss(
     clean_band = mx.sum(clean_log * band_mask, axis=-1) / (band_bins + eps)
     out_band = mx.sum(out_log * band_mask, axis=-1) / (band_bins + eps)
 
-    return mx.mean(mx.abs(out_band - clean_band) * gate)
+    loss = mx.mean(mx.abs(out_band - clean_band) * gate)
+    if debug is not None:
+        debug.check("speech_band.clean_band", clean_band, debug_ctx)
+        debug.check("speech_band.out_band", out_band, debug_ctx)
+        debug.check("speech_band.loss", loss, debug_ctx)
+    return loss
 
 
 def _log1p_mag(real: mx.array, imag: mx.array, eps: float = _EPS) -> mx.array:
     """Compute log1p magnitude for complex STFT."""
+    real = real.astype(mx.float32)
+    imag = imag.astype(mx.float32)
     mag = mx.sqrt(real**2 + imag**2 + eps)
     return mx.log1p(mag)
 
@@ -227,6 +380,8 @@ def _compute_musicness(
     band_mask: mx.array,
     band_bins: float,
     eps: float = _EPS,
+    debug: NumericDebugger | None = None,
+    debug_ctx: dict[str, Any] | None = None,
 ) -> tuple[mx.array, mx.array]:
     """Compute a cheap musicness score and its inverse gate.
 
@@ -234,6 +389,7 @@ def _compute_musicness(
     Returns per-sample musicness and a [0,1] gate (1 = keep speech bias).
     """
     # Spectral flatness over speech band
+    mag = mag.astype(mx.float32)
     log_mag = mx.log(mag + eps)
     mean_log = mx.sum(log_mag * band_mask, axis=-1) / (band_bins + eps)
     geom_mean = mx.exp(mean_log)
@@ -250,7 +406,12 @@ def _compute_musicness(
 
     musicness = mx.clip(tonal_mean * flux_gate, 0.0, 1.0)
     music_gate = 1.0 - mx.sigmoid((musicness - _AWESOME_MUSICNESS_THR) / _AWESOME_MUSICNESS_WIDTH)
-    return musicness.squeeze(-1), music_gate.squeeze(-1)
+    musicness = musicness.squeeze(-1)
+    music_gate = music_gate.squeeze(-1)
+    if debug is not None:
+        debug.check("musicness.score", musicness, debug_ctx)
+        debug.check("musicness.gate", music_gate, debug_ctx)
+    return musicness, music_gate
 
 
 def _compute_proxy_gates(
@@ -267,6 +428,8 @@ def _compute_proxy_gates(
     vad_snr_gate_width: float,
     proxy_enabled: bool,
     eps: float = _EPS,
+    debug: NumericDebugger | None = None,
+    debug_ctx: dict[str, Any] | None = None,
 ) -> tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array, mx.array]:
     """Compute proxy VAD gates and statistics.
 
@@ -279,6 +442,10 @@ def _compute_proxy_gates(
         energy_boost: (B, 1) low-energy boost
         snr_boost: (B, 1) low-SNR boost
     """
+    clean_real = clean_real.astype(mx.float32)
+    clean_imag = clean_imag.astype(mx.float32)
+    noisy_real = noisy_real.astype(mx.float32)
+    noisy_imag = noisy_imag.astype(mx.float32)
     clean_power = clean_real**2 + clean_imag**2
     noise_real = noisy_real - clean_real
     noise_imag = noisy_imag - clean_imag
@@ -291,7 +458,8 @@ def _compute_proxy_gates(
     log_clean = mx.log10(clean_band + eps)
     mu = mx.mean(log_clean, axis=1, keepdims=True)
     sigma = mx.sqrt(mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True) + eps)
-    z_ref = (log_clean - mu) / (sigma + eps)
+    z_ref_raw = (log_clean - mu) / (sigma + eps)
+    z_ref = mx.clip(z_ref_raw, -_VAD_LOGIT_CLAMP, _VAD_LOGIT_CLAMP)
 
     z_slope = max(vad_z_slope, 1e-3)
     p_ref = mx.sigmoid((z_ref - vad_z_threshold) / z_slope)
@@ -308,7 +476,14 @@ def _compute_proxy_gates(
 
     # Musicness gate from noisy magnitude
     noisy_mag = mx.sqrt(noisy_real**2 + noisy_imag**2 + eps)
-    musicness, music_gate = _compute_musicness(noisy_mag, band_mask, band_bins, eps=eps)
+    musicness, music_gate = _compute_musicness(
+        noisy_mag,
+        band_mask,
+        band_bins,
+        eps=eps,
+        debug=debug,
+        debug_ctx=debug_ctx,
+    )
 
     if not proxy_enabled:
         proxy_frame = mx.ones_like(clean_band)
@@ -321,6 +496,15 @@ def _compute_proxy_gates(
         proxy_frame = mx.clip(proxy_frame, 0.0, 5.0)
 
     proxy_frame = mx.stop_gradient(proxy_frame)
+    if debug is not None:
+        debug.check("proxy.z_ref_raw", z_ref_raw, debug_ctx)
+        debug.check("proxy.z_ref", z_ref, debug_ctx)
+        debug.check("proxy.speech_ratio", speech_ratio, debug_ctx)
+        debug.check("proxy.p_ref", p_ref, debug_ctx)
+        debug.check("proxy.mod_energy", mod_energy, debug_ctx)
+        debug.check("proxy.energy_boost", energy_boost, debug_ctx)
+        debug.check("proxy.snr_boost", snr_boost, debug_ctx)
+        debug.check("proxy.frame", proxy_frame, debug_ctx)
     return proxy_frame, speech_ratio, music_gate, musicness, mod_energy, energy_boost, snr_boost
 
 
@@ -341,6 +525,8 @@ def _compute_awesome_losses(
     vad_snr_gate_width: float,
     proxy_enabled: bool,
     eps: float = _EPS,
+    debug: NumericDebugger | None = None,
+    debug_ctx: dict[str, Any] | None = None,
 ) -> tuple[
     mx.array,
     mx.array,
@@ -358,12 +544,22 @@ def _compute_awesome_losses(
     clean_log = _log1p_mag(clean_real, clean_imag, eps=eps)
     out_log = _log1p_mag(out_real, out_imag, eps=eps)
 
-    noise_real = noisy_real - clean_real
-    noise_imag = noisy_imag - clean_imag
+    noise_real = noisy_real.astype(mx.float32) - clean_real.astype(mx.float32)
+    noise_imag = noisy_imag.astype(mx.float32) - clean_imag.astype(mx.float32)
     noise_log = _log1p_mag(noise_real, noise_imag, eps=eps)
 
-    mask = mx.sigmoid(mask_sharpness * (clean_log - noise_log))
+    mask_logits = mx.clip(
+        mask_sharpness * (clean_log - noise_log),
+        -_AWESOME_MASK_LOGIT_CLAMP,
+        _AWESOME_MASK_LOGIT_CLAMP,
+    )
+    mask = mx.sigmoid(mask_logits)
     mask = mx.stop_gradient(mask)
+    if debug is not None:
+        debug.check("awesome.clean_log", clean_log, debug_ctx)
+        debug.check("awesome.noise_log", noise_log, debug_ctx)
+        debug.check("awesome.mask_logits", mask_logits, debug_ctx)
+        debug.check("awesome.mask", mask, debug_ctx)
 
     (
         proxy_frame,
@@ -387,6 +583,8 @@ def _compute_awesome_losses(
         vad_snr_gate_width,
         proxy_enabled,
         eps=eps,
+        debug=debug,
+        debug_ctx=debug_ctx,
     )
 
     proxy_frame = proxy_frame[:, :, None]
@@ -400,6 +598,11 @@ def _compute_awesome_losses(
         smooth_loss = mx.array(0.0)
 
     awesome_loss = speech_loss + noise_loss + _AWESOME_SMOOTH_WEIGHT * smooth_loss
+    if debug is not None:
+        debug.check("awesome.speech_loss", speech_loss, debug_ctx)
+        debug.check("awesome.noise_loss", noise_loss, debug_ctx)
+        debug.check("awesome.smooth_loss", smooth_loss, debug_ctx)
+        debug.check("awesome.loss", awesome_loss, debug_ctx)
 
     return (
         awesome_loss,
@@ -434,6 +637,8 @@ def _compute_vad_reg_loss(
     vad_snr_gate_db: float,
     vad_snr_gate_width: float,
     eps: float = _EPS,
+    debug: NumericDebugger | None = None,
+    debug_ctx: dict[str, Any] | None = None,
 ) -> tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array, mx.array]:
     """Compute sparse VAD regularizer loss gated by speech ratio and musicness.
 
@@ -449,6 +654,8 @@ def _compute_vad_reg_loss(
         vad_z_threshold,
         vad_z_slope,
         eps=eps,
+        debug=debug,
+        debug_ctx=debug_ctx,
     )
 
     vad_decrease = mx.maximum(p_ref - p_out - vad_margin, 0.0)
@@ -467,6 +674,8 @@ def _compute_vad_reg_loss(
         vad_snr_gate_width,
         proxy_enabled=True,
         eps=eps,
+        debug=debug,
+        debug_ctx=debug_ctx,
     )
 
     ratio_gate = mx.sigmoid((speech_ratio - vad_threshold) / 0.1)
@@ -481,6 +690,8 @@ def _compute_vad_reg_loss(
         band_bins,
         gate,
         eps=eps,
+        debug=debug,
+        debug_ctx=debug_ctx,
     )
 
     return (
@@ -1479,6 +1690,14 @@ def train(
     max_train_batches: int | None = None,
     max_valid_batches: int | None = None,
     check_chkpts: bool = False,
+    seed: int | None = None,
+    debug_numerics: bool = False,
+    debug_numerics_fail_fast: bool = True,
+    debug_numerics_every: int = 1,
+    debug_numerics_dump_dir: str | None = None,
+    debug_numerics_dump_arrays: bool = False,
+    debug_numerics_max_dumps: int = 5,
+    nan_skip_batch: bool = False,
 ) -> None:
     """Train DfNet4 model with dynamic on-the-fly mixing.
 
@@ -1544,6 +1763,14 @@ def train(
         max_train_batches: Limit number of train batches per epoch (None = full epoch)
         max_valid_batches: Limit number of validation batches (None = full validation)
         check_chkpts: Validate checkpoints before starting/resuming
+        seed: Optional RNG seed override (sets Python/NumPy/MLX RNGs)
+        debug_numerics: Enable numeric debug mode with finite checks and fail-fast behavior
+        debug_numerics_fail_fast: Raise on first non-finite when debug_numerics enabled
+        debug_numerics_every: Check every N steps in debug mode
+        debug_numerics_dump_dir: Directory for numeric debug dumps (default: checkpoint_dir/debug_numerics)
+        debug_numerics_dump_arrays: Save small tensor slices alongside JSON dumps
+        debug_numerics_max_dumps: Maximum number of non-finite dumps to write
+        nan_skip_batch: Skip optimizer update when loss/grads are non-finite (debug-friendly)
     """
     from df_mlx.config import get_default_config
     from df_mlx.dynamic_dataset import (
@@ -1615,6 +1842,41 @@ def train(
         config.speech_gain_range = speech_gain_range
     if noise_gain_range is not None:
         config.noise_gain_range = noise_gain_range
+
+    # Numeric debug mode overrides (deterministic, short runs)
+    if debug_numerics:
+        if epochs != 1:
+            print(f"  Debug numerics: overriding epochs {epochs} -> 1")
+            epochs = 1
+        if max_train_batches is None:
+            max_train_batches = 50
+        if max_valid_batches is None:
+            max_valid_batches = 10
+        if eval_frequency != 1:
+            print(f"  Debug numerics: overriding eval_frequency {eval_frequency} -> 1")
+            eval_frequency = 1
+        if num_workers != 0:
+            print(f"  Debug numerics: overriding num_workers {num_workers} -> 0")
+            num_workers = 0
+        if prefetch_size != 1:
+            print(f"  Debug numerics: overriding prefetch_size {prefetch_size} -> 1")
+            prefetch_size = 1
+        if use_mlx_data:
+            print("  Debug numerics: disabling mlx-data for deterministic loading")
+            use_mlx_data = False
+
+    # RNG seeding (optional, default only in debug mode)
+    if seed is None and debug_numerics:
+        seed = getattr(config, "seed", 42)
+    if seed is not None:
+        config.seed = seed
+        random.seed(seed)
+        np.random.seed(seed)
+        mx.random.seed(seed)
+        print(f"  RNG seed set to {seed}")
+
+    # Keep dataset config aligned with CLI worker setting
+    config.num_workers = num_workers
 
     # Create dataset (this populates config.*_files from cache index if using cache)
     print("\nInitializing dynamic dataset...")
@@ -1728,6 +1990,11 @@ def train(
         "eval_sisdr": eval_sisdr,
         "max_train_batches": max_train_batches,
         "max_valid_batches": max_valid_batches,
+        "seed": seed,
+        "debug_numerics": debug_numerics,
+        "debug_numerics_fail_fast": debug_numerics_fail_fast,
+        "debug_numerics_every": debug_numerics_every,
+        "nan_skip_batch": nan_skip_batch,
     }
 
     dataset.set_split("train")
@@ -1745,6 +2012,28 @@ def train(
     # Create checkpoint directory early (needed for data checkpoint path)
     ckpt_dir = Path(checkpoint_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    debug_dump_dir = None
+    if debug_numerics:
+        debug_dump_dir = Path(debug_numerics_dump_dir) if debug_numerics_dump_dir else ckpt_dir / "debug_numerics"
+        debug_cfg = NumericDebugConfig(
+            enabled=True,
+            fail_fast=debug_numerics_fail_fast and not nan_skip_batch,
+            skip_batch=nan_skip_batch,
+            every=max(debug_numerics_every, 1),
+            dump_dir=debug_dump_dir,
+            dump_arrays=debug_numerics_dump_arrays,
+            max_dumps=debug_numerics_max_dumps,
+            check_grads=True,
+        )
+        debugger = NumericDebugger(debug_cfg)
+        print(
+            "  Debug numerics: enabled "
+            f"(fail_fast={'on' if debug_cfg.fail_fast else 'off'}, "
+            f"every={debug_cfg.every}, dump_dir={debug_dump_dir})"
+        )
+    else:
+        debugger = None
 
     validation_report = None
     if check_chkpts:
@@ -2023,6 +2312,96 @@ def train(
 
     loss_and_grad = nn.value_and_grad(model, loss_fn)
 
+    def _diagnose_nonfinite(
+        noisy_real: mx.array,
+        noisy_imag: mx.array,
+        feat_erb: mx.array,
+        feat_spec: mx.array,
+        clean_real: mx.array,
+        clean_imag: mx.array,
+        snr: mx.array,
+        debug_ctx: dict[str, Any],
+    ) -> None:
+        """Run a diagnostic forward pass with detailed finite checks."""
+        if debugger is None:
+            return
+        out = model((noisy_real, noisy_imag), feat_erb, feat_spec)
+        debugger.check("model.out_real", out[0], debug_ctx)
+        debugger.check("model.out_imag", out[1], debug_ctx)
+        spec_loss = spectral_loss(out, (clean_real, clean_imag))
+        debugger.check("spec_loss", spec_loss, debug_ctx)
+        if use_awesome_loss:
+            _compute_awesome_losses(
+                noisy_real,
+                noisy_imag,
+                clean_real,
+                clean_imag,
+                out[0],
+                out[1],
+                snr,
+                vad_band_mask,
+                vad_band_bins,
+                awesome_mask_sharpness,
+                vad_z_threshold,
+                vad_z_slope,
+                vad_snr_gate_db,
+                vad_snr_gate_width,
+                vad_proxy_enabled,
+                debug=debugger,
+                debug_ctx=debug_ctx,
+            )
+        if use_vad_loss:
+            _compute_vad_loss(
+                clean_real,
+                clean_imag,
+                out[0],
+                out[1],
+                snr,
+                vad_band_mask,
+                vad_band_bins,
+                vad_threshold,
+                vad_margin,
+                vad_snr_gate_db,
+                vad_snr_gate_width,
+                vad_z_threshold,
+                vad_z_slope,
+                debug=debugger,
+                debug_ctx=debug_ctx,
+            )
+            if vad_speech_loss_weight > 0:
+                gate = mx.ones((clean_real.shape[0], clean_real.shape[1]))
+                _compute_speech_band_logmag_loss(
+                    clean_real,
+                    clean_imag,
+                    out[0],
+                    out[1],
+                    vad_band_mask,
+                    vad_band_bins,
+                    gate,
+                    debug=debugger,
+                    debug_ctx=debug_ctx,
+                )
+        if use_vad_train_reg:
+            _compute_vad_reg_loss(
+                clean_real,
+                clean_imag,
+                noisy_real,
+                noisy_imag,
+                out[0],
+                out[1],
+                snr,
+                vad_band_mask,
+                vad_band_bins,
+                vad_threshold,
+                vad_margin,
+                vad_z_threshold,
+                vad_z_slope,
+                vad_snr_gate_db,
+                vad_snr_gate_width,
+                debug=debugger,
+                debug_ctx=debug_ctx,
+            )
+
     # Compiled training step for performance optimization
     # Captures model and optimizer state for graph tracing
     state = [model.state, optimizer.state]
@@ -2151,12 +2530,29 @@ def train(
             feat_erb = batch["feat_erb"]
             feat_spec = batch["feat_spec"]
             snr = batch["snr"]
+            debug_ctx = {
+                "phase": "valid",
+                "epoch": epoch,
+                "batch": batch_idx,
+                "global_step": global_step,
+            }
+            if debugger is not None:
+                debugger.check("batch.noisy_real", noisy_real, debug_ctx)
+                debugger.check("batch.noisy_imag", noisy_imag, debug_ctx)
+                debugger.check("batch.clean_real", clean_real, debug_ctx)
+                debugger.check("batch.clean_imag", clean_imag, debug_ctx)
+                debugger.check("batch.feat_erb", feat_erb, debug_ctx)
+                debugger.check("batch.feat_spec", feat_spec, debug_ctx)
+                debugger.check("batch.snr", snr, debug_ctx)
 
             # Model expects spec as tuple (real, imag)
             noisy_spec = (noisy_real, noisy_imag)
             target_spec = (clean_real, clean_imag)
 
             out = model(noisy_spec, feat_erb, feat_spec)
+            if debugger is not None:
+                debugger.check("model.out_real", out[0], debug_ctx)
+                debugger.check("model.out_imag", out[1], debug_ctx)
             spec_loss = spectral_loss(out, target_spec)
 
             awesome_loss = mx.array(0.0)
@@ -2202,6 +2598,8 @@ def train(
                     vad_snr_gate_db,
                     vad_snr_gate_width,
                     vad_proxy_enabled,
+                    debug=debugger,
+                    debug_ctx=debug_ctx,
                 )
 
             if use_vad_loss:
@@ -2219,6 +2617,8 @@ def train(
                     vad_snr_gate_width,
                     vad_z_threshold,
                     vad_z_slope,
+                    debug=debugger,
+                    debug_ctx=debug_ctx,
                 )
                 speech_loss = mx.array(0.0)
                 if vad_speech_loss_weight > 0:
@@ -2230,6 +2630,8 @@ def train(
                         vad_band_mask,
                         vad_band_bins,
                         gate,
+                        debug=debugger,
+                        debug_ctx=debug_ctx,
                     )
             else:
                 vad_loss = mx.array(0.0)
@@ -2256,6 +2658,8 @@ def train(
                     vad_z_slope,
                     vad_snr_gate_db,
                     vad_snr_gate_width,
+                    debug=debugger,
+                    debug_ctx=debug_ctx,
                 )
 
             awesome_weight_val = awesome_loss_weight
@@ -2365,7 +2769,10 @@ def train(
                 clean_wav = istft_fn(target_spec, n_fft=config.fft_size, hop_length=config.hop_size)
                 out_wav = istft_fn(out, n_fft=config.fft_size, hop_length=config.hop_size)
                 sisdr_val = float(si_sdr_fn(out_wav, clean_wav))
-                valid_sisdr += sisdr_val
+                if math.isfinite(sisdr_val):
+                    valid_sisdr += sisdr_val
+                else:
+                    print("⚠️  SI-SDR non-finite; skipping metric for this batch")
 
             valid_pbar.set_postfix(
                 loss=f"{loss_val:.4f}",
@@ -2461,8 +2868,10 @@ def train(
         return valid_loss / max(num_valid_batches, 1)
 
     # Flag to use compiled step (can be disabled for debugging)
-    use_compiled_step = True
+    use_compiled_step = not (debug_numerics or nan_skip_batch)
     print(f"  Using compiled training step: {use_compiled_step}")
+    if nan_skip_batch:
+        print("  nan-skip-batch: enabled (will skip updates on non-finite loss/grads)")
 
     # Register SIGINT handler for graceful shutdown
     _register_sigint_handler(model, optimizer, ckpt_dir, train_config, last_completed_epoch=last_completed_epoch)
@@ -2520,6 +2929,14 @@ def train(
         train_p_ref = 0.0
         train_p_out = 0.0
         train_gate_pct = 0.0
+        train_mask_logit_min = float("inf")
+        train_mask_logit_max = float("-inf")
+        train_mask_clip_rate = 0.0
+        train_eps_clean_rate = 0.0
+        train_eps_noise_rate = 0.0
+        train_vad_clip_ref = 0.0
+        train_vad_clip_out = 0.0
+        num_debug_logs = 0
         num_vad_logs = 0
         num_awesome_logs = 0
         num_train_batches = 0
@@ -2593,6 +3010,21 @@ def train(
             feat_spec = batch["feat_spec"]
             snr = batch["snr"]
 
+            debug_ctx = {
+                "phase": "train",
+                "epoch": epoch,
+                "batch": batch_idx,
+                "global_step": global_step,
+            }
+            if debugger is not None:
+                debugger.check("batch.noisy_real", noisy_real, debug_ctx)
+                debugger.check("batch.noisy_imag", noisy_imag, debug_ctx)
+                debugger.check("batch.clean_real", clean_real, debug_ctx)
+                debugger.check("batch.clean_imag", clean_imag, debug_ctx)
+                debugger.check("batch.feat_erb", feat_erb, debug_ctx)
+                debugger.check("batch.feat_spec", feat_spec, debug_ctx)
+                debugger.check("batch.snr", snr, debug_ctx)
+
             # Convert to FP16 if enabled (mixed precision training)
             if use_fp16:
                 noisy_real = noisy_real.astype(mx.float16)
@@ -2655,7 +3087,7 @@ def train(
                 should_sync = (batch_idx + 1) % eval_frequency == 0
                 if should_sync:
                     mx.eval(state)
-                grad_norm = 0.0  # Not tracked in compiled step
+                grad_norm = float("nan")  # Not tracked in compiled step
             else:
                 # Standard training step
                 loss, grads = loss_and_grad(
@@ -2672,19 +3104,55 @@ def train(
                     awesome_weight_mx,
                     vad_reg_weight_mx,
                 )
+                loss_finite = bool(mx.all(mx.isfinite(loss)))
+                grads_finite = _tree_all_finite(grads) if (debugger is not None or nan_skip_batch) else True
+                if debugger is not None and not loss_finite:
+                    _diagnose_nonfinite(
+                        noisy_real,
+                        noisy_imag,
+                        feat_erb,
+                        feat_spec,
+                        clean_real,
+                        clean_imag,
+                        snr,
+                        debug_ctx,
+                    )
+                    debugger.check("train.loss", loss, debug_ctx)
+                if debugger is not None and not grads_finite:
+                    _diagnose_nonfinite(
+                        noisy_real,
+                        noisy_imag,
+                        feat_erb,
+                        feat_spec,
+                        clean_real,
+                        clean_imag,
+                        snr,
+                        debug_ctx,
+                    )
+                    debugger.check_tree("train.grads", grads, debug_ctx)
+
+                skip_update = False
+                if nan_skip_batch:
+                    if not loss_finite or not grads_finite:
+                        skip_update = True
+                        print(
+                            "⚠️  Non-finite detected; skipping optimizer update "
+                            f"(loss_finite={loss_finite}, grads_finite={grads_finite})"
+                        )
                 # Only sync periodically
                 should_sync = (batch_idx + 1) % eval_frequency == 0
                 if should_sync:
                     mx.eval(loss)
 
-                # Gradient clipping (returns clipped grads and norm as MLX array)
-                if max_grad_norm > 0:
-                    grads, grad_norm_arr = clip_grad_norm(grads, max_grad_norm)
-                    if should_sync:
-                        grad_norm = float(grad_norm_arr)
+                if not skip_update:
+                    # Gradient clipping (returns clipped grads and norm as MLX array)
+                    if max_grad_norm > 0:
+                        grads, grad_norm_arr = clip_grad_norm(grads, max_grad_norm)
+                        if should_sync:
+                            grad_norm = float(grad_norm_arr)
 
-                # Update parameters
-                optimizer.update(model, grads)
+                    # Update parameters
+                    optimizer.update(model, grads)
 
                 # Only sync periodically for better throughput
                 if should_sync:
@@ -2698,6 +3166,12 @@ def train(
             # Only convert loss to float when synced (avoids blocking)
             if should_sync:
                 loss_val = float(loss)
+                if not math.isfinite(loss_val):
+                    raise FloatingPointError(
+                        "Non-finite loss detected "
+                        f"(epoch={epoch}, batch={batch_idx}, step={global_step}). "
+                        "Re-run with --debug-numerics for detailed diagnostics."
+                    )
                 train_loss += loss_val * eval_frequency  # Approximate accumulated loss
             num_train_batches += 1
             samples_processed += current_batch_size
@@ -2750,6 +3224,9 @@ def train(
                 if use_vad_loss or use_awesome_loss or use_vad_train_reg:
                     # Extra forward pass for component logging (only on sync steps)
                     out = model((noisy_real, noisy_imag), feat_erb, feat_spec)
+                    if debugger is not None:
+                        debugger.check("model.out_real", out[0], debug_ctx)
+                        debugger.check("model.out_imag", out[1], debug_ctx)
                     spec_loss = spectral_loss(out, (clean_real, clean_imag))
                     spec_loss_val = float(spec_loss)
                     train_spec_loss += spec_loss_val * eval_frequency
@@ -2769,6 +3246,8 @@ def train(
                         vad_snr_gate_width,
                         vad_z_threshold,
                         vad_z_slope,
+                        debug=debugger,
+                        debug_ctx=debug_ctx,
                     )
                     speech_loss = mx.array(0.0)
                     if vad_speech_loss_weight > 0:
@@ -2780,6 +3259,8 @@ def train(
                             vad_band_mask,
                             vad_band_bins,
                             gate,
+                            debug=debugger,
+                            debug_ctx=debug_ctx,
                         )
                     vad_loss_val = float(vad_loss)
                     speech_loss_val = float(speech_loss)
@@ -2793,6 +3274,21 @@ def train(
                     train_p_out += p_out_mean
                     train_gate_pct += gate_pct
                     num_vad_logs += 1
+
+                    if debug_numerics:
+                        clean_power_dbg = clean_real.astype(mx.float32) ** 2 + clean_imag.astype(mx.float32) ** 2
+                        out_power_dbg = out[0].astype(mx.float32) ** 2 + out[1].astype(mx.float32) ** 2
+                        clean_band_dbg = mx.sum(clean_power_dbg * vad_band_mask, axis=-1) / (vad_band_bins + _EPS)
+                        out_band_dbg = mx.sum(out_power_dbg * vad_band_mask, axis=-1) / (vad_band_bins + _EPS)
+                        log_clean_dbg = mx.log10(clean_band_dbg + _EPS)
+                        mu_dbg = mx.mean(log_clean_dbg, axis=1, keepdims=True)
+                        sigma_dbg = mx.sqrt(mx.mean((log_clean_dbg - mu_dbg) ** 2, axis=1, keepdims=True) + _EPS)
+                        z_ref_dbg = (log_clean_dbg - mu_dbg) / (sigma_dbg + _EPS)
+                        z_out_dbg = (mx.log10(out_band_dbg + _EPS) - mu_dbg) / (sigma_dbg + _EPS)
+                        clip_ref = 100.0 * float(mx.mean(mx.where(mx.abs(z_ref_dbg) > _VAD_LOGIT_CLAMP, 1.0, 0.0)))
+                        clip_out = 100.0 * float(mx.mean(mx.where(mx.abs(z_out_dbg) > _VAD_LOGIT_CLAMP, 1.0, 0.0)))
+                        train_vad_clip_ref += clip_ref
+                        train_vad_clip_out += clip_out
 
                 if use_awesome_loss:
                     (
@@ -2824,6 +3320,8 @@ def train(
                         vad_snr_gate_db,
                         vad_snr_gate_width,
                         vad_proxy_enabled,
+                        debug=debugger,
+                        debug_ctx=debug_ctx,
                     )
                     awesome_loss_val = float(awesome_loss)
                     awesome_speech_val = float(awesome_speech)
@@ -2857,6 +3355,30 @@ def train(
                     train_snr_boost += snr_boost_mean
                     num_awesome_logs += 1
 
+                    if debug_numerics:
+                        clean_power_dbg = clean_real.astype(mx.float32) ** 2 + clean_imag.astype(mx.float32) ** 2
+                        noise_real_dbg = noisy_real.astype(mx.float32) - clean_real.astype(mx.float32)
+                        noise_imag_dbg = noisy_imag.astype(mx.float32) - clean_imag.astype(mx.float32)
+                        noise_power_dbg = noise_real_dbg**2 + noise_imag_dbg**2
+                        clean_band_dbg = mx.sum(clean_power_dbg * vad_band_mask, axis=-1) / (vad_band_bins + _EPS)
+                        noise_band_dbg = mx.sum(noise_power_dbg * vad_band_mask, axis=-1) / (vad_band_bins + _EPS)
+                        mask_logits_raw = awesome_mask_sharpness * (
+                            _log1p_mag(clean_real, clean_imag) - _log1p_mag(noise_real_dbg, noise_imag_dbg)
+                        )
+                        mask_logit_min = float(mx.min(mask_logits_raw))
+                        mask_logit_max = float(mx.max(mask_logits_raw))
+                        mask_clip_rate = 100.0 * float(
+                            mx.mean(mx.where(mx.abs(mask_logits_raw) > _AWESOME_MASK_LOGIT_CLAMP, 1.0, 0.0))
+                        )
+                        clean_eps_rate = 100.0 * float(mx.mean(mx.where(clean_band_dbg <= _EPS, 1.0, 0.0)))
+                        noise_eps_rate = 100.0 * float(mx.mean(mx.where(noise_band_dbg <= _EPS, 1.0, 0.0)))
+                        train_mask_logit_min = min(train_mask_logit_min, mask_logit_min)
+                        train_mask_logit_max = max(train_mask_logit_max, mask_logit_max)
+                        train_mask_clip_rate += mask_clip_rate
+                        train_eps_clean_rate += clean_eps_rate
+                        train_eps_noise_rate += noise_eps_rate
+                        num_debug_logs += 1
+
                 if use_vad_train_reg and apply_vad_reg:
                     vad_reg_loss, vad_dec, gate, _, _, _, _ = _compute_vad_reg_loss(
                         clean_real,
@@ -2874,6 +3396,8 @@ def train(
                         vad_z_slope,
                         vad_snr_gate_db,
                         vad_snr_gate_width,
+                        debug=debugger,
+                        debug_ctx=debug_ctx,
                     )
                     vad_reg_loss_val = float(vad_reg_loss)
                     train_vad_reg_loss += vad_reg_loss_val * eval_frequency
@@ -2897,6 +3421,7 @@ def train(
                         sync=f"1/{eval_frequency}",
                     )
                 else:
+                    grad_display = f"{grad_norm:.2f}" if math.isfinite(grad_norm) else "n/a"
                     train_pbar.set_postfix(
                         loss=f"{loss_val:.4f}",
                         avg=f"{train_loss / num_train_batches:.4f}",
@@ -2909,7 +3434,7 @@ def train(
                         gate=f"{gate_pct:.0f}%" if use_vad_loss else "0%",
                         vad_reg=f"{vad_reg_loss_val:.4f}" if use_vad_train_reg else "0.0000",
                         lr=f"{lr:.1e}",
-                        grad=f"{grad_norm:.2f}",
+                        grad=grad_display,
                         speed=f"{samples_per_sec:.0f}s/s",
                     )
 
@@ -3100,6 +3625,22 @@ def train(
                 f"music_gate={avg_train_music_gate:.2f} music={avg_train_musicness:.2f} | "
                 f"mod={avg_train_mod:.2f} e_boost={avg_train_energy_boost:.2f} snr_boost={avg_train_snr_boost:.2f}"
             )
+        if debug_numerics:
+            parts = []
+            if use_awesome_loss and num_debug_logs > 0:
+                avg_mask_clip = train_mask_clip_rate / num_debug_logs
+                avg_eps_clean = train_eps_clean_rate / num_debug_logs
+                avg_eps_noise = train_eps_noise_rate / num_debug_logs
+                parts.append(
+                    f"mask_logit=[{train_mask_logit_min:.1f},{train_mask_logit_max:.1f}] "
+                    f"clip={avg_mask_clip:.1f}% eps_clean={avg_eps_clean:.1f}% eps_noise={avg_eps_noise:.1f}%"
+                )
+            if use_vad_loss and num_vad_logs > 0:
+                avg_vad_clip_ref = train_vad_clip_ref / num_vad_logs
+                avg_vad_clip_out = train_vad_clip_out / num_vad_logs
+                parts.append(f"vad_clip_ref={avg_vad_clip_ref:.1f}% vad_clip_out={avg_vad_clip_out:.1f}%")
+            if parts:
+                print("  Debug numerics: " + " | ".join(parts))
 
         # ====== End-of-Epoch Checkpointing (authoritative completion) ======
         ckpt_path = ckpt_dir / f"epoch_{epoch + 1:03d}.safetensors"
@@ -3599,6 +4140,50 @@ def main():
         help="Validate checkpoints and metadata before starting/resuming",
     )
     parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Optional RNG seed override (enables deterministic sampling)",
+    )
+    parser.add_argument(
+        "--debug-numerics",
+        action="store_true",
+        help="Enable numeric debug mode (fail-fast finite checks, short run, deterministic)",
+    )
+    parser.add_argument(
+        "--debug-numerics-no-fail-fast",
+        action="store_true",
+        help="Disable fail-fast behavior in debug-numerics mode",
+    )
+    parser.add_argument(
+        "--debug-numerics-every",
+        type=int,
+        default=1,
+        help="Check tensors every N steps in debug-numerics mode",
+    )
+    parser.add_argument(
+        "--debug-numerics-dump-dir",
+        type=str,
+        default=None,
+        help="Directory for numeric debug dumps (default: checkpoint_dir/debug_numerics)",
+    )
+    parser.add_argument(
+        "--debug-numerics-dump-arrays",
+        action="store_true",
+        help="Save small tensor slices alongside numeric debug JSON dumps",
+    )
+    parser.add_argument(
+        "--debug-numerics-max-dumps",
+        type=int,
+        default=5,
+        help="Maximum number of non-finite dumps to write in debug mode",
+    )
+    parser.add_argument(
+        "--nan-skip-batch",
+        action="store_true",
+        help="Skip optimizer update when loss/grads are non-finite (debug-friendly)",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -3707,6 +4292,14 @@ def main():
         check_chkpts=args.check_chkpts,
         max_train_batches=args.max_train_batches,
         max_valid_batches=args.max_valid_batches,
+        seed=args.seed,
+        debug_numerics=args.debug_numerics,
+        debug_numerics_fail_fast=not args.debug_numerics_no_fail_fast,
+        debug_numerics_every=args.debug_numerics_every,
+        debug_numerics_dump_dir=args.debug_numerics_dump_dir,
+        debug_numerics_dump_arrays=args.debug_numerics_dump_arrays,
+        debug_numerics_max_dumps=args.debug_numerics_max_dumps,
+        nan_skip_batch=args.nan_skip_batch,
     )
 
 

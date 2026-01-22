@@ -365,6 +365,9 @@ def si_sdr(pred: mx.array, target: mx.array, eps: float = EPS) -> mx.array:
     Returns:
         SI-SDR in dB (higher is better)
     """
+    pred = pred.astype(mx.float32)
+    target = target.astype(mx.float32)
+
     if pred.ndim == 1:
         pred = mx.expand_dims(pred, axis=0)
     if target.ndim == 1:
