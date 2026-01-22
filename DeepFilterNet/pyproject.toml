@@ -90,7 +90,7 @@ mlx-data = { version = ">=0.2.0", optional = true, markers ="sys_platform == 'da
 #pytest = { optional = true }
 
 [tool.poetry.group.dev.dependencies]
-poethepoet = "^0.26"
+poethepoet = "^0.40"
 
 [tool.poe.tasks]
 install-torch-cuda121 = "pip install torch==2.9.1+cu121 torchaudio==2.9.1+cu121 --extra-index-url https://download.pytorch.org/whl/cu121"
