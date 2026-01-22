@@ -36,12 +36,14 @@ import argparse
 import gc
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Tuple, cast
+from typing import Any, Literal, Tuple, cast
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -204,12 +206,17 @@ def _compute_speech_band_logmag_loss(
 _interrupt_state = {
     "checkpoint_dir": None,
     "epoch": 0,
+    "batch_idx": 0,
+    "global_step": 0,
     "model": None,
     "optimizer": None,
     "loss": 0.0,
     "best_valid_loss": float("inf"),
     "config": {},
     "interrupted": False,
+    "train_stream": None,
+    "data_checkpoint_path": None,
+    "last_completed_epoch": -1,
 }
 
 
@@ -225,8 +232,11 @@ def _handle_sigint(signum, frame):
         sys.exit(1)
 
     _interrupt_state["interrupted"] = True
+    signal_name = "SIGINT"
+    if signum == signal.SIGTERM:
+        signal_name = "SIGTERM"
     print("\n" + "=" * 60)
-    print("⚠️  Training interrupted by user (CTRL+C)")
+    print(f"⚠️  Training interrupted ({signal_name})")
     print("=" * 60)
 
     # Save final checkpoint
@@ -240,17 +250,39 @@ def _handle_sigint(signum, frame):
             ckpt_dir = Path(_interrupt_state["checkpoint_dir"])
             ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-            final_path = ckpt_dir / f"interrupted_epoch_{_interrupt_state['epoch']:03d}.safetensors"
-            save_checkpoint(
+            epoch_idx = _interrupt_state.get("epoch", 0)
+            batch_idx = _interrupt_state.get("batch_idx", 0)
+            gstep = _interrupt_state.get("global_step", 0)
+            last_completed = _interrupt_state.get("last_completed_epoch", -1)
+
+            final_path = ckpt_dir / f"interrupted_epoch_{epoch_idx + 1:03d}.safetensors"
+            saved = save_checkpoint(
                 _interrupt_state["model"],
                 final_path,
-                epoch=_interrupt_state["epoch"],
+                epoch=epoch_idx,
+                batch_idx=batch_idx,
+                global_step=gstep,
                 loss=_interrupt_state["loss"],
                 best_valid_loss=_interrupt_state["best_valid_loss"],
                 config=_interrupt_state["config"],
                 optimizer=_interrupt_state["optimizer"],
+                last_completed_epoch=last_completed,
+                kind="interrupted",
             )
-            print(f"✅ Final checkpoint saved to {final_path}")
+            if saved:
+                print(f"✅ Final checkpoint saved to {final_path}")
+            else:
+                print(f"❌ Failed to save final checkpoint to {final_path}")
+
+            # Also persist MLXDataStream state so --resume-data works after interrupts.
+            train_stream = _interrupt_state.get("train_stream")
+            data_ckpt_path = _interrupt_state.get("data_checkpoint_path")
+            if train_stream is not None and data_ckpt_path is not None:
+                try:
+                    train_stream.save_checkpoint(data_ckpt_path)
+                    print(f"✅ Data checkpoint saved to {data_ckpt_path}")
+                except Exception as e_data:
+                    print(f"❌ Failed to save data checkpoint: {data_ckpt_path} ({e_data})")
         except Exception as e:
             print(f"❌ Failed to save final checkpoint: {e}")
 
@@ -258,7 +290,7 @@ def _handle_sigint(signum, frame):
     raise KeyboardInterrupt()
 
 
-def _register_sigint_handler(model, optimizer, checkpoint_dir, config):
+def _register_sigint_handler(model, optimizer, checkpoint_dir, config, last_completed_epoch: int = -1):
     """Register SIGINT handler for graceful training shutdown.
 
     Args:
@@ -266,25 +298,34 @@ def _register_sigint_handler(model, optimizer, checkpoint_dir, config):
         optimizer: Optimizer to save state on interrupt
         checkpoint_dir: Directory to save checkpoint to
         config: Training configuration dict
+        last_completed_epoch: Last fully completed epoch when registering
     """
     _interrupt_state["model"] = model
     _interrupt_state["optimizer"] = optimizer
     _interrupt_state["checkpoint_dir"] = checkpoint_dir
     _interrupt_state["config"] = config
+    _interrupt_state["last_completed_epoch"] = last_completed_epoch
     signal.signal(signal.SIGINT, _handle_sigint)
+    signal.signal(signal.SIGTERM, _handle_sigint)
 
 
-def _update_interrupt_state(epoch, loss, best_valid_loss):
+def _update_interrupt_state(epoch, loss, best_valid_loss, *, batch_idx=0, global_step=0, last_completed_epoch=-1):
     """Update global state for interrupt handler.
 
     Args:
         epoch: Current epoch
         loss: Current training loss
         best_valid_loss: Best validation loss so far
+        batch_idx: Current batch index within epoch
+        global_step: Global training step
+        last_completed_epoch: Last fully completed epoch index
     """
     _interrupt_state["epoch"] = epoch
+    _interrupt_state["batch_idx"] = batch_idx
+    _interrupt_state["global_step"] = global_step
     _interrupt_state["loss"] = loss
     _interrupt_state["best_valid_loss"] = best_valid_loss
+    _interrupt_state["last_completed_epoch"] = last_completed_epoch
 
 
 def print_hardware_diagnostics():
@@ -433,8 +474,81 @@ def clip_grad_norm(grads, max_norm: float) -> Tuple[dict, mx.array]:
     return cast(dict, apply_clip(grads)), total_norm
 
 
-def _validate_checkpoint_pair(checkpoint_path: Path) -> bool:
-    """Validate that both .safetensors and .state.json files exist and are non-empty.
+_CHECKPOINT_KINDS = {"step", "epoch_end", "best", "best_final", "final", "interrupted"}
+_COMPLETED_KINDS = {"epoch_end", "best", "best_final", "final"}
+_IN_PROGRESS_KINDS = {"step", "interrupted"}
+
+
+@dataclass(frozen=True)
+class CheckpointManifest:
+    """Manifest describing checkpoint file layout and naming patterns."""
+
+    weights_ext: str = ".safetensors"
+    state_ext: str = ".state.json"
+    tmp_suffixes: tuple[str, ...] = (".tmp", ".partial")
+    epoch_complete_suffix: str = ".complete"
+
+    step_re: re.Pattern[str] = re.compile(r"^step_(\d+)\.safetensors$")
+    epoch_re: re.Pattern[str] = re.compile(r"^epoch_(\d+)\.safetensors$")
+    interrupted_re: re.Pattern[str] = re.compile(r"^interrupted_epoch_(\d+)\.safetensors$")
+    complete_re: re.Pattern[str] = re.compile(r"^epoch_(\d+)\.complete$")
+
+    def state_path(self, weights_path: Path) -> Path:
+        return weights_path.with_suffix(self.state_ext)
+
+    def is_temporary(self, path: Path) -> bool:
+        name = path.name
+        return any(suffix in name for suffix in self.tmp_suffixes)
+
+    def expected_from_name(self, path: Path) -> dict:
+        name = path.name
+        if match := self.step_re.match(name):
+            return {"kind": "step", "global_step": int(match.group(1))}
+        if match := self.epoch_re.match(name):
+            return {"kind": "epoch_end", "epoch": int(match.group(1)) - 1}
+        if match := self.interrupted_re.match(name):
+            return {"kind": "interrupted", "epoch": int(match.group(1)) - 1}
+        if name == "best.safetensors":
+            return {"kinds": {"best", "best_final"}}
+        if name == "final.safetensors":
+            return {"kinds": {"final"}}
+        return {}
+
+    def marker_epoch(self, path: Path) -> int | None:
+        if match := self.complete_re.match(path.name):
+            return int(match.group(1)) - 1
+        return None
+
+
+@dataclass
+class CheckpointRecord:
+    """Parsed checkpoint metadata for validation and resume planning."""
+
+    path: Path
+    state_path: Path
+    mtime: float
+    state: dict[str, Any] | None = None
+    kind: str | None = None
+    epoch: int | None = None
+    batch_idx: int | None = None
+    global_step: int | None = None
+    last_completed_epoch: int | None = None
+    errors: list[str] = field(default_factory=list)
+
+    @property
+    def valid(self) -> bool:
+        return not self.errors
+
+
+def _record_sort_key(record: CheckpointRecord) -> tuple[int, float]:
+    """Sort checkpoints by global_step when available, falling back to mtime."""
+    if record.global_step is None:
+        return (-1, record.mtime)
+    return (record.global_step, record.mtime)
+
+
+def _validate_checkpoint_pair(checkpoint_path: Path, *, manifest: CheckpointManifest | None = None) -> bool:
+    """Validate that both weights and state files exist and are non-empty.
 
     Args:
         checkpoint_path: Path to checkpoint (.safetensors file)
@@ -442,8 +556,9 @@ def _validate_checkpoint_pair(checkpoint_path: Path) -> bool:
     Returns:
         True if both files exist and are valid, False otherwise
     """
+    manifest = manifest or CheckpointManifest()
     weights_file = checkpoint_path
-    state_file = checkpoint_path.with_suffix(".state.json")
+    state_file = manifest.state_path(checkpoint_path)
 
     # Check both files exist
     if not weights_file.exists():
@@ -464,69 +579,382 @@ def _validate_checkpoint_pair(checkpoint_path: Path) -> bool:
     return True
 
 
+def compute_resume_epoch(state: dict) -> int:
+    """Determine the epoch index to resume from based on checkpoint kind."""
+    epoch = int(state.get("epoch", 0))
+    kind = state.get("kind", "epoch_end")
+    if kind in _COMPLETED_KINDS:
+        return epoch + 1
+    return epoch
+
+
+def validate_checkpoint_dir(
+    checkpoint_dir: Path,
+    strict: bool = True,
+    *,
+    validate_load: bool = False,
+) -> dict:
+    """Validate checkpoints in a directory and return a resume plan.
+
+    Args:
+        checkpoint_dir: Directory containing checkpoints
+        strict: If True, raise on any validation errors
+        validate_load: If True, attempt to load checkpoint weights for integrity
+    """
+    manifest = CheckpointManifest()
+    report = {
+        "total": 0,
+        "valid": 0,
+        "invalid": [],
+        "latest_path": None,
+        "latest_state": None,
+        "last_completed_epoch": -1,
+        "resume_epoch": 0,
+        "resume_batch": 0,
+        "resume_global_step": None,
+        "warnings": [],
+    }
+
+    if not checkpoint_dir.exists():
+        return report
+
+    tmp_files = [p for p in checkpoint_dir.iterdir() if manifest.is_temporary(p)]
+    for tmp in tmp_files:
+        report["invalid"].append((tmp, "temporary checkpoint residue"))
+
+    ckpt_files = sorted(
+        [p for p in checkpoint_dir.glob(f"*{manifest.weights_ext}") if not manifest.is_temporary(p)],
+        key=lambda p: p.stat().st_mtime,
+    )
+
+    records: list[CheckpointRecord] = []
+
+    for ckpt in ckpt_files:
+        report["total"] += 1
+        state_path = manifest.state_path(ckpt)
+        record = CheckpointRecord(path=ckpt, state_path=state_path, mtime=ckpt.stat().st_mtime)
+
+        if not ckpt.exists():
+            record.errors.append("weights missing")
+        elif ckpt.stat().st_size == 0:
+            record.errors.append("weights file is empty")
+
+        if not state_path.exists():
+            record.errors.append("state missing")
+        elif state_path.stat().st_size == 0:
+            record.errors.append("state file is empty")
+
+        if record.errors:
+            records.append(record)
+            report["invalid"].append((ckpt, "; ".join(record.errors)))
+            continue
+
+        try:
+            with open(state_path, "r", encoding="utf-8") as f:
+                state = json.load(f)
+        except Exception as e:
+            record.errors.append(f"state load error: {e}")
+            records.append(record)
+            report["invalid"].append((ckpt, "; ".join(record.errors)))
+            continue
+
+        record.state = state
+        kind = state.get("kind")
+        epoch = state.get("epoch")
+        last_completed = state.get("last_completed_epoch")
+        batch_idx = state.get("batch_idx")
+        global_step = state.get("global_step")
+
+        if kind not in _CHECKPOINT_KINDS:
+            record.errors.append("missing/invalid kind")
+        if not isinstance(epoch, int):
+            record.errors.append("missing/invalid epoch")
+        if not isinstance(last_completed, int):
+            record.errors.append("missing/invalid last_completed_epoch")
+        if batch_idx is not None and not isinstance(batch_idx, int):
+            record.errors.append("invalid batch_idx")
+        if global_step is not None and not isinstance(global_step, int):
+            record.errors.append("invalid global_step")
+
+        record.kind = kind if isinstance(kind, str) else None
+        record.epoch = epoch if isinstance(epoch, int) else None
+        record.batch_idx = batch_idx if isinstance(batch_idx, int) else None
+        record.global_step = global_step if isinstance(global_step, int) else None
+        record.last_completed_epoch = last_completed if isinstance(last_completed, int) else None
+
+        expected = manifest.expected_from_name(ckpt)
+        if expected:
+            expected_kind = expected.get("kind")
+            expected_kinds = expected.get("kinds")
+            if expected_kind and kind != expected_kind:
+                record.errors.append(f"kind mismatch (expected {expected_kind})")
+            if expected_kinds and kind not in expected_kinds:
+                record.errors.append(f"kind mismatch (expected {sorted(expected_kinds)})")
+            if expected.get("epoch") is not None and isinstance(epoch, int):
+                if epoch != expected["epoch"]:
+                    record.errors.append(f"epoch mismatch (state {epoch} vs name {expected['epoch']})")
+            if expected.get("global_step") is not None and isinstance(global_step, int):
+                if global_step != expected["global_step"]:
+                    record.errors.append(
+                        f"global_step mismatch (state {global_step} vs name {expected['global_step']})"
+                    )
+        else:
+            record.errors.append("unrecognized checkpoint filename")
+
+        if isinstance(kind, str) and isinstance(epoch, int) and isinstance(last_completed, int):
+            if kind in _COMPLETED_KINDS:
+                if last_completed < epoch:
+                    record.errors.append("completed kind but last_completed_epoch < epoch")
+            elif kind in _IN_PROGRESS_KINDS:
+                if last_completed > epoch - 1:
+                    record.errors.append("in-progress kind but last_completed_epoch too high")
+            if kind in _IN_PROGRESS_KINDS and record.batch_idx is None:
+                record.errors.append("in-progress checkpoint missing batch_idx")
+            if kind == "step" and record.global_step is None:
+                record.errors.append("step checkpoint missing global_step")
+
+        checkpoint_kind = state.get("checkpoint_kind")
+        if checkpoint_kind is not None:
+            expected_checkpoint_kind = "end_of_epoch" if kind in _COMPLETED_KINDS else "in_progress"
+            if checkpoint_kind != expected_checkpoint_kind:
+                record.errors.append("checkpoint_kind mismatch")
+
+        if state.get("current_epoch") is not None and state.get("current_epoch") != epoch:
+            record.errors.append("current_epoch mismatch")
+        if state.get("last_saved_global_step") is not None and state.get("last_saved_global_step") != global_step:
+            record.errors.append("last_saved_global_step mismatch")
+        if state.get("last_saved_batch_idx") is not None and state.get("last_saved_batch_idx") != batch_idx:
+            record.errors.append("last_saved_batch_idx mismatch")
+
+        if validate_load and not record.errors:
+            try:
+                _ = mx.load(str(ckpt))
+            except Exception as e:
+                record.errors.append(f"weights load error: {e}")
+
+        records.append(record)
+        if record.valid:
+            report["valid"] += 1
+            if record.last_completed_epoch is not None:
+                report["last_completed_epoch"] = max(report["last_completed_epoch"], record.last_completed_epoch)
+        else:
+            report["invalid"].append((ckpt, "; ".join(record.errors)))
+
+    marker_files = list(checkpoint_dir.glob(f"epoch_*{manifest.epoch_complete_suffix}"))
+    marker_epochs = {}
+    for marker in marker_files:
+        if marker.stat().st_size == 0:
+            report["invalid"].append((marker, "epoch complete marker is empty"))
+            continue
+        marker_epoch = manifest.marker_epoch(marker)
+        if marker_epoch is None:
+            report["invalid"].append((marker, "unrecognized epoch complete marker name"))
+            continue
+        marker_epochs[marker_epoch] = marker
+
+    if marker_epochs:
+        completed_epochs = {
+            rec.epoch for rec in records if rec.valid and rec.kind in _COMPLETED_KINDS and rec.epoch is not None
+        }
+        for epoch_idx, marker in marker_epochs.items():
+            if epoch_idx not in completed_epochs:
+                report["invalid"].append((marker, "epoch complete marker without valid end-of-epoch checkpoint"))
+
+    valid_records = [rec for rec in records if rec.valid]
+    if valid_records:
+        latest = max(valid_records, key=_record_sort_key)
+        report["latest_path"] = latest.path
+        report["latest_state"] = latest.state
+        if latest.state:
+            report["resume_epoch"] = compute_resume_epoch(latest.state)
+            resume_batch = latest.state.get("batch_idx")
+            if latest.kind in _IN_PROGRESS_KINDS and isinstance(resume_batch, int):
+                report["resume_batch"] = resume_batch
+            report["resume_global_step"] = latest.state.get("global_step")
+
+    # Detect monotonicity issues across valid checkpoints (by modification time).
+    valid_by_time = sorted(valid_records, key=lambda rec: rec.mtime)
+    last_epoch_seen = None
+    last_step_seen = None
+    last_completed_seen = None
+    for rec in valid_by_time:
+        if rec.epoch is not None:
+            if last_epoch_seen is not None and rec.epoch < last_epoch_seen:
+                report["invalid"].append((rec.path, "epoch decreased relative to earlier checkpoint"))
+            last_epoch_seen = rec.epoch
+        if rec.global_step is not None:
+            if last_step_seen is not None and rec.global_step < last_step_seen:
+                report["invalid"].append((rec.path, "global_step decreased relative to earlier checkpoint"))
+            last_step_seen = rec.global_step
+        if rec.last_completed_epoch is not None:
+            if last_completed_seen is not None and rec.last_completed_epoch < last_completed_seen:
+                report["invalid"].append((rec.path, "last_completed_epoch decreased relative to earlier checkpoint"))
+            last_completed_seen = rec.last_completed_epoch
+
+    data_ckpt = checkpoint_dir / "data_checkpoint.json"
+    if data_ckpt.exists():
+        try:
+            with open(data_ckpt, "r", encoding="utf-8") as f:
+                data_state = json.load(f)
+            data_epoch = data_state.get("epoch")
+            data_batch = data_state.get("batch_idx")
+            if not isinstance(data_epoch, int) or data_epoch < 0:
+                report["invalid"].append((data_ckpt, "data checkpoint has invalid epoch"))
+            if not isinstance(data_batch, int) or data_batch < 0:
+                report["invalid"].append((data_ckpt, "data checkpoint has invalid batch_idx"))
+            if report["latest_state"] and isinstance(data_epoch, int):
+                latest_epoch = report["latest_state"].get("epoch")
+                if isinstance(latest_epoch, int) and data_epoch > latest_epoch:
+                    report["invalid"].append((data_ckpt, "data checkpoint epoch exceeds latest model checkpoint epoch"))
+        except Exception as e:
+            report["invalid"].append((data_ckpt, f"data checkpoint load error: {e}"))
+
+    if report["invalid"] and strict:
+        msgs = [f"{p.name}: {reason}" for p, reason in report["invalid"]]
+        raise RuntimeError(
+            "Checkpoint validation failed:\n  "
+            + "\n  ".join(msgs)
+            + "\nRemediation: remove or move corrupted checkpoints/markers and retry."
+        )
+
+    return report
+
+
+def _write_epoch_complete_marker(checkpoint_dir: Path, epoch: int, checkpoint_path: Path) -> bool:
+    """Write an epoch completion marker after a successful end-of-epoch checkpoint."""
+    manifest = CheckpointManifest()
+    marker_path = checkpoint_dir / f"epoch_{epoch + 1:03d}{manifest.epoch_complete_suffix}"
+    tmp_marker = marker_path.with_name(f"{marker_path.name}.tmp")
+    marker_state = {
+        "epoch": epoch,
+        "checkpoint": checkpoint_path.name,
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    try:
+        with open(tmp_marker, "w", encoding="utf-8") as f:
+            json.dump(marker_state, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        tmp_marker.replace(marker_path)
+        return True
+    except Exception as e:
+        print(f"⚠️  Failed to write epoch completion marker: {e}")
+        return False
+
+
 def save_checkpoint(
     model: nn.Module,
     path: Path,
     *,
     epoch: int,
+    batch_idx: int | None = None,
+    global_step: int | None = None,
     loss: float,
     best_valid_loss: float,
     config: dict,
     optimizer: optim.Optimizer | None = None,
-    completed: bool = False,
-) -> None:
+    last_completed_epoch: int = -1,
+    kind: str = "epoch_end",
+    raise_on_error: bool = False,
+) -> bool:
     """Save a training checkpoint with model weights, training state, and optimizer state.
 
     Args:
         model: Model to save
         path: Path to checkpoint file (.safetensors)
-        epoch: Current epoch number
+        epoch: Current epoch index (0-based)
+        batch_idx: Batch index within epoch (for in-progress checkpoints)
+        global_step: Global training step
         loss: Current training loss
         best_valid_loss: Best validation loss so far
         config: Training configuration dict
         optimizer: Optional optimizer to save state from
-        completed: Whether this checkpoint marks a completed training run
+        last_completed_epoch: Last fully completed epoch index (-1 if none)
+        kind: Checkpoint kind: step | epoch_end | best | final | interrupted
+        raise_on_error: Raise on failure instead of returning False
+    Returns:
+        True if checkpoint was saved and validated, False otherwise.
     """
     from mlx.utils import tree_flatten
 
-    path = Path(path)
+    manifest = CheckpointManifest()
 
-    # Flatten nested params for safetensors
-    params = model.parameters()
-    flat_params = tree_flatten(params)
-    weights = {k: v for k, v in flat_params}
-    mx.save_safetensors(str(path), weights)
+    try:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_weights = path.with_name(f"{path.stem}.tmp{path.suffix}")
 
-    # Prepare optimizer state for serialization
-    optimizer_state_dict = {}
-    if optimizer is not None and hasattr(optimizer, "state") and optimizer.state:
-        try:
-            # Flatten optimizer state for JSON serialization
-            flat_state = tree_flatten(optimizer.state)
-            # Convert arrays to lists, preserve scalar types (int, float, bool)
-            for k, v in flat_state:
-                if isinstance(v, mx.array):
-                    optimizer_state_dict[k] = v.tolist()  # Array → list
-                else:
-                    optimizer_state_dict[k] = v  # Scalar → keep as-is
-        except Exception as e:
-            print(f"⚠️  Failed to serialize optimizer state: {e}")
+        # Flatten nested params for safetensors
+        params = model.parameters()
+        flat_params = tree_flatten(params)
+        weights = {k: v for k, v in flat_params}
 
-    # Save training state and metadata
-    state_path = path.with_suffix(".state.json")
-    state = {
-        "epoch": epoch,
-        "loss": loss,
-        "best_valid_loss": best_valid_loss,
-        "config": config,
-        "optimizer_state": optimizer_state_dict,
-        "completed": completed,
-    }
-    with open(state_path, "w") as f:
-        json.dump(state, f, indent=2)
+        # Ensure tensors are materialized before writing and retry once if needed
+        if weights:
+            mx.eval(*weights.values())
+        mx.save_safetensors(str(tmp_weights), weights)
+        if not tmp_weights.exists():
+            mx.save_safetensors(str(tmp_weights), weights)
 
-    if optimizer_state_dict:
-        print(f"✅ Saved checkpoint with optimizer state: {path.name}")
+        # Prepare optimizer state for serialization
+        optimizer_state_dict = {}
+        if optimizer is not None and hasattr(optimizer, "state") and optimizer.state:
+            try:
+                # Flatten optimizer state for JSON serialization
+                flat_state = tree_flatten(optimizer.state)
+                # Convert arrays to lists, preserve scalar types (int, float, bool)
+                for k, v in flat_state:
+                    if isinstance(v, mx.array):
+                        optimizer_state_dict[k] = v.tolist()  # Array → list
+                    else:
+                        optimizer_state_dict[k] = v  # Scalar → keep as-is
+            except Exception as e:
+                print(f"⚠️  Failed to serialize optimizer state: {e}")
+
+        checkpoint_kind = "end_of_epoch" if kind in _COMPLETED_KINDS else "in_progress"
+
+        # Save training state and metadata
+        state_path = manifest.state_path(path)
+        tmp_state_path = state_path.with_name(f"{state_path.stem}.tmp{state_path.suffix}")
+        state = {
+            "epoch": epoch,
+            "batch_idx": batch_idx,
+            "global_step": global_step,
+            "loss": loss,
+            "best_valid_loss": best_valid_loss,
+            "config": config,
+            "optimizer_state": optimizer_state_dict,
+            "last_completed_epoch": last_completed_epoch,
+            "kind": kind,
+            "checkpoint_kind": checkpoint_kind,
+            "current_epoch": epoch,
+            "last_saved_global_step": global_step,
+            "last_saved_batch_idx": batch_idx,
+        }
+        with open(tmp_state_path, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+
+        # Atomic rename
+        tmp_weights.replace(path)
+        tmp_state_path.replace(state_path)
+
+        if not _validate_checkpoint_pair(path, manifest=manifest):
+            msg = f"Checkpoint validation failed after save: {path.name}"
+            if raise_on_error:
+                raise RuntimeError(msg)
+            print(f"⚠️  {msg}")
+            return False
+
+        if optimizer_state_dict:
+            print(f"✅ Saved checkpoint with optimizer state: {path.name}")
+        return True
+    except Exception as e:
+        if raise_on_error:
+            raise
+        print(f"❌ Failed to save checkpoint {Path(path).name}: {e}")
+        return False
 
 
 def load_checkpoint(
@@ -547,9 +975,10 @@ def load_checkpoint(
     from mlx.utils import tree_flatten, tree_unflatten
 
     ckpt_path = Path(path)
+    manifest = CheckpointManifest()
 
     # Validate checkpoint pair before loading
-    if not _validate_checkpoint_pair(ckpt_path):
+    if not _validate_checkpoint_pair(ckpt_path, manifest=manifest):
         print(f"⚠️  Checkpoint validation failed: {ckpt_path.name}")
         return {}
 
@@ -575,7 +1004,7 @@ def load_checkpoint(
             print(f"⚠️  {len(missing)} parameters were missing in checkpoint")
 
         # Load training state
-        state_path = ckpt_path.with_suffix(".state.json")
+        state_path = manifest.state_path(ckpt_path)
         state = {}
         if state_path.exists():
             with open(state_path) as f:
@@ -600,7 +1029,10 @@ def load_checkpoint(
                 print(f"⚠️  Failed to restore optimizer state: {e}")
 
         epoch = state.get("epoch", 0)
-        print(f"✅ Loaded checkpoint from epoch {epoch}")
+        kind = state.get("kind", "epoch_end")
+        completed_kinds = {"epoch_end", "best", "best_final", "final"}
+        last_completed = state.get("last_completed_epoch", epoch if kind in completed_kinds else epoch - 1)
+        print(f"✅ Loaded checkpoint from epoch {epoch} (kind={kind}, last_completed={last_completed})")
         return state
 
     except Exception as e:
@@ -623,6 +1055,8 @@ def cleanup_checkpoints(
     if save_total_limit <= 0:
         return
 
+    manifest = CheckpointManifest()
+
     # Find all checkpoint files (epoch_*.safetensors and step_*.safetensors)
     ckpt_files = []
     for pattern in ["epoch_*.safetensors", "step_*.safetensors"]:
@@ -643,15 +1077,20 @@ def cleanup_checkpoints(
         ckpt_path.unlink(missing_ok=True)
 
         # Also remove the accompanying state.json
-        state_path = ckpt_path.with_suffix(".state.json")
+        state_path = manifest.state_path(ckpt_path)
         state_path.unlink(missing_ok=True)
+
+        # Remove epoch completion marker if present
+        marker_epoch = manifest.expected_from_name(ckpt_path).get("epoch")
+        if marker_epoch is not None:
+            marker_path = checkpoint_dir / f"epoch_{marker_epoch + 1:03d}{manifest.epoch_complete_suffix}"
+            marker_path.unlink(missing_ok=True)
 
 
 def find_latest_checkpoint(checkpoint_dir: Path) -> Path | None:
     """Find the most recent checkpoint in the checkpoint directory.
 
-    Checks for step_*.safetensors, epoch_*.safetensors, and final.safetensors files,
-    returning the most recently modified one.
+    Returns the latest valid checkpoint based on metadata and modification time.
 
     Args:
         checkpoint_dir: Directory to search for checkpoints
@@ -662,19 +1101,11 @@ def find_latest_checkpoint(checkpoint_dir: Path) -> Path | None:
     if not checkpoint_dir.exists():
         return None
 
-    ckpt_files = []
-    for pattern in ["step_*.safetensors", "epoch_*.safetensors", "final.safetensors"]:
-        ckpt_files.extend(checkpoint_dir.glob(pattern))
-
-    if not ckpt_files:
-        # Also check for best.safetensors
-        best_path = checkpoint_dir / "best.safetensors"
-        if best_path.exists():
-            return best_path
-        return None
-
-    # Return most recently modified
-    return max(ckpt_files, key=lambda p: p.stat().st_mtime)
+    report = validate_checkpoint_dir(checkpoint_dir, strict=False, validate_load=False)
+    latest = report.get("latest_path")
+    if isinstance(latest, Path):
+        return latest
+    return None
 
 
 def train(
@@ -724,6 +1155,9 @@ def train(
     vad_z_threshold: float = 0.0,
     vad_z_slope: float = 1.0,
     eval_sisdr: bool = False,
+    max_train_batches: int | None = None,
+    max_valid_batches: int | None = None,
+    check_chkpts: bool = False,
 ) -> None:
     """Train DfNet4 model with dynamic on-the-fly mixing.
 
@@ -740,7 +1174,7 @@ def train(
         resume_from: Optional model checkpoint to resume from
         resume_data_from: Optional data checkpoint for resuming interrupted epoch
         validate_every: Validate every N epochs
-        save_strategy: When to save checkpoints - "no", "epoch", or "steps"
+        save_strategy: Additional checkpoint cadence ("no", "epoch", or "steps"). End-of-epoch checkpoints are always saved for resume integrity.
         save_steps: Number of steps between checkpoints (when save_strategy="steps")
         save_total_limit: Maximum number of checkpoints to keep (None=unlimited)
         checkpoint_batches: Save data checkpoint every N batches (0=disabled)
@@ -773,6 +1207,9 @@ def train(
         vad_z_threshold: Z-score threshold for VAD sigmoid
         vad_z_slope: Z-score slope for VAD sigmoid
         eval_sisdr: Compute SI-SDR during validation (slower)
+        max_train_batches: Limit number of train batches per epoch (None = full epoch)
+        max_valid_batches: Limit number of validation batches (None = full validation)
+        check_chkpts: Validate checkpoints before starting/resuming
     """
     from df_mlx.config import get_default_config
     from df_mlx.dynamic_dataset import (
@@ -902,6 +1339,8 @@ def train(
         "vad_z_threshold": vad_z_threshold,
         "vad_z_slope": vad_z_slope,
         "eval_sisdr": eval_sisdr,
+        "max_train_batches": max_train_batches,
+        "max_valid_batches": max_valid_batches,
     }
 
     dataset.set_split("train")
@@ -920,6 +1359,25 @@ def train(
     ckpt_dir = Path(checkpoint_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
+    validation_report = None
+    if check_chkpts:
+        validation_report = validate_checkpoint_dir(ckpt_dir, strict=True, validate_load=True)
+        print(
+            f"Checkpoint validation: total={validation_report['total']} "
+            f"valid={validation_report['valid']} invalid={len(validation_report['invalid'])}"
+        )
+        if validation_report["latest_path"]:
+            print(f"  Latest valid checkpoint: {validation_report['latest_path']}")
+        if validation_report["latest_state"]:
+            print(
+                f"  last_completed_epoch={validation_report['last_completed_epoch']}, "
+                f"resume_epoch={validation_report['resume_epoch']}, "
+                f"resume_batch={validation_report['resume_batch']}, "
+                f"resume_global_step={validation_report['resume_global_step']}"
+            )
+
+        if resume_from is None and validation_report["latest_path"]:
+            resume_from = str(validation_report["latest_path"])
     # Determine which data loader to use
     use_mlx_stream = use_mlx_data and HAS_MLX_DATA
     if use_mlx_data and not HAS_MLX_DATA:
@@ -930,6 +1388,8 @@ def train(
     # Create data stream/loader
     data_checkpoint_path = ckpt_dir / "data_checkpoint.json"
     train_stream: MLXDataStream | None = None
+    data_resume_progress: dict[str, Any] | None = None
+    data_resume_source: str | None = None
 
     if use_mlx_stream:
         # Check for data checkpoint to resume from
@@ -942,8 +1402,11 @@ def train(
                 num_workers=num_workers,
             )
             print(f"  Resuming data from: {resume_data_from}")
-            progress = train_stream.get_progress()
-            print(f"  Data checkpoint: epoch {progress['epoch']}, batch {progress['batch']}")
+            data_resume_progress = train_stream.get_progress()
+            data_resume_source = resume_data_from
+            print(
+                f"  Data checkpoint: epoch {data_resume_progress['epoch']}, " f"batch {data_resume_progress['batch']}"
+            )
         elif data_checkpoint_path.exists():
             # Auto-resume from last data checkpoint
             try:
@@ -954,8 +1417,12 @@ def train(
                     prefetch_size=prefetch_size,
                     num_workers=num_workers,
                 )
-                progress = train_stream.get_progress()
-                print(f"  Auto-resuming from data checkpoint: epoch {progress['epoch']}, batch {progress['batch']}")
+                data_resume_progress = train_stream.get_progress()
+                data_resume_source = str(data_checkpoint_path)
+                print(
+                    "  Auto-resuming from data checkpoint: "
+                    f"epoch {data_resume_progress['epoch']}, batch {data_resume_progress['batch']}"
+                )
             except Exception as e:
                 print(f"  Warning: Could not load data checkpoint: {e}")
                 train_stream = None
@@ -967,6 +1434,10 @@ def train(
                 prefetch_size=prefetch_size,
                 num_workers=num_workers,
             )
+
+        # Make data checkpoint path available to the interrupt handler
+        _interrupt_state["data_checkpoint_path"] = data_checkpoint_path
+        _interrupt_state["train_stream"] = train_stream
 
     # Initialize model with config
     print("\nInitializing model...")
@@ -1000,22 +1471,62 @@ def train(
     start_epoch = 0
     best_valid_loss = float("inf")
     epochs_without_improvement = 0
+    last_completed_epoch = -1
+    resume_global_step = 0
+    resume_batch_idx = 0
 
     if resume_from:
         state = load_checkpoint(model, resume_from, optimizer=optimizer)
-        start_epoch = state.get("epoch", 0)
-        best_valid_loss = state.get("best_valid_loss", float("inf"))
-        completed = bool(state.get("completed", False))
-        print(f"  Resumed from: {resume_from} (epoch {start_epoch})")
-        if completed and start_epoch >= epochs:
-            print(f"✅ Training already complete (checkpoint epoch {start_epoch}/{epochs}).")
-            return
-        if not completed and start_epoch >= epochs:
+        if state:
+            ckpt_epoch = int(state.get("epoch", 0))
+            ckpt_kind = state.get("kind", "epoch_end")
+            resume_global_step = state.get("global_step", ckpt_epoch * steps_per_epoch)
+            start_epoch = compute_resume_epoch(state)
+            completed_kinds = {"epoch_end", "best", "best_final", "final"}
+            if ckpt_kind in completed_kinds:
+                last_completed_epoch = state.get("last_completed_epoch", ckpt_epoch)
+            else:
+                last_completed_epoch = state.get("last_completed_epoch", ckpt_epoch - 1)
+            if ckpt_kind in _IN_PROGRESS_KINDS:
+                batch_val = state.get("batch_idx")
+                if isinstance(batch_val, int) and batch_val >= 0:
+                    resume_batch_idx = batch_val
+            best_valid_loss = state.get("best_valid_loss", float("inf"))
             print(
-                f"⚠️  Checkpoint epoch {start_epoch} >= requested {epochs} but not marked complete; "
-                f"resuming from epoch {max(epochs - 1, 0)}."
+                "  Resumed from: "
+                f"{resume_from} (epoch {start_epoch}, kind={ckpt_kind}, "
+                f"last_completed={last_completed_epoch})"
             )
-            start_epoch = max(epochs - 1, 0)
+            print(
+                "  Resume target: "
+                f"epoch {start_epoch + 1} (idx {start_epoch}), "
+                f"batch {resume_batch_idx}, global_step {resume_global_step}"
+            )
+            if start_epoch >= epochs:
+                print(f"✅ Training already complete (checkpoint epoch {ckpt_epoch}/{epochs}).")
+                return
+
+    if validation_report and validation_report["last_completed_epoch"] > last_completed_epoch:
+        last_completed_epoch = validation_report["last_completed_epoch"]
+
+    if train_stream is not None and data_resume_progress is not None:
+        data_epoch = data_resume_progress.get("epoch")
+        if isinstance(data_epoch, int) and data_epoch != start_epoch:
+            print(
+                "⚠️  Data checkpoint epoch does not match resume epoch "
+                f"(data={data_epoch}, resume={start_epoch}). "
+                f"Ignoring data checkpoint: {data_resume_source}"
+            )
+            train_stream.set_epoch(start_epoch)
+            data_resume_progress = None
+        elif data_resume_progress.get("batch", 0) in (0, None):
+            data_resume_progress = None
+
+    if resume_from:
+        lc_display = f"{last_completed_epoch + 1} (idx {last_completed_epoch})" if last_completed_epoch >= 0 else "none"
+        print(f"  last_completed_epoch: {lc_display}")
+
+    _interrupt_state["last_completed_epoch"] = last_completed_epoch
 
     # Loss function - define as a pure function for compilation
     # Loss formula:
@@ -1141,6 +1652,8 @@ def train(
         valid_sisdr = 0.0
         num_valid_batches = 0
         valid_steps = len(dataset) // batch_size
+        if max_valid_batches is not None:
+            valid_steps = min(valid_steps, max_valid_batches)
 
         valid_loader = PrefetchDataLoader(
             dataset,
@@ -1165,7 +1678,7 @@ def train(
 
             sisdr_fn = (si_sdr, istft)
 
-        for batch in valid_pbar:
+        for batch_idx, batch in enumerate(valid_pbar):
             noisy_real = batch["noisy_real"]
             noisy_imag = batch["noisy_imag"]
             clean_real = batch["clean_real"]
@@ -1250,6 +1763,9 @@ def train(
                 avg=f"{valid_loss / num_valid_batches:.4f}",
             )
 
+            if max_valid_batches is not None and (batch_idx + 1) >= max_valid_batches:
+                break
+
         valid_pbar.close()
 
         if num_valid_batches > 0:
@@ -1284,7 +1800,7 @@ def train(
     print(f"  Using compiled training step: {use_compiled_step}")
 
     # Register SIGINT handler for graceful shutdown
-    _register_sigint_handler(model, optimizer, ckpt_dir, train_config)
+    _register_sigint_handler(model, optimizer, ckpt_dir, train_config, last_completed_epoch=last_completed_epoch)
     print("  SIGINT handler registered (CTRL+C will save checkpoint before exit)")
 
     # Training loop
@@ -1293,11 +1809,19 @@ def train(
     print(f"  Est. total steps: {total_steps:,}")
     print()
 
-    global_step = start_epoch * steps_per_epoch
+    global_step = resume_global_step if resume_from else start_epoch * steps_per_epoch
     final_epoch = start_epoch
+    last_completed_epoch = max(last_completed_epoch, start_epoch - 1)
     avg_train_loss = float("nan")
     last_valid_loss: float | None = None
     last_valid_epoch: int | None = None
+
+    max_train_batches = train_config.get("max_train_batches")
+    max_valid_batches = train_config.get("max_valid_batches")
+
+    start_display = f"{start_epoch + 1}/{epochs} (idx {start_epoch})"
+    lc_display = f"{last_completed_epoch + 1} (idx {last_completed_epoch})" if last_completed_epoch >= 0 else "none"
+    print(f"Starting training at epoch {start_display} | last_completed_epoch={lc_display}")
 
     for epoch in range(start_epoch, epochs):
         epoch_start = time.time()
@@ -1323,7 +1847,14 @@ def train(
         loss_val = 0.0  # Initialize for async eval
 
         # Update interrupt state at start of epoch
-        _update_interrupt_state(epoch + 1, 0.0, best_valid_loss)
+        _update_interrupt_state(
+            epoch,
+            0.0,
+            best_valid_loss,
+            batch_idx=0,
+            global_step=global_step,
+            last_completed_epoch=last_completed_epoch,
+        )
 
         # Timing accumulators for verbose diagnostics
         total_data_time = 0.0
@@ -1331,12 +1862,19 @@ def train(
 
         # Create data iterator (MLXDataStream or PrefetchDataLoader)
         if use_mlx_stream and train_stream is not None:
-            train_stream.set_epoch(epoch)
-            data_iterator = train_stream
-            # Check if resuming mid-epoch
-            progress = train_stream.get_progress()
-            if progress["batch"] > 0 and epoch == progress["epoch"]:
+            if data_resume_progress is not None and epoch == data_resume_progress.get("epoch"):
+                # Continue from saved data checkpoint without resetting epoch state.
+                data_iterator = train_stream
+                progress = train_stream.get_progress()
                 print(f"  Resuming epoch {epoch + 1} from batch {progress['batch']}")
+                data_resume_progress = None
+            else:
+                train_stream.set_epoch(epoch)
+                data_iterator = train_stream
+                # Check if resuming mid-epoch
+                progress = train_stream.get_progress()
+                if progress["batch"] > 0 and epoch == progress["epoch"]:
+                    print(f"  Resuming epoch {epoch + 1} from batch {progress['batch']}")
         else:
             data_iterator = PrefetchDataLoader(
                 dataset,
@@ -1346,9 +1884,13 @@ def train(
             )
 
         # Training progress bar
+        train_total = steps_per_epoch
+        if max_train_batches is not None:
+            train_total = min(train_total, max_train_batches)
+
         train_pbar = tqdm(
             enumerate(data_iterator),
-            total=steps_per_epoch,
+            total=train_total,
             desc=f"Epoch {epoch + 1}/{epochs}",
             unit="batch",
             leave=True,
@@ -1462,6 +2004,20 @@ def train(
             samples_processed += current_batch_size
             global_step += 1
 
+            # Track progress for interruption-safe resume metadata
+            _update_interrupt_state(
+                epoch,
+                loss_val,
+                best_valid_loss,
+                batch_idx=batch_idx,
+                global_step=global_step,
+                last_completed_epoch=last_completed_epoch,
+            )
+
+            # Stop early for benchmarking if requested
+            if max_train_batches is not None and num_train_batches >= max_train_batches:
+                break
+
             # Update progress bar with real-time metrics (only on sync)
             if should_sync:
                 lr = float(schedule(global_step))
@@ -1552,16 +2108,23 @@ def train(
                 loss_val = float(loss)
 
                 ckpt_path = ckpt_dir / f"step_{global_step:06d}.safetensors"
-                save_checkpoint(
+                step_saved = save_checkpoint(
                     model,
                     ckpt_path,
-                    epoch=epoch + 1,
+                    epoch=epoch,
+                    batch_idx=batch_idx,
+                    global_step=global_step,
                     loss=train_loss / num_train_batches if num_train_batches > 0 else loss_val,
                     best_valid_loss=best_valid_loss,
                     config=train_config,
                     optimizer=optimizer,
+                    last_completed_epoch=last_completed_epoch,
+                    kind="step",
                 )
-                print(f"\n  📦 Checkpoint saved: {ckpt_path.name} (step {global_step})")
+                if step_saved:
+                    print(f"\n  📦 Checkpoint saved: {ckpt_path.name} (step {global_step})")
+                else:
+                    print(f"\n  ⚠️  Checkpoint save failed: {ckpt_path.name} (step {global_step})")
 
                 # Cleanup old checkpoints if limit is set
                 if save_total_limit is not None:
@@ -1602,6 +2165,7 @@ def train(
 
         # ====== Validation ======
         avg_valid_loss = float("inf")
+        best_saved = False
         if (epoch + 1) % validate_every == 0:
             avg_valid_loss = run_validation("  Validating")
             last_valid_loss = avg_valid_loss
@@ -1614,15 +2178,31 @@ def train(
 
                 # Save best model
                 best_path = ckpt_dir / "best.safetensors"
-                save_checkpoint(
+                best_saved = save_checkpoint(
                     model,
                     best_path,
-                    epoch=epoch + 1,
+                    epoch=epoch,
+                    batch_idx=None,
+                    global_step=global_step,
                     loss=avg_train_loss,
                     best_valid_loss=best_valid_loss,
                     config=train_config,
                     optimizer=optimizer,
+                    last_completed_epoch=epoch,
+                    kind="best",
                 )
+                if best_saved:
+                    last_completed_epoch = max(last_completed_epoch, epoch)
+                    _update_interrupt_state(
+                        epoch,
+                        avg_train_loss,
+                        best_valid_loss,
+                        batch_idx=num_train_batches,
+                        global_step=global_step,
+                        last_completed_epoch=last_completed_epoch,
+                    )
+                else:
+                    print("⚠️  Best checkpoint save failed; epoch completion not updated.")
             else:
                 epochs_without_improvement += 1
 
@@ -1631,7 +2211,14 @@ def train(
         epoch_throughput = samples_processed / epoch_time if epoch_time > 0 else 0
 
         # Update interrupt state with final epoch metrics
-        _update_interrupt_state(epoch + 1, avg_train_loss, best_valid_loss)
+        _update_interrupt_state(
+            epoch,
+            avg_train_loss,
+            best_valid_loss,
+            batch_idx=num_train_batches,
+            global_step=global_step,
+            last_completed_epoch=last_completed_epoch,
+        )
 
         # Improved epoch summary with throughput
         improvement_marker = "★" if avg_valid_loss <= best_valid_loss else ""
@@ -1658,21 +2245,41 @@ def train(
                 f"p_out={avg_train_p_out:.2f} | gate={avg_train_gate:.0f}%"
             )
 
-        # ====== Epoch-based Checkpointing ======
-        if save_strategy == "epoch":
-            ckpt_path = ckpt_dir / f"epoch_{epoch + 1:03d}.safetensors"
-            save_checkpoint(
-                model,
-                ckpt_path,
-                epoch=epoch + 1,
-                loss=avg_train_loss,
-                best_valid_loss=best_valid_loss,
-                config=train_config,
-                optimizer=optimizer,
+        # ====== End-of-Epoch Checkpointing (authoritative completion) ======
+        ckpt_path = ckpt_dir / f"epoch_{epoch + 1:03d}.safetensors"
+        epoch_saved = save_checkpoint(
+            model,
+            ckpt_path,
+            epoch=epoch,
+            batch_idx=None,
+            global_step=global_step,
+            loss=avg_train_loss,
+            best_valid_loss=best_valid_loss,
+            config=train_config,
+            optimizer=optimizer,
+            last_completed_epoch=epoch,
+            kind="epoch_end",
+        )
+        epoch_completed = epoch_saved or best_saved
+        if epoch_saved:
+            last_completed_epoch = epoch
+            _update_interrupt_state(
+                epoch,
+                avg_train_loss,
+                best_valid_loss,
+                batch_idx=num_train_batches,
+                global_step=global_step,
+                last_completed_epoch=last_completed_epoch,
             )
+            _write_epoch_complete_marker(ckpt_dir, epoch, ckpt_path)
             print(f"  📦 Checkpoint saved: {ckpt_path.name}")
             if save_total_limit is not None:
                 cleanup_checkpoints(ckpt_dir, save_total_limit)
+        else:
+            if epoch_completed:
+                print("⚠️  End-of-epoch checkpoint failed; relying on best checkpoint for completion.")
+            else:
+                print("⚠️  End-of-epoch checkpoint failed; epoch not marked as complete.")
 
         # ====== Early Stopping ======
         if epochs_without_improvement >= patience:
@@ -1695,31 +2302,44 @@ def train(
     if final_valid_loss < best_valid_loss:
         best_valid_loss = final_valid_loss
         best_path = ckpt_dir / "best.safetensors"
-        save_checkpoint(
+        best_final_saved = save_checkpoint(
             model,
             best_path,
-            epoch=final_epoch + 1,
+            epoch=final_epoch,
+            batch_idx=None,
+            global_step=global_step,
             loss=avg_train_loss,
             best_valid_loss=best_valid_loss,
             config=train_config,
             optimizer=optimizer,
+            last_completed_epoch=max(last_completed_epoch, final_epoch),
+            kind="best_final",
         )
-        print(f"  ✅ Final weights set new best: {best_valid_loss:.4f}")
+        if best_final_saved:
+            print(f"  ✅ Final weights set new best: {best_valid_loss:.4f}")
+        else:
+            print("  ⚠️  Failed to save final best checkpoint.")
 
     # Save final weights (even if not aligned to checkpoint interval).
     mx.eval(state)
     final_path = ckpt_dir / "final.safetensors"
-    save_checkpoint(
+    final_saved = save_checkpoint(
         model,
         final_path,
-        epoch=final_epoch + 1,
+        epoch=final_epoch,
+        batch_idx=None,
+        global_step=global_step,
         loss=avg_train_loss,
         best_valid_loss=best_valid_loss,
         config=train_config,
         optimizer=optimizer,
-        completed=True,
+        last_completed_epoch=max(last_completed_epoch, final_epoch),
+        kind="final",
     )
-    print(f"  📦 Final checkpoint saved: {final_path.name}")
+    if final_saved:
+        print(f"  📦 Final checkpoint saved: {final_path.name}")
+    else:
+        print("  ⚠️  Final checkpoint save failed.")
 
     # ====== Final Summary ======
     print("\n" + "=" * 60)
@@ -1816,7 +2436,12 @@ def main():
         type=str,
         default="epoch",
         choices=["no", "epoch", "steps"],
-        help="Checkpoint save strategy: 'no' (only best model), 'epoch' (every epoch), 'steps' (every N steps)",
+        help=(
+            "Checkpoint save strategy for additional checkpoints: "
+            "'no' (only best + required epoch_end), "
+            "'epoch' (every epoch), "
+            "'steps' (every N steps)"
+        ),
     )
     parser.add_argument(
         "--save-steps",
@@ -2017,9 +2642,26 @@ def main():
         help="Z-score slope for VAD sigmoid",
     )
     parser.add_argument(
+        "--max-train-batches",
+        type=int,
+        default=None,
+        help="Limit number of training batches per epoch (for fast benchmarking)",
+    )
+    parser.add_argument(
+        "--max-valid-batches",
+        type=int,
+        default=None,
+        help="Limit number of validation batches (for fast benchmarking)",
+    )
+    parser.add_argument(
         "--eval-sisdr",
         action="store_true",
         help="Compute SI-SDR during validation (slower)",
+    )
+    parser.add_argument(
+        "--check-chkpts",
+        action="store_true",
+        help="Validate checkpoints and metadata before starting/resuming",
     )
     parser.add_argument(
         "-v",
@@ -2114,6 +2756,9 @@ def main():
         vad_z_threshold=args.vad_z_threshold,
         vad_z_slope=args.vad_z_slope,
         eval_sisdr=args.eval_sisdr,
+        check_chkpts=args.check_chkpts,
+        max_train_batches=args.max_train_batches,
+        max_valid_batches=args.max_valid_batches,
     )
 
 
