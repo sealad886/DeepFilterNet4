@@ -22,7 +22,7 @@ jobs:
           - {command: black, args: "--check --diff ."}
           - {command: isort, args: ". --check --diff"}
     steps:
-     - uses: actions/checkout@v4
+     - uses: actions/checkout@v6
      - uses: actions/setup-python@v5
        with:
          python-version: "3.9"
