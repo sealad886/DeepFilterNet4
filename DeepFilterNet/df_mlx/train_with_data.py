@@ -304,8 +304,7 @@ def train(
             feat_spec = batch["feat_spec"]
             target = batch["target"]
 
-            # TODO: Test out to see if the typechecking error is actually an issue
-            current_batch_size = spec.shape[0]
+            current_batch_size = feat_erb.shape[0]  # type: ignore[union-attr]
 
             # Forward and backward pass
             loss, grads = loss_and_grad(model, spec, feat_erb, feat_spec, target)

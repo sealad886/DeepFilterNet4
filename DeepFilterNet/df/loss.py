@@ -116,7 +116,7 @@ class MultiResSpecLoss(nn.Module):
         elif isinstance(f_complex, Iterable):
             self.f_complex = list(f_complex)
         else:
-            self.f_complex = [f_complex] * len(self.stfts)
+            self.f_complex = [float(f_complex)] * len(self.stfts)
 
     def forward(self, input: Tensor, target: Tensor) -> Tensor:
         loss = torch.zeros((), device=input.device, dtype=input.dtype)
@@ -765,7 +765,7 @@ class SpeakerContrastiveLoss(nn.Module):
             return
 
         try:
-            from resemblyzer import VoiceEncoder
+            from resemblyzer import VoiceEncoder  # type: ignore[import-not-found]
 
             self.speaker_encoder = VoiceEncoder(device=str(device))
             # Freeze encoder weights
@@ -1349,7 +1349,7 @@ class Loss(nn.Module):
 def test_local_snr():
     import librosa
     import librosa.display
-    import matplotlib.pyplot as plt
+    import matplotlib.pyplot as plt  # type: ignore[import-not-found]
     import numpy as np
     import soundfile as sf
 

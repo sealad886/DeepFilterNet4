@@ -1,8 +1,8 @@
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # type: ignore[import-not-found]
 import numpy as np
 import torch
-from matplotlib.collections import QuadMesh
-from matplotlib.figure import Figure
+from matplotlib.collections import QuadMesh  # type: ignore[import-not-found]
+from matplotlib.figure import Figure  # type: ignore[import-not-found]
 
 from df.utils import as_complex
 

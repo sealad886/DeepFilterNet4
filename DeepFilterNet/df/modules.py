@@ -964,9 +964,9 @@ def test_dfop():
     out3 = dfop(spec, coefs, alpha)
     dfop.set_forward("complex_strided")
     out4 = dfop(spec, coefs, alpha)
-    torch.testing.assert_allclose(out1, out2)
-    torch.testing.assert_allclose(out1, out3)
-    torch.testing.assert_allclose(out1, out4)
+    torch.testing.assert_close(out1, out2)
+    torch.testing.assert_close(out1, out3)
+    torch.testing.assert_close(out1, out4)
     # This forward method requires external padding/lookahead as well as spectrogram buffer
     # handling, i.e. via a ring buffer. Could be used in real time usage.
     dfop.set_forward("real_one_step")
@@ -974,9 +974,9 @@ def test_dfop():
     out5 = torch.zeros_like(out1)
     for i in range(t):
         out5[:, :, i] = dfop(spec_padded[:, :, i : i + o], coefs[:, i].unsqueeze(1), alpha[:, i].unsqueeze(1))
-    torch.testing.assert_allclose(out1, out5)
+    torch.testing.assert_close(out1, out5)
     # Forward method that does the padding/lookahead handling using an internal hidden state.
-    dfop.freq_bins = F
+    dfop.freq_bins = F  # type: ignore[misc]  # test code reassigns Final
     dfop.set_forward("real_hidden_state_loop")
     out6 = dfop(spec, coefs, alpha)
-    torch.testing.assert_allclose(out1, out6)
+    torch.testing.assert_close(out1, out6)

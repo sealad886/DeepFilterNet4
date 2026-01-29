@@ -16,7 +16,7 @@ USE_TORCHCODEC = TORCHAUDIO_VERSION >= version.parse("2.9.0")
 HAS_TORCHCODEC = False
 if USE_TORCHCODEC:
     try:
-        from torchcodec.decoders import AudioDecoder
+        from torchcodec.decoders import AudioDecoder  # type: ignore[import-not-found]
 
         HAS_TORCHCODEC = True
     except ImportError:

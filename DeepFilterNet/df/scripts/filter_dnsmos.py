@@ -84,7 +84,9 @@ def main(args):
                             audio = to_int16(audio)
                         if audio.dim() == 1:
                             audio = audio.unsqueeze(0)
-                        data = encode(audio, sr, codec_write, compression=8)
+                        # Use dtype from source dataset attributes or default to float32
+                        dtype = str(ds.attrs.get("dtype", "float32"))
+                        data = encode(audio, sr, codec_write, dtype)
                     if key in group_write:
                         del group_write[key]
                     ds_write = group_write.create_dataset(

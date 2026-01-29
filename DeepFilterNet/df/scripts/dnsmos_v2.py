@@ -53,7 +53,8 @@ def download_onnx_model():
 def dnsmos_local(audio_in: Tensor, onnx: str) -> Tuple[float, float, float]:
     assert len(audio_in) >= SR, f"Audio to short: {audio_in.shape}"
 
-    audio = np.ndarray(audio_in, dtype=audio_in.dtype).to_device(audio_in.device)
+    # Convert tensor to numpy array for ONNX inference
+    audio = audio_in.detach().cpu().numpy()
 
     session = get_ort_session(onnx)
 

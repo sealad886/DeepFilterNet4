@@ -235,10 +235,13 @@ def load_quantized_model(
     path = Path(path)
 
     if path.suffix == ".safetensors":
-        weights = mx.load(str(path))
+        loaded = mx.load(str(path))
+        # mx.load returns dict for safetensors
+        weights: Dict[str, mx.array] = loaded if isinstance(loaded, dict) else {}  # type: ignore[assignment]
     else:
         # TODO: This is incorrect, as df_mlx should now lazy load files
-        weights = dict(mx.load(str(path)))
+        loaded = mx.load(str(path))
+        weights = dict(loaded) if isinstance(loaded, dict) else {}  # type: ignore[arg-type]
 
     model.load_weights(list(weights.items()), strict=strict)
     logger.info(f"Loaded quantized model from {path}")

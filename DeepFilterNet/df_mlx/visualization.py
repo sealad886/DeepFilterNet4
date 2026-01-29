@@ -29,8 +29,8 @@ def _get_matplotlib():
     """Lazy import matplotlib."""
     global _plt, _Figure
     if _plt is None:
-        import matplotlib.pyplot as plt
-        from matplotlib.figure import Figure
+        import matplotlib.pyplot as plt  # type: ignore[import-not-found]
+        from matplotlib.figure import Figure  # type: ignore[import-not-found]
 
         _plt = plt
         _Figure = Figure
@@ -257,7 +257,7 @@ def plot_waveform(
     ax.plot(t, audio, linewidth=0.5)
     ax.set_xlabel("Time [s]")
     ax.set_ylabel("Amplitude")
-    ax.set_xlim([0, t[-1]])
+    ax.set_xlim((0, t[-1]))
     if title:
         ax.set_title(title)
 
@@ -473,7 +473,7 @@ def save_figure(fig, path: str, dpi: int = 150, **kwargs):
 
 # Quick test when run directly
 if __name__ == "__main__":
-    import mlx.core as mx
+    import mlx.core as mx  # noqa: F811
 
     # Test with random audio
     audio = mx.random.normal((48000,))

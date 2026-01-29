@@ -177,7 +177,7 @@ def export(
 
 def main(args):
     try:
-        import monkeytype  # noqa: F401
+        import monkeytype  # noqa: F401  # type: ignore[import-not-found]
     except ImportError:
         print("Failed to import monkeytype. Please install it via")
         print("$ pip install MonkeyType")

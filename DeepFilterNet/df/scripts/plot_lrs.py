@@ -1,6 +1,6 @@
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # type: ignore[import-not-found]
 import numpy as np
-from icecream import install  # noqa
+from icecream.builtins import install  # noqa
 
 from df.lr import cosine_scheduler
 
