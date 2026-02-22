@@ -52,9 +52,9 @@ class EncoderParams:
 
 @dataclass
 class BackboneParams:
-    """Backbone (Mamba/GRU) parameters."""
+    """Backbone (Mamba/GRU/Attention) parameters."""
 
-    backbone_type: Literal["mamba", "gru"] = "mamba"
+    backbone_type: Literal["mamba", "gru", "attention"] = "mamba"
     nb_layers: int = 4  # Number of backbone layers
     hidden_dim: int = 256  # Hidden dimension
     d_state: int = 16  # State dimension for Mamba

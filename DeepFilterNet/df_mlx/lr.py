@@ -25,6 +25,7 @@ def cosine_scheduler(
     warmup_steps: int = 0,
     cycle_decay: float = 1.0,
     cycle_mul: float = 1.0,
+    start_global_step: int = 0,
 ) -> Iterator[Tuple[int, int, float]]:
     """Cosine learning rate scheduler with warmup and cyclic decay.
 
@@ -47,6 +48,8 @@ def cosine_scheduler(
             (1.0 = no decay, 0.9 = 10% reduction each cycle)
         cycle_mul: Multiplier for cycle length at each restart
             (1.0 = same length, 2.0 = double length each cycle)
+        start_global_step: Global step to skip to analytically. Steps before
+            this are not yielded. Cycle state is computed without O(N) replay.
 
     Yields:
         Tuple of (epoch, step, learning_rate) for each training step
@@ -75,8 +78,30 @@ def cosine_scheduler(
     cycle_length = cycle_steps
     cycle_num = 0
 
-    for epoch in range(epochs):
-        for step in range(steps_per_epoch):
+    # Analytical fast-forward: compute cycle state at start_global_step without
+    # O(N) iteration.  Only steps >= start_global_step are yielded.
+    if start_global_step > 0 and cycle_length > 0:
+        global_step = start_global_step
+        if start_global_step > warmup_total:
+            steps_into_cycles = start_global_step - warmup_total
+            if cycle_mul == 1.0:
+                cycle_num = steps_into_cycles // cycle_length
+                cycle_start = warmup_total + cycle_num * cycle_length
+            else:
+                remaining = steps_into_cycles
+                while remaining >= cycle_length:
+                    remaining -= cycle_length
+                    cycle_num += 1
+                    cycle_start += cycle_length
+                    cycle_length = int(cycle_length * cycle_mul)
+            current_lr = base_lr * (cycle_decay**cycle_num)
+
+    start_epoch = global_step // steps_per_epoch
+    start_step_in_epoch = global_step % steps_per_epoch
+
+    for epoch in range(start_epoch, epochs):
+        first_step = start_step_in_epoch if epoch == start_epoch else 0
+        for step in range(first_step, steps_per_epoch):
             if global_step < warmup_total:
                 # Linear warmup
                 lr = base_lr * global_step / max(warmup_total, 1)
@@ -213,7 +238,8 @@ class CosineScheduler:
     def load_state_dict(self, state: dict) -> None:
         """Load scheduler state from checkpoint.
 
-        This recreates the generator and advances it to the saved position.
+        This recreates the generator starting at the saved position using
+        analytical fast-forward (O(1) instead of replaying O(N) steps).
 
         Args:
             state: State dictionary from state_dict()
@@ -228,7 +254,9 @@ class CosineScheduler:
         self.cycle_decay = state["cycle_decay"]
         self.cycle_mul = state["cycle_mul"]
 
-        # Recreate generator
+        # Recreate generator with analytical fast-forward to saved position.
+        # +1 because state captures the last completed step; resume from next.
+        target_global_step = state["current_epoch"] * self.steps_per_epoch + state["current_step"]
         self._generator = cosine_scheduler(
             base_lr=self.base_lr,
             min_lr=self.min_lr,
@@ -238,15 +266,8 @@ class CosineScheduler:
             warmup_steps=self.warmup_steps,
             cycle_decay=self.cycle_decay,
             cycle_mul=self.cycle_mul,
+            start_global_step=target_global_step + 1,
         )
-
-        # Advance to saved position
-        target_global_step = state["current_epoch"] * self.steps_per_epoch + state["current_step"]
-        for _ in range(target_global_step):
-            try:
-                next(self._generator)
-            except StopIteration:
-                break
 
         self.current_epoch = state["current_epoch"]
         self.current_step = state["current_step"]

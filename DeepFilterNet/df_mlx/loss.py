@@ -24,6 +24,8 @@ from .ops import get_window, stft
 
 EPS = 1e-10
 
+_ZERO = mx.array(0.0)
+
 
 def as_complex(x: mx.array) -> Tuple[mx.array, mx.array]:
     """Convert real tensor with last dim 2 to (real, imag) tuple."""
@@ -153,7 +155,7 @@ class SpectralLoss:
         if target.ndim == 1:
             target = mx.expand_dims(target, axis=0)
 
-        total_loss = mx.array(0.0)
+        total_loss = _ZERO
 
         for fft_size, hop_size in zip(self.fft_sizes, self.hop_sizes):
             pred_real, pred_imag = stft(pred, n_fft=fft_size, hop_length=hop_size)
@@ -177,14 +179,17 @@ class SpectralLoss:
             # Complex loss
             if self.factor_complex is not None and self.factor_complex > 0:
                 if self.gamma != 1.0:
-                    # Apply compression to complex components
-                    pred_angle = mx.arctan2(pred_imag, pred_real + self.eps)
-                    target_angle = mx.arctan2(target_imag, target_real + self.eps)
+                    # Compressed complex: mag_c * (real/mag, imag/mag)
+                    # Avoids arctan2 whose gradient explodes as O(1/eps)
+                    # for near-silent bins. Direct division has stable
+                    # gradients of O(1/sqrt(eps)) since mag >= sqrt(eps).
+                    pred_phase = pred_mag_c / pred_mag
+                    target_phase = target_mag_c / target_mag
 
-                    pred_real_c = pred_mag_c * mx.cos(pred_angle)
-                    pred_imag_c = pred_mag_c * mx.sin(pred_angle)
-                    target_real_c = target_mag_c * mx.cos(target_angle)
-                    target_imag_c = target_mag_c * mx.sin(target_angle)
+                    pred_real_c = pred_phase * pred_real
+                    pred_imag_c = pred_phase * pred_imag
+                    target_real_c = target_phase * target_real
+                    target_imag_c = target_phase * target_imag
                 else:
                     pred_real_c = pred_real
                     pred_imag_c = pred_imag
@@ -268,7 +273,7 @@ class FusedSpectralLoss:
         if target.ndim == 1:
             target = mx.expand_dims(target, axis=0)
 
-        total_loss = mx.array(0.0)
+        total_loss = _ZERO
 
         for i, (fft_size, hop_size) in enumerate(zip(self.fft_sizes, self.hop_sizes)):
             window = self._windows[i]
@@ -291,13 +296,17 @@ class FusedSpectralLoss:
 
             if self.factor_complex is not None and self.factor_complex > 0:
                 if self.gamma != 1.0:
-                    pred_angle = mx.arctan2(pred_imag, pred_real + self.eps)
-                    target_angle = mx.arctan2(target_imag, target_real + self.eps)
+                    # Compressed complex: mag_c * (real/mag, imag/mag)
+                    # Avoids arctan2 whose gradient explodes as O(1/eps)
+                    # for near-silent bins. Direct division has stable
+                    # gradients of O(1/sqrt(eps)) since mag >= sqrt(eps).
+                    pred_phase = pred_mag_c / pred_mag
+                    target_phase = target_mag_c / target_mag
 
-                    pred_real_c = pred_mag_c * mx.cos(pred_angle)
-                    pred_imag_c = pred_mag_c * mx.sin(pred_angle)
-                    target_real_c = target_mag_c * mx.cos(target_angle)
-                    target_imag_c = target_mag_c * mx.sin(target_angle)
+                    pred_real_c = pred_phase * pred_real
+                    pred_imag_c = pred_phase * pred_imag
+                    target_real_c = target_phase * target_real
+                    target_imag_c = target_phase * target_imag
                 else:
                     pred_real_c = pred_real
                     pred_imag_c = pred_imag
@@ -397,77 +406,6 @@ class MaskLoss:
         return loss
 
 
-class MaskSpecLoss:
-    """Combined mask and spectral loss.
-
-    Computes both mask prediction loss and resulting spectral loss after
-    applying the mask.
-
-    Args:
-        erb_fb: ERB filterbank matrix
-        mask_type: Target mask type
-        f_mask: Factor for mask loss
-        f_spectral: Factor for spectral loss
-        gamma_mask: Mask compression
-        gamma_spec: Spectral magnitude compression
-    """
-
-    def __init__(
-        self,
-        erb_fb: mx.array,
-        mask_type: Literal["wg", "irm", "iam"] = "wg",
-        f_mask: float = 1.0,
-        f_spectral: float = 1.0,
-        gamma_mask: float = 0.6,
-        gamma_spec: float = 0.3,
-    ):
-        self.mask_loss = MaskLoss(erb_fb, mask_type, f_mask, gamma=gamma_mask)
-        self.gamma_spec = gamma_spec
-        self.f_spectral = f_spectral
-        self.erb_fb = erb_fb
-
-    def __call__(
-        self,
-        pred_mask: mx.array,
-        clean_erb: mx.array,
-        noisy_erb: mx.array,
-        noisy_spec: mx.array,
-        clean_spec: mx.array,
-    ) -> mx.array:
-        """Compute combined loss.
-
-        Args:
-            pred_mask: Predicted ERB mask
-            clean_erb: Clean ERB features
-            noisy_erb: Noisy ERB features
-            noisy_spec: Noisy spectrum (for applying mask)
-            clean_spec: Clean spectrum (target)
-
-        Returns:
-            Combined loss value
-        """
-        # Mask loss
-        loss = self.mask_loss(pred_mask, clean_erb, noisy_erb)
-
-        # Spectral loss (apply mask and compare)
-        if self.f_spectral > 0:
-            # Interpolate mask to full freq resolution
-            mask_full = mx.matmul(pred_mask, self.erb_fb)  # (batch, time, freq)
-            enhanced_spec = noisy_spec * mx.expand_dims(mask_full, axis=-1)
-
-            pred_mag = complex_norm(enhanced_spec[..., 0], enhanced_spec[..., 1])
-            target_mag = complex_norm(clean_spec[..., 0], clean_spec[..., 1])
-
-            if self.gamma_spec != 1.0:
-                pred_mag = mx.power(pred_mag, self.gamma_spec)
-                target_mag = mx.power(target_mag, self.gamma_spec)
-
-            spec_loss = mx.mean((pred_mag - target_mag) ** 2) * self.f_spectral
-            loss = loss + spec_loss
-
-        return loss
-
-
 # ============================================================================
 # SDR Losses
 # ============================================================================
@@ -490,8 +428,10 @@ def si_sdr(pred: mx.array, target: mx.array, eps: float = EPS) -> mx.array:
     Returns:
         SI-SDR in dB (higher is better)
     """
-    pred = pred.astype(mx.float32)
-    target = target.astype(mx.float32)
+    if pred.dtype != mx.float32:
+        pred = pred.astype(mx.float32)
+    if target.dtype != mx.float32:
+        target = target.astype(mx.float32)
 
     if pred.ndim == 1:
         pred = mx.expand_dims(pred, axis=0)
@@ -564,20 +504,25 @@ class SegmentalSiSdrLoss:
 
     def __call__(self, pred: mx.array, target: mx.array) -> mx.array:
         """Compute segmental SI-SDR loss using vectorized segmentation."""
+        if pred.dtype != mx.float32:
+            pred = pred.astype(mx.float32)
+        if target.dtype != mx.float32:
+            target = target.astype(mx.float32)
+
         if pred.ndim == 1:
             pred = mx.expand_dims(pred, axis=0)
         if target.ndim == 1:
             target = mx.expand_dims(target, axis=0)
 
         batch, samples = pred.shape
+
+        # Fall back to global SI-SDR when signal is shorter than one segment
+        if samples < self.segment_size:
+            return -si_sdr(pred, target) * self.factor
+
         n_segments = max(1, (samples - self.segment_size) // self.hop_size + 1)
 
-        # Ensure we have valid segments
-        if n_segments == 0:
-            return mx.array(0.0)
-
         # Vectorized segmentation using mx.take
-        # Create indices for all segments at once
         segment_starts = mx.arange(n_segments) * self.hop_size  # [n_segments]
         offsets = mx.arange(self.segment_size)  # [segment_size]
         indices = segment_starts[:, None] + offsets[None, :]  # [n_segments, segment_size]
@@ -595,6 +540,10 @@ class SegmentalSiSdrLoss:
         seg_pred = seg_pred_flat.reshape(batch, n_segments, self.segment_size)
         seg_target = seg_target_flat.reshape(batch, n_segments, self.segment_size)
 
+        # Per-segment mean removal (required for true SI-SDR)
+        seg_pred = seg_pred - mx.mean(seg_pred, axis=-1, keepdims=True)
+        seg_target = seg_target - mx.mean(seg_target, axis=-1, keepdims=True)
+
         # Compute SI-SDR for all segments at once
         # s_target projection: <s_hat, s_target> / ||s_target||^2 * s_target
         dot = mx.sum(seg_pred * seg_target, axis=-1, keepdims=True)  # [batch, n_segments, 1]
@@ -605,9 +554,10 @@ class SegmentalSiSdrLoss:
         noise = seg_pred - s_target_proj
 
         # SI-SDR per segment: [batch, n_segments]
-        signal_pow = mx.sum(s_target_proj**2, axis=-1)
+        # eps in both numerator and denominator for consistent silence handling
+        signal_pow = mx.sum(s_target_proj**2, axis=-1) + EPS
         noise_pow = mx.sum(noise**2, axis=-1) + EPS
-        sisdr = 10 * mx.log10(signal_pow / noise_pow + EPS)
+        sisdr = 10 * mx.log10(signal_pow / noise_pow)
 
         # Mean over segments and batch
         return -mx.mean(sisdr) * self.factor
@@ -627,6 +577,11 @@ class SdrLoss:
 
     def __call__(self, pred: mx.array, target: mx.array) -> mx.array:
         """Compute negative SDR loss."""
+        if pred.dtype != mx.float32:
+            pred = pred.astype(mx.float32)
+        if target.dtype != mx.float32:
+            target = target.astype(mx.float32)
+
         if pred.ndim == 1:
             pred = mx.expand_dims(pred, axis=0)
         if target.ndim == 1:
@@ -752,15 +707,17 @@ class FeatureMatchingLoss:
         Returns:
             Feature matching loss (scalar)
         """
-        loss = mx.array(0.0)
-        n_features = 0
-
+        # Collect per-layer means instead of sequential scalar accumulation.
+        # This breaks the chain dependency in the compiled graph, allowing
+        # independent mx.mean(mx.abs(...)) ops to be scheduled in parallel.
+        means: list[mx.array] = []
         for real_disc, fake_disc in zip(real_fmaps, fake_fmaps):
             for real_feat, fake_feat in zip(real_disc, fake_disc):
-                loss = loss + mx.mean(mx.abs(real_feat - fake_feat))
-                n_features += 1
+                means.append(mx.mean(mx.abs(real_feat - fake_feat)))
 
-        return loss / max(n_features, 1) * self.factor
+        if not means:
+            return _ZERO
+        return mx.mean(mx.stack(means)) * self.factor
 
 
 # ============================================================================
@@ -783,17 +740,14 @@ def discriminator_loss(
     Returns:
         Tuple of (total_loss, real_loss, fake_loss)
     """
-    real_loss = mx.array(0.0)
-    fake_loss = mx.array(0.0)
-
-    for real_out, fake_out in zip(real_outputs, fake_outputs):
-        # Hinge loss
-        real_loss = real_loss + mx.mean(mx.maximum(1 - real_out, 0))
-        fake_loss = fake_loss + mx.mean(mx.maximum(1 + fake_out, 0))
-
     n_disc = len(real_outputs)
-    real_loss = real_loss / n_disc
-    fake_loss = fake_loss / n_disc
+    if n_disc == 0:
+        return _ZERO, _ZERO, _ZERO
+    # Collect per-discriminator losses, then stack+mean to break chain dependency
+    real_means = [mx.mean(mx.maximum(1 - r, 0)) for r in real_outputs]
+    fake_means = [mx.mean(mx.maximum(1 + f, 0)) for f in fake_outputs]
+    real_loss = mx.mean(mx.stack(real_means))
+    fake_loss = mx.mean(mx.stack(fake_means))
     total_loss = real_loss + fake_loss
 
     return total_loss, real_loss, fake_loss
@@ -811,13 +765,12 @@ def generator_loss(fake_outputs: list[mx.array]) -> mx.array:
     Returns:
         Generator loss (scalar)
     """
-    loss = mx.array(0.0)
-
-    for fake_out in fake_outputs:
-        # Generator wants fake_out to be high (close to 1)
-        loss = loss + mx.mean(-fake_out)
-
-    return loss / len(fake_outputs)
+    n = len(fake_outputs)
+    if n == 0:
+        return _ZERO
+    # Collect per-discriminator losses, then stack+mean to break chain dependency
+    means = [mx.mean(-f) for f in fake_outputs]
+    return mx.mean(mx.stack(means))
 
 
 # ============================================================================
@@ -869,7 +822,7 @@ class CombinedLoss:
         noisy_erb: Optional[mx.array] = None,
         pred_alpha: Optional[mx.array] = None,
         target_lsnr: Optional[mx.array] = None,
-    ) -> Tuple[mx.array, Dict[str, float]]:
+    ) -> Tuple[mx.array, Dict[str, mx.array]]:
         """Compute combined loss with breakdown.
 
         Args:
@@ -882,126 +835,35 @@ class CombinedLoss:
             target_lsnr: Optional target LSNR
 
         Returns:
-            Tuple of (total_loss, loss_breakdown_dict)
+            Tuple of (total_loss, loss_breakdown_dict) where dict values are lazy mx.array
         """
-        losses: Dict[str, float] = {}
-        total_loss = mx.array(0.0)
+        losses: Dict[str, mx.array] = {}
+        total_loss = _ZERO
 
         # Spectral loss
         spec_loss = self.spectral_loss(pred_wav, target_wav)
-        losses["spectral"] = float(spec_loss)
+        losses["spectral"] = spec_loss
         total_loss = total_loss + spec_loss
 
         # SI-SDR loss
         if self.sisdr_loss is not None:
             sisdr = self.sisdr_loss(pred_wav, target_wav)
-            losses["sisdr"] = float(sisdr)
+            losses["sisdr"] = sisdr
             total_loss = total_loss + sisdr
 
         # Mask loss
         if self.mask_loss is not None and pred_mask is not None:
             if clean_erb is not None and noisy_erb is not None:
                 mask_l = self.mask_loss(pred_mask, clean_erb, noisy_erb)
-                losses["mask"] = float(mask_l)
+                losses["mask"] = mask_l
                 total_loss = total_loss + mask_l
 
         # Alpha loss
         if self.alpha_loss is not None and pred_alpha is not None:
             if target_lsnr is not None:
                 alpha_l = self.alpha_loss(pred_alpha, target_lsnr)
-                losses["alpha"] = float(alpha_l)
+                losses["alpha"] = alpha_l
                 total_loss = total_loss + alpha_l
 
-        losses["total"] = float(total_loss)
+        losses["total"] = total_loss
         return total_loss, losses
-
-
-# ============================================================================
-# ASR Loss (placeholder for Whisper-based loss)
-# ============================================================================
-
-
-class ASRLoss:
-    """ASR-based loss using Whisper embeddings.
-
-    NOTE: This is a placeholder. Full implementation requires
-    whisper integration which is already in df.loss.ASRLoss.
-    For MLX, consider using mlx-whisper.
-
-    Args:
-        factor: Loss weight for embedding similarity
-        factor_lm: Loss weight for language model loss
-        model: Whisper model name
-    """
-
-    def __init__(
-        self,
-        factor: float = 1.0,
-        factor_lm: float = 1.0,
-        model: str = "base.en",
-    ):
-        raise NotImplementedError(
-            "MLX ASRLoss is not yet implemented. " "Use df.loss.ASRLoss (PyTorch) or disable ASR loss in your config."
-        )
-
-    def _lazy_init(self):
-        """Lazy initialization of Whisper model."""
-        if self._initialized:
-            return
-
-        try:
-            import mlx_whisper
-
-            self.whisper = mlx_whisper.load_models.load_model(self.model)
-            self._initialized = True
-        except ImportError:
-            raise ImportError("ASRLoss requires mlx-whisper. Install with: pip install mlx-whisper")
-
-    def __call__(
-        self,
-        pred: mx.array,
-        target: mx.array,
-    ) -> mx.array:
-        """Compute ASR embedding loss.
-
-        Args:
-            pred: Predicted audio (batch, samples)
-            target: Target audio (batch, samples)
-
-        Returns:
-            ASR embedding loss
-        """
-        self._lazy_init()
-        # TODO: Implement full ASR loss with MLX Whisper
-        # For now, return placeholder
-        raise NotImplementedError("Full ASR loss implementation pending. " "Use df.loss.ASRLoss for PyTorch version.")
-
-
-# ============================================================================
-# Factory Functions
-# ============================================================================
-
-
-def create_loss_fn(
-    loss_type: str = "combined",
-    **kwargs,
-) -> CombinedLoss | SpectralLoss | FusedSpectralLoss | SiSdrLoss:
-    """Factory function to create loss functions.
-
-    Args:
-        loss_type: Type of loss ("combined", "spectral", "fused_spectral", "sisdr")
-        **kwargs: Arguments passed to loss constructor
-
-    Returns:
-        Configured loss function
-    """
-    if loss_type == "combined":
-        return CombinedLoss(**kwargs)
-    elif loss_type == "spectral":
-        return SpectralLoss(**kwargs)
-    elif loss_type == "fused_spectral":
-        return FusedSpectralLoss(**kwargs)
-    elif loss_type == "sisdr":
-        return SiSdrLoss(**kwargs)
-    else:
-        raise ValueError(f"Unknown loss type: {loss_type}")

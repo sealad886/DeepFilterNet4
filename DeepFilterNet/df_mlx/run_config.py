@@ -370,11 +370,11 @@ class TrainingConfig:
     )
     fp16: bool | None = cfg_field(
         None,
-        help="Enable FP16 (true/false) or 'auto' for hardware default",
+        help="Enable reduced-precision training (BF16). True/false or 'auto' for hardware default",
         normalize=_normalize_fp16,
         none_sentinel="auto",
         choices=["auto", True, False],
-        notes="If set to 'auto', hardware defaults determine FP16 usage.",
+        notes="If set to 'auto', hardware defaults determine mixed-precision usage. Uses BF16 internally.",
     )
     seed: int | None = cfg_field(
         None,
@@ -701,6 +701,27 @@ class GanConfig:
         False,
         help="Enable experimental GAN-phase compilation (R&D only, see docs/GAN_COMPILE_EXPERIMENT.md)",
         normalize=_normalize_bool,
+    )
+    cache_gen_waveforms: bool = cfg_field(
+        True,
+        help="Cache waveforms from gen loss path for disc update (avoids redundant iSTFT)",
+        normalize=_normalize_bool,
+    )
+    disc_gradient_checkpoint: bool = cfg_field(
+        False,
+        help="Use gradient checkpointing for disc forward in gen loss path (saves memory, ~1.5x disc compute)",
+        normalize=_normalize_bool,
+    )
+    gen_gradient_checkpoint: bool = cfg_field(
+        False,
+        help="Use gradient checkpointing for generator model (saves ~7 GB memory, ~20%% slower gen compute)",
+        normalize=_normalize_bool,
+    )
+    eval_frequency: int = cfg_field(
+        2,
+        help="GAN-epoch eval_frequency override (0 = use training.eval_frequency unchanged; "
+        "N > 0 caps eval_frequency to min(training.eval_frequency, N) during GAN epochs)",
+        normalize=lambda v: _normalize_int(v, min_value=0),
     )
 
 

@@ -3,7 +3,7 @@ import numpy as np
 
 from df_mlx.ops import istft
 from df_mlx.train import MultiResolutionSTFTLoss
-from df_mlx.train_dynamic import compute_mrstft_loss
+from df_mlx.training_waveform import compute_mrstft_loss
 
 
 def test_mrstft_loss_force_fp32_is_finite():

@@ -544,3 +544,63 @@ def _my_vjp(primals, cotangents, _outputs):
 - [DeepFilterNet/df_mlx/ops.py](../DeepFilterNet/df_mlx/ops.py) — `istft` Metal kernel path (differentiable)
 - [DeepFilterNet/df_mlx/dnsmos_proxy.py](../DeepFilterNet/df_mlx/dnsmos_proxy.py) — `MelSpectrogram` uses Metal kernel in all modes
 - [DeepFilterNet/tests/test_metal_kernel_training_guard.py](../DeepFilterNet/tests/test_metal_kernel_training_guard.py) — VJP correctness tests
+
+---
+
+### Training Module Structure
+
+**Status:** REQUIRED
+**Scope:** All `DeepFilterNet/df_mlx/training_*.py` modules and `train_dynamic.py`
+
+**Rule:** Training code is organized into focused, single-responsibility modules
+extracted from the original `train_dynamic.py` monolith. New training code must
+be placed in the appropriate module rather than added back to `train_dynamic.py`.
+
+**Module Layout:**
+
+| Module | Responsibility |
+|--------|---------------|
+| `training_losses.py` | Loss constants and `_compute_*` loss functions |
+| `training_checkpoints.py` | `CheckpointManifest`, `CheckpointRecord`, save/load/prune |
+| `training_cli.py` | CLI flag parsing, pipeline-stage resolution, CLI overrides |
+| `training_ops.py` | `NumericDebugger`, `NumericDebugConfig`, gradient utilities |
+| `training_signals.py` | Signal handlers (SIGINT, SIGUSR1) and graceful-stop flags |
+| `training_waveform.py` | Waveform synthesis and GAN waveform utilities |
+| `training_cli_main.py` | `main()` entry point: argparse, config layering, `train()` dispatch |
+| `training_session.py` | `TrainingSession` facade: `from_run_config()`, `setup()`, `run()` |
+| `train_dynamic.py` | `train()` loop, re-export shim, dataset/model setup |
+
+**Re-export Policy:**
+
+- `train_dynamic.py` re-exports all public symbols from the `training_*` modules
+  so that existing external imports continue to work.
+- **New code** should import from the canonical `training_*.py` module directly
+  (e.g., `from df_mlx.training_losses import _compute_stft_loss`).
+- Re-exports exist solely for backward compatibility and will not be extended
+  with new symbols.
+
+**Naming Conventions:**
+
+- Internal loss functions use the `_compute_*` prefix (e.g., `_compute_multi_res_stft_loss`).
+- Private helpers use a leading underscore; public API symbols do not.
+- Module names use `training_` prefix to group them alphabetically.
+
+**Rationale:**
+
+The original `train_dynamic.py` grew to 7 631 lines. Decomposition into focused
+modules enables targeted testing, faster code navigation, clearer ownership, and
+reduces merge-conflict surface area. The re-export shim preserves backward
+compatibility while the codebase migrates to canonical imports.
+
+**Related Files:**
+
+- [DeepFilterNet/df_mlx/train_dynamic.py](../DeepFilterNet/df_mlx/train_dynamic.py) — re-export shim + `train()` loop
+- [DeepFilterNet/df_mlx/training_losses.py](../DeepFilterNet/df_mlx/training_losses.py) — loss functions
+- [DeepFilterNet/df_mlx/training_checkpoints.py](../DeepFilterNet/df_mlx/training_checkpoints.py) — checkpoint management
+- [DeepFilterNet/df_mlx/training_cli.py](../DeepFilterNet/df_mlx/training_cli.py) — CLI parsing
+- [DeepFilterNet/df_mlx/training_ops.py](../DeepFilterNet/df_mlx/training_ops.py) — numeric debug + gradient ops
+- [DeepFilterNet/df_mlx/training_signals.py](../DeepFilterNet/df_mlx/training_signals.py) — signal handling
+- [DeepFilterNet/df_mlx/training_waveform.py](../DeepFilterNet/df_mlx/training_waveform.py) — waveform utilities
+- [DeepFilterNet/df_mlx/training_cli_main.py](../DeepFilterNet/df_mlx/training_cli_main.py) — main entry point
+- [DeepFilterNet/df_mlx/training_session.py](../DeepFilterNet/df_mlx/training_session.py) — TrainingSession class
+- [DeepFilterNet/tests/test_train_dynamic_reexports.py](../DeepFilterNet/tests/test_train_dynamic_reexports.py) — re-export coverage test

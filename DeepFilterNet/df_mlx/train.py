@@ -15,6 +15,7 @@ Optimized for Apple Silicon with:
 """
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional, Tuple
@@ -25,6 +26,7 @@ import mlx.optimizers as optim
 import numpy as np
 
 from .config import LossConfig, TrainConfig
+from .loss import SpectralLoss
 from .model import DfNet4, count_parameters
 
 # ============================================================================
@@ -360,10 +362,15 @@ def spectral_loss(
     pred_real, pred_imag = pred
     target_real, target_imag = target
 
-    pred_real = pred_real.astype(mx.float32)
-    pred_imag = pred_imag.astype(mx.float32)
-    target_real = target_real.astype(mx.float32)
-    target_imag = target_imag.astype(mx.float32)
+    # Cast to FP32 only when needed (avoids tracing overhead for already-FP32 inputs)
+    if pred_real.dtype != mx.float32:
+        pred_real = pred_real.astype(mx.float32)
+    if pred_imag.dtype != mx.float32:
+        pred_imag = pred_imag.astype(mx.float32)
+    if target_real.dtype != mx.float32:
+        target_real = target_real.astype(mx.float32)
+    if target_imag.dtype != mx.float32:
+        target_imag = target_imag.astype(mx.float32)
 
     # Magnitude loss
     pred_mag = mx.sqrt(pred_real**2 + pred_imag**2 + 1e-8)
@@ -374,42 +381,6 @@ def spectral_loss(
     complex_loss = mx.mean(mx.abs(pred_real - target_real) + mx.abs(pred_imag - target_imag))
 
     return (1 - alpha) * mag_loss + alpha * complex_loss
-
-
-def multi_resolution_stft_loss(
-    pred: mx.array,
-    target: mx.array,
-    fft_sizes: Tuple[int, ...] = (512, 1024, 2048),
-    hop_sizes: Optional[Tuple[int, ...]] = None,
-) -> mx.array:
-    """Multi-resolution STFT loss.
-
-    Computes spectral loss at multiple resolutions for better
-    time-frequency trade-off.
-
-    Args:
-        pred: Predicted waveform (batch, samples)
-        target: Target waveform (batch, samples)
-        fft_sizes: Tuple of FFT sizes
-        hop_sizes: Tuple of hop sizes (defaults to fft_size // 4)
-
-    Returns:
-        Scalar loss value
-    """
-    from .ops import stft
-
-    if hop_sizes is None:
-        hop_sizes = tuple(fft // 4 for fft in fft_sizes)
-
-    total_loss = mx.array(0.0)
-
-    for fft_size, hop_size in zip(fft_sizes, hop_sizes):
-        pred_spec = stft(pred, n_fft=fft_size, hop_length=hop_size)
-        target_spec = stft(target, n_fft=fft_size, hop_length=hop_size)
-
-        total_loss = total_loss + spectral_loss(pred_spec, target_spec)
-
-    return total_loss / len(fft_sizes)
 
 
 class MultiResolutionSTFTLoss:
@@ -465,8 +436,20 @@ class MultiResolutionSTFTLoss:
         self.f_complex = f_complex
         self.eps = eps
 
+        # Delegate core computation to canonical SpectralLoss (loss.py)
+        self._spectral_loss = SpectralLoss(
+            fft_sizes=self.fft_sizes,
+            hop_sizes=self.hop_sizes,
+            gamma=self.gamma,
+            factor=self.factor,
+            factor_complex=self.f_complex,
+            eps=self.eps,
+        )
+
     def __call__(self, pred: mx.array, target: mx.array) -> mx.array:
         """Compute multi-resolution STFT loss.
+
+        Delegates to SpectralLoss (loss.py) — the canonical implementation.
 
         Args:
             pred: Predicted waveform (batch, samples) or (samples,)
@@ -475,64 +458,7 @@ class MultiResolutionSTFTLoss:
         Returns:
             Scalar loss value
         """
-        from .ops import stft
-
-        # Handle 1D input
-        if pred.ndim == 1:
-            pred = mx.expand_dims(pred, axis=0)
-        if target.ndim == 1:
-            target = mx.expand_dims(target, axis=0)
-
-        total_loss = mx.array(0.0)
-
-        for fft_size, hop_size in zip(self.fft_sizes, self.hop_sizes):
-            # Compute STFTs
-            pred_real, pred_imag = stft(pred, n_fft=fft_size, hop_length=hop_size)
-            target_real, target_imag = stft(target, n_fft=fft_size, hop_length=hop_size)
-
-            # Compute magnitudes
-            pred_mag = mx.sqrt(pred_real**2 + pred_imag**2 + self.eps)
-            target_mag = mx.sqrt(target_real**2 + target_imag**2 + self.eps)
-
-            # Apply gamma compression if needed
-            if self.gamma != 1.0:
-                pred_mag_comp = mx.power(mx.maximum(pred_mag, self.eps), self.gamma)
-                target_mag_comp = mx.power(mx.maximum(target_mag, self.eps), self.gamma)
-            else:
-                pred_mag_comp = pred_mag
-                target_mag_comp = target_mag
-
-            # Magnitude loss (MSE)
-            mag_loss = mx.mean((pred_mag_comp - target_mag_comp) ** 2) * self.factor
-            total_loss = total_loss + mag_loss
-
-            # Complex loss (optional)
-            if self.f_complex is not None and self.f_complex > 0:
-                if self.gamma != 1.0:
-                    # Reconstruct complex with compressed magnitude
-                    # pred_complex = pred_mag_comp * exp(i * angle(pred))
-                    pred_angle = mx.arctan2(pred_imag, pred_real + self.eps)
-                    pred_real_comp = pred_mag_comp * mx.cos(pred_angle)
-                    pred_imag_comp = pred_mag_comp * mx.sin(pred_angle)
-
-                    target_angle = mx.arctan2(target_imag, target_real + self.eps)
-                    target_real_comp = target_mag_comp * mx.cos(target_angle)
-                    target_imag_comp = target_mag_comp * mx.sin(target_angle)
-                else:
-                    pred_real_comp = pred_real
-                    pred_imag_comp = pred_imag
-                    target_real_comp = target_real
-                    target_imag_comp = target_imag
-
-                # MSE on real/imag components
-                complex_loss = (
-                    mx.mean((pred_real_comp - target_real_comp) ** 2)
-                    + mx.mean((pred_imag_comp - target_imag_comp) ** 2)
-                ) * self.f_complex
-                total_loss = total_loss + complex_loss
-
-        # Average over resolutions
-        return total_loss / len(self.fft_sizes)
+        return self._spectral_loss(pred, target)
 
     def compute_per_resolution(self, pred: mx.array, target: mx.array) -> Dict[str, mx.array]:
         """Compute loss breakdown per resolution (for logging).
@@ -592,103 +518,6 @@ class MultiResolutionSTFTLoss:
         )
 
 
-def snr_loss(
-    pred: mx.array,
-    target: mx.array,
-    eps: float = 1e-8,
-) -> mx.array:
-    """Signal-to-noise ratio loss (negative SNR for minimization).
-
-    Args:
-        pred: Predicted signal
-        target: Target signal
-        eps: Small constant for numerical stability
-
-    Returns:
-        Negative SNR (to minimize)
-    """
-    noise = pred - target
-    signal_power = mx.sum(target**2) + eps
-    noise_power = mx.sum(noise**2) + eps
-
-    snr = 10 * mx.log10(signal_power / noise_power)
-    return -snr  # Negative for minimization
-
-
-def lsnr_loss(
-    pred_lsnr: mx.array,
-    target_lsnr: mx.array,
-    lsnr_min: float = -15.0,
-    lsnr_max: float = 40.0,
-) -> mx.array:
-    """LSNR (Local SNR) prediction loss.
-
-    L1 loss between predicted and target LSNR values, clipped to valid range.
-
-    Args:
-        pred_lsnr: Predicted LSNR (batch, time, 1)
-        target_lsnr: Target LSNR (batch, time, 1)
-        lsnr_min: Minimum valid LSNR value
-        lsnr_max: Maximum valid LSNR value
-
-    Returns:
-        Scalar loss value
-    """
-    # Clip to valid range
-    pred_clipped = mx.clip(pred_lsnr, lsnr_min, lsnr_max)
-    target_clipped = mx.clip(target_lsnr, lsnr_min, lsnr_max)
-
-    return mx.mean(mx.abs(pred_clipped - target_clipped))
-
-
-# ============================================================================
-# Combined Loss Functions (Module-Level)
-# ============================================================================
-
-
-def combined_loss(
-    pred: Tuple[mx.array, mx.array],
-    target: Tuple[mx.array, mx.array],
-    alpha_spec: float = 1.0,
-    alpha_time: float = 0.1,
-) -> mx.array:
-    """Combined spectral and time-domain loss for training.
-
-    This is a convenience function combining spectral loss and time-domain loss
-    for use in custom training loops outside the Trainer class.
-
-    Args:
-        pred: Predicted spectrum as (real, imag)
-        target: Target spectrum as (real, imag)
-        alpha_spec: Weight for spectral loss (magnitude + complex)
-        alpha_time: Weight for time-domain loss (waveform)
-
-    Returns:
-        Combined scalar loss value
-
-    Example:
-        >>> loss = combined_loss(
-        ...     pred=(out_real, out_imag),
-        ...     target=(target_real, target_imag),
-        ...     alpha_spec=1.0,
-        ...     alpha_time=0.1,
-        ... )
-    """
-    # Spectral loss (magnitude + complex)
-    spec_loss = spectral_loss(pred, target, alpha=0.5)
-
-    # Time-domain loss via ISTFT approximation
-    pred_real, pred_imag = pred
-    target_real, target_imag = target
-
-    # Approximate time-domain error using magnitude difference
-    pred_mag = mx.sqrt(pred_real**2 + pred_imag**2 + 1e-8)
-    target_mag = mx.sqrt(target_real**2 + target_imag**2 + 1e-8)
-    time_loss = mx.mean((pred_mag - target_mag) ** 2)
-
-    return alpha_spec * spec_loss + alpha_time * time_loss
-
-
 def save_checkpoint(
     model: nn.Module,
     optimizer: optim.Optimizer | None = None,
@@ -728,23 +557,30 @@ def save_checkpoint(
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_weights = path.with_name(f"{path.stem}.tmp{path.suffix}")
 
-    # Save model weights
     params = model.parameters()
     flat_params = tree_flatten(params)
     weights = {k: v for k, v in flat_params}
-    mx.save_safetensors(str(path), weights)
+    if weights:
+        mx.eval(*weights.values())
+    mx.save_safetensors(str(tmp_weights), weights)
 
-    # Save training state as JSON
     state_path = path.with_suffix(".json")
+    tmp_state = state_path.with_name(f"{state_path.stem}.tmp{state_path.suffix}")
     state = {
         "epoch": epoch,
         "step": step,
         "loss": loss,
         **extra_state,
     }
-    with open(state_path, "w") as f:
+    with open(tmp_state, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+
+    tmp_weights.replace(path)
+    tmp_state.replace(state_path)
 
     return path
 
@@ -1055,7 +891,9 @@ class Trainer:
         return total_loss / max(count, 1)
 
     def save_checkpoint(self, filename: str):
-        """Save model checkpoint.
+        """Save model checkpoint atomically.
+
+        Uses temp files + atomic rename to prevent corruption on crash.
 
         Args:
             filename: Checkpoint filename
@@ -1063,15 +901,18 @@ class Trainer:
         from mlx.utils import tree_flatten
 
         path = self.checkpoint_dir / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_weights = path.with_name(f"{path.stem}.tmp{path.suffix}")
 
-        # Save weights - flatten the nested dict to a flat dict for safetensors
         params = self.model.parameters()
         flat_params = tree_flatten(params)
         weights = {k: v for k, v in flat_params}
-        mx.save_safetensors(str(path), weights)
+        if weights:
+            mx.eval(*weights.values())
+        mx.save_safetensors(str(tmp_weights), weights)
 
-        # Save training state
         state_path = path.with_suffix(".json")
+        tmp_state = state_path.with_name(f"{state_path.stem}.tmp{state_path.suffix}")
         state = {
             "step": self.step,
             "best_loss": self.best_loss,
@@ -1081,8 +922,13 @@ class Trainer:
                 "warmup_steps": self.config.warmup_steps,
             },
         }
-        with open(state_path, "w") as f:
+        with open(tmp_state, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+
+        tmp_weights.replace(path)
+        tmp_state.replace(state_path)
 
         print(f"Saved checkpoint: {path}")
 
@@ -1092,16 +938,29 @@ class Trainer:
         Args:
             path: Path to checkpoint file
         """
+        from mlx.utils import tree_flatten, tree_unflatten
+
         path = Path(path)
 
-        # Load weights
         weights = mx.load(str(path))
-        self.model.load_weights(weights)
 
-        # Load training state if exists
+        flat_model = tree_flatten(self.model.parameters())
+        pairs = []
+        missing = []
+        for name, param in flat_model:
+            if isinstance(weights, dict) and name in weights:
+                pairs.append((name, weights[name]))
+            else:
+                pairs.append((name, param))
+                missing.append(name)
+
+        self.model.update(tree_unflatten(pairs))
+        if missing:
+            print(f"⚠️  {len(missing)} parameters were missing in checkpoint")
+
         state_path = path.with_suffix(".json")
         if state_path.exists():
-            with open(state_path) as f:
+            with open(state_path, encoding="utf-8") as f:
                 state = json.load(f)
             self.step = state.get("step", 0)
             self.best_loss = state.get("best_loss", float("inf"))
@@ -1186,7 +1045,7 @@ def load_pytorch_checkpoint(
     mlx_weights = convert_pytorch_weights(numpy_state)
 
     # Load into model
-    model.load_weights(mlx_weights)
+    model.load_weights(list(mlx_weights.items()))
 
     print(f"Loaded PyTorch checkpoint: {checkpoint_path}")
     return model

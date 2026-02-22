@@ -1,5 +1,7 @@
 # OOM-safe variant of run_pipeline_awesome_gan_silero_single.toml
 # Tuned for safer GAN activation on Apple Silicon by reducing peak memory pressure.
+# Optimized for minimal sync barriers during GAN training (see perf(gan) commit).
+#
 # Usage:
 #   python -m df_mlx.train_dynamic \
 #     --run-config DeepFilterNet/df_mlx/configs/run_profiles/run_pipeline_awesome_gan_silero_single_oom_safe.toml
@@ -16,7 +18,8 @@ warmup_epochs = 5
 patience = 10
 grad_accumulation_steps = 2
 max_grad_norm = 0.8
-eval_frequency = 10
+# Leave eval_frequency at default (10) so sync_mode="fast" can override to 50.
+# During GAN epochs, gan.eval_frequency caps it further (see [gan] section).
 fp16 = true
 seed = 42
 
@@ -32,7 +35,7 @@ validate_every = 1
 checkpoint_batches = 200
 check_chkpts = false
 resume = true
-resume_data = false
+resume_data = true
 
 [model]
 backbone_type = "attention"
@@ -56,7 +59,7 @@ hop_sizes = [128, 256, 512]
 
 [gan]
 enabled = true
-start_epoch = 40
+start_epoch = 20
 ramp_epochs = 12
 adv_weight = 0.06
 fm_weight = 1.0
@@ -70,6 +73,12 @@ disc_update_freq = 2
 disc_max_samples = 48000    # crop waveforms to 1s for discriminator (saves ~4x memory)
 mpd_channels = 16           # halved from default 32 for OOM safety
 msd_channels = 64           # halved from default 128 for OOM safety
+# --- Sync barrier optimizations ---
+cache_gen_waveforms = true   # reuse gen-path waveforms for disc (avoids redundant iSTFT)
+disc_gradient_checkpoint = true  # trade ~1.5x disc compute for lower peak memory
+eval_frequency = 4           # eval every 4th GAN step (caps training.eval_frequency during GAN)
+                             # Higher = fewer syncs = faster, but delays OOM/NaN detection.
+                             # Safe range: 2-8. Use 2 if you see OOM from graph accumulation.
 
 [vad]
 loss_weight = 0.05
@@ -99,8 +108,8 @@ every_steps = 4
 eval_sisdr = false
 
 [debug]
-verbose = true
-sync_mode = "fast"
+verbose = false
+sync_mode = "fast"           # Uses eval_frequency=50 for pre-GAN epochs (max throughput)
 debug_numerics = false
 debug_numerics_fail_fast = true
 debug_numerics_every = 1
@@ -117,5 +126,4 @@ speech_boost_min_silence_ms = 100
 speech_boost_pad_ms = 30
 speech_boost_ramp_ms = 8.0
 speech_boost_peak_limit = 0.99
-speech_boost_silero_model_path = ""
 speech_boost_silero_sample_rate = 16000

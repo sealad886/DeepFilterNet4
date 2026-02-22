@@ -12,7 +12,7 @@ All modules are optimized for Apple Silicon unified memory architecture.
 """
 
 import math
-from typing import Optional, Tuple, Union, cast
+from typing import Optional, Tuple, Union
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -338,20 +338,8 @@ class ErbFilterbank(nn.Module):
         return self.forward(spec)
 
 
-def erb_fb(sr: int = 48000, fft_size: int = 960, nb_bands: int = 32, **kwargs) -> mx.array:
-    """Convenience function to create ERB filterbank matrix.
-
-    Args:
-        sr: Sample rate
-        fft_size: FFT size
-        nb_bands: Number of ERB bands
-        **kwargs: Additional arguments for make_erb_fb
-
-    Returns:
-        ERB filterbank matrix (n_freqs, nb_bands)
-    """
-    return cast(mx.array, make_erb_fb(sr=sr, fft_size=fft_size, nb_bands=nb_bands, **kwargs))
-
+# Re-export erb_fb from ops (canonical implementation) for backward compatibility
+from .ops import erb_fb  # noqa: E402, F401
 
 # ============================================================================
 # Mask Operations
@@ -1219,7 +1207,9 @@ class SqueezedAttention(nn.Module):
 
         for _ in range(num_layers):
             self.norms.append(nn.LayerNorm(hidden_size))
-            self.attention_layers.append(nn.MultiHeadAttention(dims=hidden_size, num_heads=num_heads))
+            self.attention_layers.append(
+                nn.MultiHeadAttention(dims=hidden_size, num_heads=num_heads)
+            )
             self.ffn_norms.append(nn.LayerNorm(hidden_size))
             self.ffns.append(
                 nn.Sequential(
@@ -1231,7 +1221,9 @@ class SqueezedAttention(nn.Module):
 
         # Output projection
         if output_size is not None and output_size != hidden_size:
-            self.linear_out: Optional[nn.Module] = GroupedLinear(hidden_size, output_size, linear_groups)
+            self.linear_out: Optional[nn.Module] = GroupedLinear(
+                hidden_size, output_size, linear_groups
+            )
         else:
             self.linear_out = None
 
@@ -1257,13 +1249,21 @@ class SqueezedAttention(nn.Module):
         if self.linear_act is not None:
             out = self.linear_act(out)
 
-        # Create causal mask once
+        # Causal mask: cache by (seq_len, dtype) to avoid per-call recomputation
         seq_len = out.shape[1]
-        mask = nn.MultiHeadAttention.create_additive_causal_mask(seq_len)
-        mask = mask.astype(out.dtype)
+        cache_key = (seq_len, out.dtype)
+        if not hasattr(self, "_mask_cache") or getattr(self, "_mask_cache_key", None) != cache_key:
+            mask = nn.MultiHeadAttention.create_additive_causal_mask(seq_len)
+            mask = mask.astype(out.dtype)
+            self._mask_cache = mask
+            self._mask_cache_key = cache_key
+        else:
+            mask = self._mask_cache
 
         # Apply attention layers with pre-norm and residual
-        for norm, attn, ffn_norm, ffn in zip(self.norms, self.attention_layers, self.ffn_norms, self.ffns):
+        for norm, attn, ffn_norm, ffn in zip(
+            self.norms, self.attention_layers, self.ffn_norms, self.ffns
+        ):
             # Self-attention with pre-norm
             normed = norm(out)
             attn_out = attn(normed, normed, normed, mask=mask)

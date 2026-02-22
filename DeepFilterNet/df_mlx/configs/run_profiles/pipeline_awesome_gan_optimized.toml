@@ -1,0 +1,151 @@
+# Benchmark-optimized GAN training profile for Apple Silicon (M3 Pro / M4 Max 36GB)
+#
+# Derived from run_pipeline_awesome_gan_silero_single_oom_safe.toml via
+# systematic throughput sweeps (benchmark_gan_throughput.py).
+#
+# Key optimizations (cumulative relative to OOM-safe baseline):
+#   - gen_gradient_checkpoint=true    → 2.0x throughput, 3.2x less memory (10.5→3.3 GB peak)
+#   - batch_size 12 → 24             → larger batches fill GPU better
+#   - disc_max_samples 48000 → 24000 → 22% faster disc (0.5s still enough for MPD/MSD)
+#   - eval_frequency 4 → 6           → fewer sync barriers, +10% throughput
+#   - prefetch_size 12 → 16          → better data pipeline overlap
+#   - checkpoint_batches 200 → 300   → less frequent I/O
+#
+# Benchmark results (synthetic GAN steps, M3 Pro 36GB, gen+disc ckpt):
+#   BS=24 GA=2 EF=6 DUF=2 DMS=24k GGC=Y DGC=Y → 107.8 samp/s, 3.91 GB peak  ← BEST
+#   BS=24 GA=2 EF=6 DUF=2 DMS=32k GGC=Y DGC=Y →  99.8 samp/s, 3.91 GB peak  (conservative)
+#   BS=24 GA=2 EF=6 DUF=2 DMS=48k GGC=Y DGC=Y →  88.3 samp/s, 3.91 GB peak  (original)
+#   BS=32 GA=2 EF=6 DUF=2 DMS=24k GGC=Y DGC=Y → 106.4 samp/s, 4.75 GB peak  (marginal gain)
+#
+# Evolution:  48.5 samp/s (baseline) → 89 samp/s (gen ckpt) → 107.8 samp/s (full sweep)
+#             = 2.2x total improvement
+#
+# Usage:
+#   python -m df_mlx.train_dynamic \
+#     --run-config DeepFilterNet/df_mlx/configs/run_profiles/pipeline_awesome_gan_optimized.toml
+
+[dataset]
+cache_dir = "/Users/andrew/DataDump/datasets/mlx_datastore"
+
+[training]
+epochs = 200
+batch_size = 24              # up from 12→16→24: best throughput at 107.8 samp/s, 3.91 GB peak
+learning_rate = 1e-6
+weight_decay = 0.0
+warmup_epochs = 5
+patience = 10
+grad_accumulation_steps = 2  # effective batch = 48. GA=2 amortizes disc cost well.
+max_grad_norm = 0.8
+# eval_frequency left at default (10) so sync_mode="fast" overrides to 50 pre-GAN.
+# During GAN epochs, gan.eval_frequency caps it (see [gan] section).
+fp16 = true
+seed = 42
+
+[dataloader]
+num_workers = 8              # M4 Max "max" profile: 8 workers
+prefetch_size = 16           # up from 12: better data pipeline overlap for bs=16
+use_mlx_data = true
+
+[checkpoint]
+checkpoint_dir = "/Users/andrew/DataDump/checkpoints/gan_optimized_vad_weighted"
+save_strategy = "epoch"
+save_total_limit = 3        # keep last 3 epoch/step checkpoints; best.safetensors is preserved separately
+validate_every = 1
+checkpoint_batches = 300     # up from 200: less frequent checkpoint I/O
+check_chkpts = false
+resume = true
+resume_data = true
+
+[model]
+backbone_type = "attention"
+variant = "full"
+
+[loss]
+dynamic_loss = "pipeline_awesome"
+
+[loss.awesome]
+loss_weight = 1.2
+mask_sharpness = 7.0
+warmup_steps = 2500
+proxy_enabled = false
+
+[loss.mrstft]
+factor = 0.2
+gamma = 0.7
+f_complex = 0.15
+fft_sizes = [512, 1024, 2048]
+hop_sizes = [128, 256, 512]
+
+[gan]
+enabled = true
+start_epoch = 150
+ramp_epochs = 12
+adv_weight = 0.06
+fm_weight = 1.0
+discriminator = "combined"
+mpd_periods = [2, 3, 5, 7, 11]
+msd_scales = 3
+disc_lr = 1e-5
+disc_weight_decay = 0.01
+disc_grad_clip = 1.0
+disc_update_freq = 2         # benchmarked: DUF=2 optimal (DUF=3 marginal gain at DMS=24k)
+disc_max_samples = 24000     # crop to 0.5s for discriminator — benchmarked: 22% faster than 48k
+                             # DMS=32k is conservative fallback (99.8 vs 107.8 samp/s).
+mpd_channels = 16            # halved from default 32 for OOM safety
+msd_channels = 64            # halved from default 128 for OOM safety
+# --- Sync barrier optimizations (all benchmarked) ---
+cache_gen_waveforms = true   # saves ~10 GB peak memory + 5% throughput
+disc_gradient_checkpoint = true  # CRITICAL: without it, peak memory jumps to 34 GB
+gen_gradient_checkpoint = true   # CRITICAL: saves ~7 GB gen intermediates, 2x throughput
+eval_frequency = 6           # benchmarked sweet spot: EF=6 gives best samp/s
+                             # EF=10 is ~1% faster but delays NaN detection 5→10 batches.
+                             # EF=2 loses ~6% throughput from extra sync barriers.
+                             # Safe range: 4-10. Use 4 if graph accumulation causes OOM.
+
+[vad]
+loss_weight = 0.8
+threshold = 0.58
+margin = 0.05
+speech_loss_weight = 0.6
+warmup_epochs = 5
+snr_gate_db = -12.0
+snr_gate_width = 6.0
+band_low_hz = 300.0
+band_high_hz = 3400.0
+z_threshold = 0.0
+z_slope = 1.0
+
+[vad.eval]
+mode = "silero"
+every = 2
+batches = 24
+max_seconds = 0.0
+silero_sample_rate = 16000
+
+[vad.train]
+prob = 0.05
+every_steps = 2
+
+[metrics]
+eval_sisdr = false
+
+[debug]
+verbose = false
+sync_mode = "fast"           # pre-GAN: eval_frequency=50 (max throughput)
+debug_numerics = false
+debug_numerics_fail_fast = true
+debug_numerics_every = 1
+debug_numerics_dump_dir = ""
+debug_numerics_dump_arrays = false
+debug_numerics_max_dumps = 5
+nan_skip_batch = false
+
+[enhance]
+speech_boost_db = 4.0
+speech_boost_threshold = 0.4
+speech_boost_min_speech_ms = 250
+speech_boost_min_silence_ms = 100
+speech_boost_pad_ms = 30
+speech_boost_ramp_ms = 8.0
+speech_boost_peak_limit = 0.99
+speech_boost_silero_sample_rate = 16000

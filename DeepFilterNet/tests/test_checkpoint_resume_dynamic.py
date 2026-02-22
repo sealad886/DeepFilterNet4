@@ -10,7 +10,7 @@ import pytest
 # Ensure the df_mlx package is importable when running tests from repo root
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from df_mlx.train_dynamic import compute_resume_epoch, save_checkpoint, validate_checkpoint_dir  # noqa: E402
+from df_mlx.training_checkpoints import compute_resume_epoch, save_checkpoint, validate_checkpoint_dir  # noqa: E402
 
 
 class TinyModel(nn.Module):

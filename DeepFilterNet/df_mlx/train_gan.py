@@ -11,6 +11,7 @@ Based on the PyTorch implementation in df/train.py with adaptations for MLX.
 """
 
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,7 +27,7 @@ from .checkpoint import CheckpointManager, PatienceState, check_patience
 from .config import LossConfig
 from .discriminator import CombinedDiscriminator
 from .evaluation import ValidationMetrics
-from .loss import CombinedLoss, FeatureMatchingLoss, discriminator_loss, generator_loss
+from .loss import FeatureMatchingLoss, discriminator_loss, generator_loss
 from .lr import CosineScheduler
 from .model import DfNet4, count_parameters
 from .train import MultiResolutionSTFTLoss
@@ -142,7 +143,6 @@ class GANTrainer:
         # Loss functions
         self.spectral_loss = MultiResolutionSTFTLoss.from_config(self.loss_config)
         self.feature_matching_loss = FeatureMatchingLoss()
-        self.combined_loss = CombinedLoss(self.loss_config)
 
         # Checkpoint manager
         self.checkpoint_dir = Path(config.checkpoint_dir)
@@ -609,11 +609,13 @@ class GANTrainer:
         disc_flat = tree_flatten(disc_params)
         disc_weights = {f"discriminator.{k}": v for k, v in disc_flat}
 
-        # Combine and save
+        # Combine and save atomically (tmp → replace)
         all_weights = {**gen_weights, **disc_weights}
-        mx.save_safetensors(str(checkpoint_path), all_weights)
+        tmp_weights = checkpoint_path.with_name(f"{checkpoint_path.stem}.tmp{checkpoint_path.suffix}")
+        mx.save_safetensors(str(tmp_weights), all_weights)
+        os.replace(str(tmp_weights), str(checkpoint_path))
 
-        # Save training state
+        # Save training state atomically
         state_path = checkpoint_path.with_suffix(".json")
         state = {
             "epoch": self.epoch,
@@ -623,8 +625,12 @@ class GANTrainer:
             "gen_lr_state": self.gen_lr_schedule.state_dict(),
             "disc_lr_state": self.disc_lr_schedule.state_dict(),
         }
-        with open(state_path, "w") as f:
+        tmp_state = state_path.with_name(f"{state_path.stem}.tmp{state_path.suffix}")
+        with open(tmp_state, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(str(tmp_state), str(state_path))
 
         logger.info(f"Saved checkpoint: {checkpoint_path}")
 

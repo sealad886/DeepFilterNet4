@@ -41,28 +41,28 @@ applicability.
 
 | Trigger | Location | Mode Applicability | Cost | Purpose |
 |---------|----------|-------------------|------|---------|
-| Weight init | L2301 | All | One-time | Materialize model params |
-| Disc init | L2376 | All (if GAN) | One-time | Materialize disc params |
-| Training end | L5720 | All | One-time | Final sync before exit |
+| Weight init | `train()` init | All | One-time | Materialize model params |
+| Disc init | `train()` init | All (if GAN) | One-time | Materialize disc params |
+| Training end | `train()` cleanup | All | One-time | Final sync before exit |
 
 ### Per-Step / Per-eval_frequency Triggers
 
 | Trigger | Location | Mode Applicability | Cost | Purpose |
 |---------|----------|-------------------|------|---------|
-| Compiled periodic (loss+params+opt) | L4818 | Normal, Fast | Per-eval_freq | Loss readout + param/opt sync |
-| Compiled periodic (loss only) | L4820 | Normal, Fast | Per-eval_freq | Loss readout (no accum) |
-| Compiled state sync | L4843 | Normal, Fast | Per-eval_freq | Accumulated state sync |
-| Eager periodic (loss) | L4901 | Debug, Normal | Per-eval_freq | Loss readout |
-| Eager periodic (params+opt) | L4933 | Debug, Normal | Per-eval_freq | Param + optimizer sync |
-| Disc step | L4983 | All (if GAN) | Per-step | Sync disc params |
-| Validation forward pass | L4225 | All | Per-validate_every | Materialize validation audio |
+| Compiled periodic (loss+params+opt) | `train()` compiled loop | Normal, Fast | Per-eval_freq | Loss readout + param/opt sync |
+| Compiled periodic (loss only) | `train()` compiled loop | Normal, Fast | Per-eval_freq | Loss readout (no accum) |
+| Compiled state sync | `train()` compiled loop | Normal, Fast | Per-eval_freq | Accumulated state sync |
+| Eager periodic (loss) | `train()` eager loop | Debug, Normal | Per-eval_freq | Loss readout |
+| Eager periodic (params+opt) | `train()` eager loop | Debug, Normal | Per-eval_freq | Param + optimizer sync |
+| Disc step | `train()` GAN update | All (if GAN) | Per-step | Sync disc params |
+| Validation forward pass | `train()` validation | All | Per-validate_every | Materialize validation audio |
 
 ### Periodic / Boundary Triggers
 
 | Trigger | Location | Mode Applicability | Cost | Purpose |
 |---------|----------|-------------------|------|---------|
-| Steps checkpoint | L5413 | All | Per-save | Ensure consistent state for save |
-| Epoch end | L5447 | All | Per-epoch | Accurate epoch loss accumulation |
+| Steps checkpoint | `train()` checkpoint save | All | Per-save | Ensure consistent state for save |
+| Epoch end | `train()` epoch boundary | All | Per-epoch | Accurate epoch loss accumulation |
 
 ## Metric Classification
 

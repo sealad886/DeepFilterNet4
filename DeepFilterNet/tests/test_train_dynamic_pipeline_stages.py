@@ -1,6 +1,7 @@
 import pytest
 
-from df_mlx.train_dynamic import _parse_pipeline_stages_cli, _resolve_pipeline_stage, _snr_bucket_name
+from df_mlx.training_cli import _parse_pipeline_stages_cli, _resolve_pipeline_stage
+from df_mlx.training_losses import _snr_bucket_name
 
 
 def test_parse_pipeline_stages_cli_valid_json():

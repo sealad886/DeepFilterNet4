@@ -14,12 +14,10 @@ The discriminators output both final scores and intermediate feature maps
 for feature matching loss computation.
 """
 
-from typing import List, Literal, Tuple
+from typing import List, Tuple
 
 import mlx.core as mx
 import mlx.nn as nn
-
-from .loss import FeatureMatchingLoss, discriminator_loss, generator_loss
 
 # ============================================================================
 # Utility Functions
@@ -79,6 +77,8 @@ def weight_norm_conv1d(
         kernel_size=kernel_size,
         stride=stride,
         padding=padding,
+        dilation=dilation,
+        groups=groups,
     )
 
 
@@ -153,18 +153,20 @@ class PeriodDiscriminator(nn.Module):
         # Final output layer
         self.output = weight_norm_conv2d(channels * 16, 1, (3, 1), 1, (1, 0))
 
-    def __call__(self, x: mx.array) -> Tuple[mx.array, List[mx.array]]:
+    def __call__(self, x: mx.array, return_features: bool = True) -> Tuple[mx.array, List[mx.array] | None]:
         """Forward pass.
 
         Args:
             x: Audio waveform (batch, samples) or (batch, channels, samples)
+            return_features: Whether to collect intermediate feature maps.
+                Set to False during discriminator update to save memory.
 
         Returns:
             Tuple of (output, feature_maps) where:
                 - output: Discriminator scores
-                - feature_maps: List of intermediate features for feature matching
+                - feature_maps: List of intermediate features, or None
         """
-        feature_maps = []
+        feature_maps: list[mx.array] | None = [] if return_features else None
 
         # Handle input dimensions
         if x.ndim == 2:
@@ -190,11 +192,15 @@ class PeriodDiscriminator(nn.Module):
         for conv in self.convs:
             x = conv(x)
             x = nn.leaky_relu(x, negative_slope=0.1)
-            feature_maps.append(x)
+            if return_features:
+                assert feature_maps is not None
+                feature_maps.append(x)
 
         # Final output
         x = self.output(x)
-        feature_maps.append(x)
+        if return_features:
+            assert feature_maps is not None
+            feature_maps.append(x)
 
         # Flatten for output
         x = x.reshape(batch, -1)
@@ -236,16 +242,19 @@ class ScaleDiscriminator(nn.Module):
         # Final output
         self.output = weight_norm_conv1d(channels * 8, 1, 3, 1, padding=1)
 
-    def __call__(self, x: mx.array) -> Tuple[mx.array, List[mx.array]]:
+    def __call__(self, x: mx.array, return_features: bool = True) -> Tuple[mx.array, List[mx.array] | None]:
         """Forward pass.
 
         Args:
             x: Audio waveform (batch, samples) or (batch, samples, channels)
+            return_features: Whether to collect intermediate feature maps.
+                Set to False during discriminator update to save memory.
 
         Returns:
-            Tuple of (output, feature_maps)
+            Tuple of (output, feature_maps) where feature_maps is None
+                when return_features is False.
         """
-        feature_maps = []
+        feature_maps: list[mx.array] | None = [] if return_features else None
 
         # MLX Conv1d expects (N, L, C)
         if x.ndim == 2:
@@ -261,11 +270,15 @@ class ScaleDiscriminator(nn.Module):
         for conv in self.convs:
             x = conv(x)
             x = nn.leaky_relu(x, negative_slope=0.1)
-            feature_maps.append(x)
+            if return_features:
+                assert feature_maps is not None
+                feature_maps.append(x)
 
         # Final output
         x = self.output(x)
-        feature_maps.append(x)
+        if return_features:
+            assert feature_maps is not None
+            feature_maps.append(x)
 
         # Flatten for output
         x = x.reshape(batch, -1)
@@ -298,24 +311,27 @@ class MultiPeriodDiscriminator(nn.Module):
         self.periods = periods
         self.discriminators = [PeriodDiscriminator(period=p, channels=channels) for p in periods]
 
-    def __call__(self, x: mx.array) -> Tuple[List[mx.array], List[List[mx.array]]]:
+    def __call__(self, x: mx.array, return_features: bool = True) -> Tuple[List[mx.array], List[List[mx.array]] | None]:
         """Forward pass through all period discriminators.
 
         Args:
             x: Audio waveform (batch, samples)
+            return_features: Whether to collect intermediate feature maps.
 
         Returns:
             Tuple of:
                 - outputs: List of discriminator outputs
-                - feature_maps: List of feature map lists (one per discriminator)
+                - feature_maps: List of feature map lists, or None
         """
         outputs = []
-        all_features = []
+        all_features: list[list[mx.array]] | None = [] if return_features else None
 
         for disc in self.discriminators:
-            out, features = disc(x)
+            out, features = disc(x, return_features=return_features)
             outputs.append(out)
-            all_features.append(features)
+            if return_features:
+                assert all_features is not None
+                all_features.append(features)
 
         return outputs, all_features
 
@@ -365,26 +381,29 @@ class MultiScaleDiscriminator(nn.Module):
         x = x.reshape(batch, samples // factor, factor)
         return mx.mean(x, axis=-1)
 
-    def __call__(self, x: mx.array) -> Tuple[List[mx.array], List[List[mx.array]]]:
+    def __call__(self, x: mx.array, return_features: bool = True) -> Tuple[List[mx.array], List[List[mx.array]] | None]:
         """Forward pass through all scale discriminators.
 
         Args:
             x: Audio waveform (batch, samples)
+            return_features: Whether to collect intermediate feature maps.
 
         Returns:
             Tuple of:
                 - outputs: List of discriminator outputs
-                - feature_maps: List of feature map lists
+                - feature_maps: List of feature map lists, or None
         """
         outputs = []
-        all_features = []
+        all_features: list[list[mx.array]] | None = [] if return_features else None
 
         for i, disc in enumerate(self.discriminators):
             # Downsample input for this scale
             x_scaled = self._pool(x, self.pool_factor**i)
-            out, features = disc(x_scaled)
+            out, features = disc(x_scaled, return_features=return_features)
             outputs.append(out)
-            all_features.append(features)
+            if return_features:
+                assert all_features is not None
+                all_features.append(features)
 
         return outputs, all_features
 
@@ -420,22 +439,27 @@ class CombinedDiscriminator(nn.Module):
             channels=msd_channels,
         )
 
-    def __call__(self, x: mx.array) -> Tuple[List[mx.array], List[List[mx.array]]]:
+    def __call__(self, x: mx.array, return_features: bool = True) -> Tuple[List[mx.array], List[List[mx.array]] | None]:
         """Forward pass through both MPD and MSD.
 
         Args:
             x: Audio waveform (batch, samples)
+            return_features: Whether to collect intermediate feature maps.
 
         Returns:
             Tuple of:
                 - outputs: Combined list of all discriminator outputs
-                - feature_maps: Combined list of all feature map lists
+                - feature_maps: Combined list of all feature map lists, or None
         """
-        mpd_outs, mpd_features = self.mpd(x)
-        msd_outs, msd_features = self.msd(x)
+        mpd_outs, mpd_features = self.mpd(x, return_features=return_features)
+        msd_outs, msd_features = self.msd(x, return_features=return_features)
 
         outputs = mpd_outs + msd_outs
-        features = mpd_features + msd_features
+        if return_features:
+            assert mpd_features is not None and msd_features is not None
+            features = mpd_features + msd_features
+        else:
+            features = None
 
         return outputs, features
 
@@ -524,108 +548,3 @@ class SpectralDiscriminator(nn.Module):
         x = x.reshape(batch, -1)
 
         return x, feature_maps
-
-
-# ============================================================================
-# GAN Training Utilities
-# ============================================================================
-
-
-def compute_discriminator_loss(
-    discriminator: nn.Module,
-    real_audio: mx.array,
-    fake_audio: mx.array,
-) -> Tuple[mx.array, dict]:
-    """Compute discriminator loss on real and fake audio.
-
-    Args:
-        discriminator: Discriminator module
-        real_audio: Real audio samples (batch, samples)
-        fake_audio: Generated audio samples (batch, samples)
-
-    Returns:
-        Tuple of (loss, loss_dict) where loss_dict contains breakdown
-    """
-    # Stop gradients on fake audio for discriminator training
-    fake_audio = mx.stop_gradient(fake_audio)
-
-    # Forward pass
-    real_outs, _ = discriminator(real_audio)
-    fake_outs, _ = discriminator(fake_audio)
-
-    # Compute loss
-    total_loss, real_loss, fake_loss = discriminator_loss(real_outs, fake_outs)
-
-    return total_loss, {
-        "disc_loss": float(total_loss),
-        "disc_real": float(real_loss),
-        "disc_fake": float(fake_loss),
-    }
-
-
-def compute_generator_loss(
-    discriminator: nn.Module,
-    real_audio: mx.array,
-    fake_audio: mx.array,
-    feature_match_factor: float = 2.0,
-) -> Tuple[mx.array, dict]:
-    """Compute generator loss including adversarial and feature matching.
-
-    Args:
-        discriminator: Discriminator module
-        real_audio: Real audio samples (batch, samples)
-        fake_audio: Generated audio samples (batch, samples)
-        feature_match_factor: Weight for feature matching loss
-
-    Returns:
-        Tuple of (loss, loss_dict)
-    """
-    # Forward pass (with gradients on fake)
-    real_outs, real_features = discriminator(real_audio)
-    fake_outs, fake_features = discriminator(fake_audio)
-
-    # Adversarial loss - generator wants discriminator to output high for fake
-    adv_loss = generator_loss(fake_outs)
-
-    # Feature matching loss
-    fm_loss_fn = FeatureMatchingLoss(factor=feature_match_factor)
-    fm_loss = fm_loss_fn(real_features, fake_features)
-
-    total_loss = adv_loss + fm_loss
-
-    return total_loss, {
-        "gen_adv_loss": float(adv_loss),
-        "gen_fm_loss": float(fm_loss),
-        "gen_total_loss": float(total_loss),
-    }
-
-
-# ============================================================================
-# Factory Functions
-# ============================================================================
-
-
-def create_discriminator(
-    disc_type: Literal["combined", "mpd", "msd", "spectral"] = "combined",
-    **kwargs,
-) -> nn.Module:
-    """Create discriminator from type string.
-
-    Args:
-        disc_type: Type of discriminator
-        **kwargs: Arguments passed to discriminator constructor
-
-    Returns:
-        Discriminator module
-    """
-    discriminators = {
-        "combined": CombinedDiscriminator,
-        "mpd": MultiPeriodDiscriminator,
-        "msd": MultiScaleDiscriminator,
-        "spectral": SpectralDiscriminator,
-    }
-
-    if disc_type not in discriminators:
-        raise ValueError(f"Unknown discriminator type: {disc_type}. " f"Available: {list(discriminators.keys())}")
-
-    return discriminators[disc_type](**kwargs)

@@ -132,7 +132,7 @@ def read_patience(checkpoint_dir: Path | str) -> PatienceState:
 
 
 def write_patience(checkpoint_dir: Path | str, state: PatienceState) -> None:
-    """Write patience state to checkpoint directory.
+    """Write patience state to checkpoint directory atomically.
 
     Args:
         checkpoint_dir: Directory to save patience file
@@ -140,8 +140,12 @@ def write_patience(checkpoint_dir: Path | str, state: PatienceState) -> None:
     """
     path = Path(checkpoint_dir) / PATIENCE_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
+    tmp_path = path.with_suffix(".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(state.to_dict(), f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    tmp_path.replace(path)
 
 
 # ============================================================================
@@ -264,9 +268,11 @@ def save_checkpoint(
     # Save state atomically to prevent corruption on crash
     state_path = checkpoint_dir / STATE_FILE
     state_tmp = state_path.with_suffix(".tmp")
-    with open(state_tmp, "w") as f:
+    with open(state_tmp, "w", encoding="utf-8") as f:
         json.dump(state_dict, f, indent=2)
-    shutil.move(str(state_tmp), str(state_path))
+        f.flush()
+        os.fsync(f.fileno())
+    state_tmp.replace(state_path)
 
     # Save patience separately for easy access
     if state.patience is not None:
@@ -441,9 +447,9 @@ def save_model(
     model: nn.Module,
     path: Path | str,
 ) -> Path:
-    """Save model weights to file.
+    """Save model weights to file atomically.
 
-    Simple wrapper for saving just model weights.
+    Uses temp file + atomic rename to prevent corruption on crash.
 
     Args:
         model: Model to save
@@ -454,11 +460,15 @@ def save_model(
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.stem}.tmp{path.suffix}")
 
     params = model.parameters()
     flat_params = tree_flatten(params)
     weights = {k: v for k, v in flat_params}
-    mx.save_safetensors(str(path), weights)
+    if weights:
+        mx.eval(*weights.values())
+    mx.save_safetensors(str(tmp_path), weights)
+    tmp_path.replace(path)
 
     return path
 

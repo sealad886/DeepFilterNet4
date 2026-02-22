@@ -161,6 +161,17 @@ def save_audio(
     else:
         out_path = os.path.join(os.path.dirname(path), f"{name}{ext}")
 
+    # Guard against overwriting the original input file
+    if os.path.abspath(out_path) == os.path.abspath(path):
+        name = f"{os.path.splitext(basename)[0]}_enhanced"
+        if output_dir:
+            out_path = os.path.join(output_dir, f"{name}{ext}")
+        else:
+            out_path = os.path.join(os.path.dirname(path), f"{name}{ext}")
+        logger.warning(
+            f"Output path would overwrite input; using '{os.path.basename(out_path)}' instead"
+        )
+
     sf.write(out_path, audio, sr)
     return out_path
 
@@ -617,7 +628,7 @@ def enhance_file(
     # Calculate RTF
     audio_duration = len(audio) / params.sr
     processing_time = t1 - t0
-    rtf = processing_time / audio_duration
+    rtf = processing_time / max(audio_duration, 1e-8)
 
     # Save
     out_path = save_audio(
@@ -628,7 +639,10 @@ def enhance_file(
         suffix=suffix,
     )
 
-    logger.info(f"Enhanced '{os.path.basename(input_path)}' in {processing_time:.2f}s " f"(RT factor: {rtf:.3f})")
+    logger.info(
+        f"Enhanced '{os.path.basename(input_path)}' in {processing_time:.2f}s "
+        f"(RT factor: {rtf:.3f})"
+    )
 
     return out_path
 
@@ -771,7 +785,8 @@ def enhance_file_streaming(
         suffix=suffix,
     )
     logger.info(
-        f"Streaming-enhanced '{os.path.basename(input_path)}' in {processing_time:.2f}s " f"(RT factor: {rtf:.3f})"
+        f"Streaming-enhanced '{os.path.basename(input_path)}' in {processing_time:.2f}s "
+        f"(RT factor: {rtf:.3f})"
     )
     return out_path
 

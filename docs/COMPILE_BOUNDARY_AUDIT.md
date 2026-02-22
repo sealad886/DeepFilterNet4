@@ -12,7 +12,7 @@ The training loop defines **two compile boundaries** inside `train()`:
 
 | Property | Value |
 |----------|-------|
-| **Location** | `train_dynamic.py` ~L3778 |
+| **Location** | `train_dynamic.py`, inside `train()` |
 | **Decorator** | `@partial(mx.compile, inputs=state, outputs=state)` |
 | **Captured state** | `[model.state, optimizer.state]` |
 | **Arguments (14)** | `noisy_real`, `noisy_imag`, `feat_erb`, `feat_spec`, `clean_real`, `clean_imag`, `snr`, `vad_weight`, `speech_weight`, `awesome_weight`, `vad_reg_weight`, `gan_weight`, `fm_weight`, `max_grad_norm_val` |
@@ -23,7 +23,7 @@ The training loop defines **two compile boundaries** inside `train()`:
 
 | Property | Value |
 |----------|-------|
-| **Location** | `train_dynamic.py` ~L3825 |
+| **Location** | `train_dynamic.py`, inside `train()` |
 | **Decorator** | `@partial(mx.compile, inputs=[model.state], outputs=[model.state])` |
 | **Captured state** | `[model.state]` |
 | **Arguments (13)** | `noisy_real`, `noisy_imag`, `feat_erb`, `feat_spec`, `clean_real`, `clean_imag`, `snr`, `vad_weight`, `speech_weight`, `awesome_weight`, `vad_reg_weight`, `gan_weight`, `fm_weight` |

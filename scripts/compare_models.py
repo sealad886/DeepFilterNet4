@@ -103,29 +103,24 @@ class ComparisonResults:
 
 
 def find_latest_checkpoint(checkpoint_dir: str) -> Optional[str]:
-    """Find the most recent checkpoint in a directory."""
+    """Find the most recent checkpoint in a directory.
+
+    Searches both the given directory and its immediate subdirectories
+    for checkpoint files matching training naming conventions.
+    """
     checkpoint_path = Path(checkpoint_dir)
     if not checkpoint_path.exists():
         return None
 
-    # Look for step_*.safetensors or epoch_*.safetensors
-    patterns = ["step_*.safetensors", "epoch_*.safetensors"]
-    checkpoints = []
+    def _scan_dir(d: Path) -> list:
+        """Scan a single directory for checkpoint files."""
+        found = []
+        for pattern in ["step_*.safetensors", "epoch_*.safetensors"]:
+            found.extend(d.glob(pattern))
+        return found
 
-    for pattern in patterns:
-        checkpoints.extend(checkpoint_path.glob(pattern))
-
-    if not checkpoints:
-        # Try best.safetensors
-        best = checkpoint_path / "best.safetensors"
-        if best.exists():
-            return str(best)
-        return None
-
-    # Extract step/epoch numbers and sort
     def extract_number(p: Path) -> int:
         name = p.stem
-        # step_013000 or epoch_5
         parts = name.split("_")
         if len(parts) >= 2:
             try:
@@ -134,8 +129,30 @@ def find_latest_checkpoint(checkpoint_dir: str) -> Optional[str]:
                 return 0
         return 0
 
-    checkpoints.sort(key=extract_number, reverse=True)
-    return str(checkpoints[0])
+    # Search the directory itself first
+    checkpoints = _scan_dir(checkpoint_path)
+
+    # If nothing found, search immediate subdirectories
+    if not checkpoints:
+        for subdir in sorted(checkpoint_path.iterdir()):
+            if subdir.is_dir():
+                checkpoints.extend(_scan_dir(subdir))
+
+    if checkpoints:
+        checkpoints.sort(key=extract_number, reverse=True)
+        return str(checkpoints[0])
+
+    # Fall back to best.safetensors (in dir or any subdir)
+    best = checkpoint_path / "best.safetensors"
+    if best.exists():
+        return str(best)
+    for subdir in sorted(checkpoint_path.iterdir()):
+        if subdir.is_dir():
+            best = subdir / "best.safetensors"
+            if best.exists():
+                return str(best)
+
+    return None
 
 
 def get_audio_files(input_path: str) -> list:
@@ -389,15 +406,25 @@ class DeepFilterNet4MLXEnhancer:
         weights = mx.load(checkpoint_path)
         weight_keys = set(weights.keys())
 
-        # Check for attention-specific keys
         if any("attention_layers" in k for k in weight_keys):
             return "attention"
-        # Check for GRU-specific keys
-        elif any("gru_layers" in k or "gru.weight" in k for k in weight_keys):
+        if any("gru" in k.lower() for k in weight_keys):
             return "gru"
-        # Default to mamba
-        else:
-            return "mamba"
+        return "mamba"
+
+    def _load_config_from_state(self, checkpoint_path: str) -> dict:
+        """Load training config from the checkpoint's state file."""
+        ckpt = Path(checkpoint_path)
+        # Training saves state as <name>.state.json
+        state_path = ckpt.with_suffix(".state.json")
+        if not state_path.exists():
+            # Fallback: try <name>.json (older format)
+            state_path = ckpt.with_suffix(".json")
+        if state_path.exists():
+            with open(state_path) as f:
+                state = json.load(f)
+            return state.get("config", {})
+        return {}
 
     def initialize(self):
         if self._initialized:
@@ -407,17 +434,35 @@ class DeepFilterNet4MLXEnhancer:
         from df_mlx.model import init_model
         from df_mlx.train import load_checkpoint
 
-        # Detect backbone type from checkpoint
-        backbone_type = "gru"  # Default
+        config = ModelParams4()
+
         if self.checkpoint_path:
+            # Load training config from state file to match model architecture
+            train_cfg = self._load_config_from_state(self.checkpoint_path)
+            if train_cfg:
+                print(f"  [DFNet4-MLX] Loaded config from state file")
+                if "nb_df" in train_cfg:
+                    config.df.nb_df = train_cfg["nb_df"]
+                if "nb_erb" in train_cfg:
+                    config.erb.nb_erb = train_cfg["nb_erb"]
+                if "fft_size" in train_cfg:
+                    config.audio.fft_size = train_cfg["fft_size"]
+                    config.audio.nb_freqs = train_cfg["fft_size"] // 2 + 1
+                    config.audio.n_freqs = config.audio.nb_freqs
+                if "hop_size" in train_cfg:
+                    config.audio.hop_size = train_cfg["hop_size"]
+                if "model_variant" in train_cfg:
+                    print(f"  [DFNet4-MLX] Model variant: {train_cfg['model_variant']}")
+
+            # Detect backbone type from weights
             backbone_type = self._detect_backbone_type(self.checkpoint_path)
             print(f"  [DFNet4-MLX] Detected backbone: {backbone_type}")
+            config.backbone = BackboneParams(backbone_type=backbone_type)
 
-        # Create config with correct backbone type
-        config = ModelParams4()
-        config.backbone = BackboneParams(backbone_type=backbone_type)
-
-        self.model = init_model(config=config)
+        self.model = init_model(
+            config=config,
+            variant=train_cfg.get("model_variant", "full") if self.checkpoint_path and train_cfg else "full",
+        )
 
         if self.checkpoint_path:
             load_checkpoint(self.model, self.checkpoint_path)

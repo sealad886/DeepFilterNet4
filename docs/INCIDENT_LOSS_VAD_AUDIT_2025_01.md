@@ -74,10 +74,10 @@ sigma = mx.sqrt(mx.maximum(variance, _MIN_VARIANCE) + eps)
 ### Bug 3: Single-Frame Edge Cases (SEVERITY: MEDIUM)
 
 **Locations:**
-- `_compute_musicness()` line 597
-- `_compute_improved_musicness()` line 914  
-- `_compute_proxy_gates()` line 667
-- `_compute_pipeline_awesome_losses()` line 1063
+- `_compute_musicness()` in `training_losses.py`
+- `_compute_improved_musicness()` in `training_losses.py`
+- `_compute_proxy_gates()` in `training_losses.py`
+- `_compute_pipeline_awesome_losses()` in `training_losses.py`
 
 **Problem:** Frame-differencing operations like:
 ```python
@@ -100,7 +100,7 @@ Applied to 5 locations.
 
 ### Bug 4 (Identified, Not Fixed): VAD Loss Normalization
 
-**Location:** `_compute_vad_loss()` line 527
+**Location:** `_compute_vad_loss()` in `training_losses.py`
 
 **Problem:** VAD loss is normalized by batch size rather than by `sum(gate)`, meaning:
 - Batches with 50% speech frames have half the effective gradient as batches with 100% speech

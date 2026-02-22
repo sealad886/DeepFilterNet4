@@ -182,5 +182,6 @@ class TestShapeAssertionIntegration:
 
     def test_compiled_path_has_partial_batch_fallback(self):
         source = _TRAIN_DYNAMIC_PATH.read_text()
-        assert "use_compiled_step_for_batch = epoch_use_compiled_step and current_batch_size == batch_size" in source
+        assert "use_compiled_step_for_batch" in source
+        assert "epoch_use_compiled_step and current_batch_size == batch_size" in source
         assert "falling back to eager for this batch to avoid retrace" in source

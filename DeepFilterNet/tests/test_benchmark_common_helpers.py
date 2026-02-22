@@ -2,7 +2,13 @@ import math
 
 import numpy as np
 
-from df_mlx.benchmark_common import batch_size_from_batch, safe_percentile
+from df_mlx.benchmark_common import (
+    batch_size_from_batch,
+    get_chip_name,
+    get_gpu_cores,
+    get_memory_gb,
+    safe_percentile,
+)
 
 
 def test_safe_percentile_matches_numpy_and_handles_empty() -> None:
@@ -23,3 +29,19 @@ def test_batch_size_from_batch_prefers_snr_and_falls_back_to_first_tensor() -> N
 
     assert batch_size_from_batch(with_snr) == 7
     assert batch_size_from_batch(no_snr) == 5
+
+
+def test_get_chip_name_returns_nonempty_string() -> None:
+    name = get_chip_name()
+    assert isinstance(name, str)
+    assert len(name) > 0
+
+
+def test_get_gpu_cores_returns_int() -> None:
+    cores = get_gpu_cores()
+    assert isinstance(cores, int)
+
+
+def test_get_memory_gb_returns_int() -> None:
+    mem = get_memory_gb()
+    assert isinstance(mem, int)

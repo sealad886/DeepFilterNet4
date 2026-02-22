@@ -1,7 +1,12 @@
 import numpy as np
 
 from df_mlx import dynamic_dataset, prepare_data
-from df_mlx.feature_ops import compute_df_features, compute_erb_features, compute_stft, create_erb_filterbank
+from df_mlx.feature_ops import (
+    compute_df_features,
+    compute_erb_features,
+    compute_stft,
+    create_erb_filterbank,
+)
 
 
 def _legacy_compute_stft(
@@ -16,7 +21,8 @@ def _legacy_compute_stft(
     shape = (num_frames, fft_size)
     strides = (audio_padded.strides[0] * hop_size, audio_padded.strides[0])
     frames = np.lib.stride_tricks.as_strided(audio_padded, shape=shape, strides=strides, writeable=False)
-    return np.fft.rfft(frames * window, n=fft_size, axis=-1)
+    spec = np.fft.rfft(frames * window, n=fft_size, axis=-1)
+    return spec.astype(np.complex64) if spec.dtype != np.complex64 else spec
 
 
 def _legacy_create_erb_filterbank(

@@ -56,8 +56,8 @@ def _get_help_text() -> str:
 
 
 def test_all_runtime_config_flags_show_default_in_help() -> None:
-    train_dynamic = Path(__file__).resolve().parents[1] / "df_mlx" / "train_dynamic.py"
-    module = ast.parse(train_dynamic.read_text(encoding="utf-8"))
+    training_cli_main = Path(__file__).resolve().parents[1] / "df_mlx" / "training_cli_main.py"
+    module = ast.parse(training_cli_main.read_text(encoding="utf-8"))
     parser_flags = _collect_parser_flags(module)
 
     meta_only_flags = {"--run-config", "--print-run-config", "--preset"}

@@ -1,18 +1,76 @@
 """Shared helpers for df_mlx benchmark entrypoints.
 
-This module centralizes parsing/validation and dataset construction logic
-used by benchmark_pipeline.py and benchmark_train_step.py.
+This module centralizes parsing/validation, dataset construction, and
+hardware metadata collection used by benchmark_*.py scripts.
 """
 
 from __future__ import annotations
 
 import argparse
 import math
+import platform
+import subprocess
 from typing import Any, Dict, List, Sequence
 
 import numpy as np
 
 from df_mlx.dynamic_dataset import DatasetConfig, DynamicDataset, read_file_list
+
+# ---------------------------------------------------------------------------
+# Hardware metadata helpers
+# ---------------------------------------------------------------------------
+
+
+def get_chip_name() -> str:
+    """Return the Apple Silicon chip name via sysctl, or a fallback."""
+    try:
+        result = subprocess.run(
+            ["sysctl", "-n", "machdep.cpu.brand_string"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return platform.processor() or platform.machine()
+
+
+def get_gpu_cores() -> int:
+    """Return GPU core count on macOS via system_profiler, or -1."""
+    try:
+        result = subprocess.run(
+            ["system_profiler", "SPDisplaysDataType"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                if "Total Number of Cores" in line:
+                    parts = line.split(":")
+                    if len(parts) == 2:
+                        return int(parts[1].strip())
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
+        pass
+    return -1
+
+
+def get_memory_gb() -> int:
+    """Return total physical memory in GB via sysctl, or -1."""
+    try:
+        result = subprocess.run(
+            ["sysctl", "-n", "hw.memsize"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return int(result.stdout.strip()) // (1024**3)
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
+        pass
+    return -1
 
 
 def parse_csv_tokens(value: str) -> List[str]:

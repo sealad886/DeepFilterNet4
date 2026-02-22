@@ -86,7 +86,7 @@ def simple_training_loop(
         resume_from: Optional checkpoint to resume from
     """
     from df_mlx.model import count_parameters, init_model
-    from df_mlx.train import ModelStatistics, WarmupCosineSchedule, combined_loss, save_checkpoint
+    from df_mlx.train import ModelStatistics, WarmupCosineSchedule, save_checkpoint, spectral_loss
 
     # Initialize model
     print("Initializing model...")
@@ -139,12 +139,10 @@ def simple_training_loop(
         # Forward pass
         out_real, out_imag = model(spec, feat_erb, feat_spec)
 
-        # Compute combined loss
-        loss = combined_loss(
+        # Compute spectral loss
+        loss = spectral_loss(
             pred=(out_real, out_imag),
             target=target,
-            alpha_spec=1.0,
-            alpha_time=0.1,
         )
 
         return loss

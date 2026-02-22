@@ -129,39 +129,38 @@ def segmental_snr(
     reference = reference[:, :min_len]
     estimate = estimate[:, :min_len]
 
-    results = []
+    noise = reference - estimate
 
-    for b in range(batch):
-        ref_b = reference[b]
-        est_b = estimate[b]
-        noise_b = ref_b - est_b
+    n_frames = (min_len - frame_length) // hop_length + 1
+    if n_frames <= 0:
+        return mx.zeros((batch,))
 
-        # Frame the signals
-        n_frames = (min_len - frame_length) // hop_length + 1
-        frame_snrs = []
+    # Build frame indices: (n_frames, frame_length)
+    starts = mx.arange(n_frames) * hop_length
+    offsets = mx.arange(frame_length)
+    indices = starts[:, None] + offsets[None, :]  # (n_frames, frame_length)
 
-        for i in range(n_frames):
-            start = i * hop_length
-            end = start + frame_length
-            ref_frame = ref_b[start:end]
-            noise_frame = noise_b[start:end]
+    # Gather frames for entire batch at once: (batch, n_frames, frame_length)
+    ref_frames = mx.take(reference, indices.flatten(), axis=1).reshape(
+        batch, n_frames, frame_length
+    )
+    noise_frames = mx.take(noise, indices.flatten(), axis=1).reshape(batch, n_frames, frame_length)
 
-            ref_energy = mx.sum(ref_frame**2)
-            noise_energy = mx.sum(noise_frame**2) + eps
+    ref_energy = mx.sum(ref_frames**2, axis=-1)  # (batch, n_frames)
+    noise_energy = mx.sum(noise_frames**2, axis=-1) + eps  # (batch, n_frames)
 
-            # Only include frames with sufficient energy
-            if ref_energy > eps:
-                frame_snr = 10 * mx.log10(ref_energy / noise_energy)
-                # Clip to reasonable range
-                frame_snr = mx.clip(frame_snr, -10, 35)
-                frame_snrs.append(frame_snr)
+    frame_snr = 10 * mx.log10(ref_energy / noise_energy)
+    frame_snr = mx.clip(frame_snr, -10, 35)
 
-        if frame_snrs:
-            results.append(mx.mean(mx.stack(frame_snrs)))
-        else:
-            results.append(mx.array(0.0))
+    # Mask out frames with insufficient energy
+    valid = ref_energy > eps  # (batch, n_frames)
+    frame_snr = mx.where(valid, frame_snr, mx.array(0.0))
+    valid_count = mx.sum(valid.astype(mx.float32), axis=-1)  # (batch,)
+    valid_count = mx.maximum(valid_count, mx.array(1.0))
 
-    return mx.stack(results)
+    results = mx.sum(frame_snr, axis=-1) / valid_count  # (batch,)
+
+    return results
 
 
 # ============================================================================
@@ -594,7 +593,9 @@ class ValidationMetrics:
 
     def reset(self):
         """Reset metrics for new epoch."""
-        self.metrics = {name: self.factory[name]() for name in self.metric_names if name in self.factory}
+        self.metrics = {
+            name: self.factory[name]() for name in self.metric_names if name in self.factory
+        }
         self.n_samples = 0
 
     def update(
@@ -711,4 +712,7 @@ def log_improvement(
         noisy_val = comparison["noisy"][metric_name]
         enh_val = comparison["enhanced"][metric_name]
         imp_val = comparison["improvement"][metric_name]
-        logger.info(f"{prefix}{metric_name}: noisy={noisy_val:.2f} → enhanced={enh_val:.2f} " f"(Δ={imp_val:+.2f})")
+        logger.info(
+            f"{prefix}{metric_name}: noisy={noisy_val:.2f} → enhanced={enh_val:.2f} "
+            f"(Δ={imp_val:+.2f})"
+        )

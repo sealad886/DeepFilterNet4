@@ -36,6 +36,7 @@ import json
 import random
 import threading
 import time
+from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -195,7 +196,7 @@ class ShardedAudioCache:
 
         # Cache for loaded shards - keep NpzFile objects open for lazy loading
         self._shard_cache: Dict[str, Any] = {}  # NpzFile objects
-        self._shard_access: List[str] = []
+        self._shard_access: OrderedDict[str, bool] = OrderedDict()
         self._max_shards = 20  # Keep up to 20 shards in memory (lazy, so minimal RAM)
         self._lock = threading.Lock()
 
@@ -214,8 +215,7 @@ class ShardedAudioCache:
         with self._lock:
             if shard_rel_path in self._shard_cache:
                 # Move to end (most recently used)
-                self._shard_access.remove(shard_rel_path)
-                self._shard_access.append(shard_rel_path)
+                self._shard_access.move_to_end(shard_rel_path)
                 return self._shard_cache[shard_rel_path]
 
         # Open NpzFile lazily (arrays loaded on access, not upfront)
@@ -225,12 +225,13 @@ class ShardedAudioCache:
         with self._lock:
             # Evict oldest if at capacity
             while len(self._shard_cache) >= self._max_shards:
-                oldest = self._shard_access.pop(0)
+                oldest = next(iter(self._shard_access))
+                del self._shard_access[oldest]
                 old_npz = self._shard_cache.pop(oldest)
                 old_npz.close()
 
             self._shard_cache[shard_rel_path] = npz_file
-            self._shard_access.append(shard_rel_path)
+            self._shard_access[shard_rel_path] = True
 
         return npz_file
 
@@ -267,7 +268,7 @@ class AudioCache:
         self.max_size = max_size
         self.sample_rate = sample_rate
         self._cache: Dict[str, np.ndarray] = {}
-        self._access_order: List[str] = []
+        self._access_order: OrderedDict[str, bool] = OrderedDict()
         self._lock = threading.Lock()
 
     def get(self, path: str) -> Optional[np.ndarray]:
@@ -275,8 +276,7 @@ class AudioCache:
         with self._lock:
             if path in self._cache:
                 # Move to end (most recently used)
-                self._access_order.remove(path)
-                self._access_order.append(path)
+                self._access_order.move_to_end(path)
                 return self._cache[path]
         return None
 
@@ -288,11 +288,12 @@ class AudioCache:
 
             # Evict oldest if at capacity
             while len(self._cache) >= self.max_size:
-                oldest = self._access_order.pop(0)
+                oldest = next(iter(self._access_order))
+                del self._access_order[oldest]
                 del self._cache[oldest]
 
             self._cache[path] = audio
-            self._access_order.append(path)
+            self._access_order[path] = True
 
     def load(self, path: str) -> np.ndarray:
         """Load audio from cache or disk."""
@@ -1447,9 +1448,11 @@ class MLXDataStream:
         self.dataset.set_split(self._checkpoint.split)
         self.dataset.set_epoch(self._checkpoint.epoch)
 
-        # Track iteration state
+        # Track iteration state – initialise from checkpoint so that
+        # get_progress() returns the correct batch count before __iter__
+        # is called (e.g. during resume-position validation).
         self._stream: Optional[Any] = None
-        self._batch_count = 0
+        self._batch_count = self._checkpoint.batch_idx
 
     @classmethod
     def from_checkpoint(
@@ -1714,10 +1717,11 @@ class MLXDataStream:
             Dictionary with progress metrics
         """
         total_batches = len(self)
+        batch = self._checkpoint.batch_idx
         return {
             "epoch": self._checkpoint.epoch,
-            "batch": self._batch_count,
+            "batch": batch,
             "total_batches": total_batches,
             "samples_processed": self._checkpoint.samples_processed,
-            "progress_pct": 100.0 * self._batch_count / max(total_batches, 1),
+            "progress_pct": 100.0 * batch / max(total_batches, 1),
         }

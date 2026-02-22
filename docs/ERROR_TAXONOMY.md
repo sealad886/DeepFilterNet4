@@ -16,13 +16,13 @@ Catalog known failure modes in speech enhancement to guide model evaluation, los
 - **Root Cause**: Aggressive noise estimation when SNR is low; VAD misclassifying quiet speech as noise due to z-scored energy falling below threshold. When log-energy variance is near zero (silence-adjacent segments), z-scores become unstable and VAD probabilities unreliable.
 - **Diagnostic Signals**:
   - SI-SDR degradation on low-SNR segments
-  - VAD false-negative rate on quiet speech (`p_ref` high but `p_out` low in [`_compute_vad_probs()`](DeepFilterNet/df_mlx/train_dynamic.py#L556))
+  - VAD false-negative rate on quiet speech (`p_ref` high but `p_out` low in [`_compute_vad_probs()`](DeepFilterNet/df_mlx/training_losses.py))
   - Mask values near 0 in speech-active regions
   - `energy_boost` saturated at 1.0 (indicates model detected low energy but couldn't compensate)
 - **Relevant Metrics**: SI-SDR per SNR bucket, VAD precision/recall, `energy_boost` distribution
 - **Mitigation**:
-  - Minimum mask floor (`_PIPELINE_MIN_MASK_FLOOR`) prevents complete suppression — see [`_compute_pipeline_awesome_losses()`](DeepFilterNet/df_mlx/train_dynamic.py#L1081)
-  - Additive energy boost for low-energy speech (`_PIPELINE_LOW_ENERGY_ADDITIVE`) — see [line ~1224](DeepFilterNet/df_mlx/train_dynamic.py#L1224)
+  - Minimum mask floor (`_PIPELINE_MIN_MASK_FLOOR`) prevents complete suppression — see [`_compute_pipeline_awesome_losses()`](DeepFilterNet/df_mlx/training_losses.py)
+  - Additive energy boost for low-energy speech (`_PIPELINE_LOW_ENERGY_ADDITIVE`) — see [`_compute_pipeline_awesome_losses()`](DeepFilterNet/df_mlx/training_losses.py)
   - Minimum variance floor (`_MIN_VARIANCE = 1e-4`) for z-score stability — see [INCIDENT_LOSS_VAD_AUDIT_2025_01.md](docs/INCIDENT_LOSS_VAD_AUDIT_2025_01.md), Bug 2
   - `f_under` weighting in PyTorch `MaskLoss` penalizes under-prediction more than over-prediction — see [`MaskLoss.forward()`](DeepFilterNet/df/loss.py#L244)
 
@@ -59,10 +59,10 @@ Catalog known failure modes in speech enhancement to guide model evaluation, los
 - **Diagnostic Signals**:
   - Isolated high-energy bins in residual spectrogram
   - High temporal variance in mask values for noise-dominated regions
-  - `smooth_loss` elevated in [`_compute_pipeline_awesome_losses()`](DeepFilterNet/df_mlx/train_dynamic.py#L1256)
+  - `smooth_loss` elevated in [`_compute_pipeline_awesome_losses()`](DeepFilterNet/df_mlx/training_losses.py)
 - **Relevant Metrics**: Segmental spectral flatness deviation, temporal smoothness loss
 - **Mitigation**:
-  - Temporal smoothing loss (`_PIPELINE_ARTIFACT_SMOOTH_WEIGHT`) penalizes frame-to-frame output variation in noise regions — see [line ~1256](DeepFilterNet/df_mlx/train_dynamic.py#L1256)
+  - Temporal smoothing loss (`_PIPELINE_ARTIFACT_SMOOTH_WEIGHT`) penalizes frame-to-frame output variation in noise regions — see [`_compute_pipeline_awesome_losses()`](DeepFilterNet/df_mlx/training_losses.py)
   - `MaskLoss` optional `f_temporal` for temporal smoothing of mask predictions — see [`MaskLoss.__call__()`](DeepFilterNet/df_mlx/loss.py#L268)
   - Literature: Xu et al. 2015, Park & Lee 2017 (temporal smoothness regularization)
 
@@ -93,11 +93,11 @@ Catalog known failure modes in speech enhancement to guide model evaluation, los
   - Mask values during music-only segments near 0 (false suppression) or near 1 (leakage)
 - **Relevant Metrics**: `music_suppression` loss, `musicness` score, `vocal_gate`, `instrument_gate`
 - **Codebase References**:
-  - [`_compute_musicness()`](DeepFilterNet/df_mlx/train_dynamic.py#L699): Basic musicness from tonal analysis + spectral flux gating
-  - [`_compute_improved_musicness()`](DeepFilterNet/df_mlx/train_dynamic.py#L1012): Enhanced version with vocal/instrument separation
-  - Music suppression loss in [`_compute_pipeline_awesome_losses()`](DeepFilterNet/df_mlx/train_dynamic.py#L1261): Penalizes output energy where instrumental music is detected
-  - `_PIPELINE_MUSIC_SUPPRESSION_WEIGHT = 1.5` — see [line 137](DeepFilterNet/df_mlx/train_dynamic.py#L137)
-  - `_AWESOME_MUSICNESS_THR`, `_AWESOME_MUSICNESS_WIDTH` control gate sensitivity — see [lines 122–123](DeepFilterNet/df_mlx/train_dynamic.py#L122)
+  - [`_compute_musicness()`](DeepFilterNet/df_mlx/training_losses.py): Basic musicness from tonal analysis + spectral flux gating
+  - [`_compute_improved_musicness()`](DeepFilterNet/df_mlx/training_losses.py): Enhanced version with vocal/instrument separation
+  - Music suppression loss in [`_compute_pipeline_awesome_losses()`](DeepFilterNet/df_mlx/training_losses.py): Penalizes output energy where instrumental music is detected
+  - `_PIPELINE_MUSIC_SUPPRESSION_WEIGHT = 1.5` — see [`training_losses.py`](DeepFilterNet/df_mlx/training_losses.py)
+  - `_AWESOME_MUSICNESS_THR`, `_AWESOME_MUSICNESS_WIDTH` control gate sensitivity — see [`training_losses.py`](DeepFilterNet/df_mlx/training_losses.py)
 - **Reference**: [INCIDENT_LOSS_VAD_AUDIT_2025_01.md](docs/INCIDENT_LOSS_VAD_AUDIT_2025_01.md)
 
 #### 3.2 Background Speech Leakage
@@ -124,8 +124,8 @@ Catalog known failure modes in speech enhancement to guide model evaluation, los
   - First/last few frames of utterances show excessive attenuation
 - **Relevant Metrics**: Onset detection delay, offset trailing duration
 - **Codebase References**:
-  - VAD slope parameter controls transition speed: `vad_z_slope` in [`_compute_vad_probs()`](DeepFilterNet/df_mlx/train_dynamic.py#L556)
-  - Modulation energy gate (`mod_energy`, `mod_gate`) may suppress steady-state onsets — see [line ~1216](DeepFilterNet/df_mlx/train_dynamic.py#L1216)
+  - VAD slope parameter controls transition speed: `vad_z_slope` in [`_compute_vad_probs()`](DeepFilterNet/df_mlx/training_losses.py)
+  - Modulation energy gate (`mod_energy`, `mod_gate`) may suppress steady-state onsets — see [`_compute_pipeline_awesome_losses()`](DeepFilterNet/df_mlx/training_losses.py)
 
 #### 4.2 Processing Discontinuities
 
@@ -138,7 +138,7 @@ Catalog known failure modes in speech enhancement to guide model evaluation, los
 - **Relevant Metrics**: Zero-crossing rate anomalies, waveform discontinuity magnitude
 - **Codebase References**:
   - ISTFT reconstruction: [`Istft.forward()`](DeepFilterNet/df/loss.py#L80) with proper window and hop handling
-  - Temporal smoothing loss reduces frame-boundary artifacts — see [line ~1256](DeepFilterNet/df_mlx/train_dynamic.py#L1256)
+  - Temporal smoothing loss reduces frame-boundary artifacts — see [`_compute_pipeline_awesome_losses()`](DeepFilterNet/df_mlx/training_losses.py)
 
 ---
 
@@ -169,7 +169,7 @@ Catalog known failure modes in speech enhancement to guide model evaluation, los
   - Loss curve shows sudden spike before NaN
 - **Relevant Metrics**: Loss curve, gradient norm trend, frequency of gradient clipping events
 - **Codebase References**:
-  - Gradient clipping: [`clip_grad_norm()`](DeepFilterNet/df_mlx/train_dynamic.py#L1668) with configurable `max_grad_norm`
+  - Gradient clipping: [`clip_grad_norm()`](DeepFilterNet/df_mlx/training_ops.py) with configurable `max_grad_norm`
   - `_MIN_VARIANCE = 1e-4` floor prevents z-score explosion — see [Bug 2 in INCIDENT_LOSS_VAD_AUDIT_2025_01.md](docs/INCIDENT_LOSS_VAD_AUDIT_2025_01.md)
   - Empty-array mean guard prevents NaN from `mx.mean([])` — see [Bug 3 in INCIDENT_LOSS_VAD_AUDIT_2025_01.md](docs/INCIDENT_LOSS_VAD_AUDIT_2025_01.md)
   - EPS constants (`1e-10` in MLX, `1e-12` in PyTorch) used throughout loss computations
@@ -185,8 +185,8 @@ Catalog known failure modes in speech enhancement to guide model evaluation, los
   - Enhanced output sounds unprocessed (masks ≈ 1) or silent (masks ≈ 0)
 - **Relevant Metrics**: `mask_saturation` loss, mean mask value, mask value histogram
 - **Codebase References**:
-  - Mask saturation penalty: `mask_entropy = mx.mean(raw_mask * (1.0 - raw_mask))` — see [`_compute_pipeline_awesome_losses()`](DeepFilterNet/df_mlx/train_dynamic.py#L1270)
-  - `_PIPELINE_MASK_SATURATION_PENALTY = 0.1` — see [line 141](DeepFilterNet/df_mlx/train_dynamic.py#L141)
+  - Mask saturation penalty: `mask_entropy = mx.mean(raw_mask * (1.0 - raw_mask))` — see [`_compute_pipeline_awesome_losses()`](DeepFilterNet/df_mlx/training_losses.py)
+  - `_PIPELINE_MASK_SATURATION_PENALTY = 0.1` — see [`training_losses.py`](DeepFilterNet/df_mlx/training_losses.py)
   - **Historical Bug**: Previous implementation _inverted_ the penalty, rewarding uncertainty instead of penalizing it — see [Bug 1 in INCIDENT_LOSS_VAD_AUDIT_2025_01.md](docs/INCIDENT_LOSS_VAD_AUDIT_2025_01.md) (SEVERITY: HIGH, now RESOLVED)
 
 #### 5.4 Checkpoint/Resume Counter Mismatch
@@ -218,7 +218,7 @@ Catalog known failure modes in speech enhancement to guide model evaluation, los
 - **Root Cause**: When input is near-silence, variance of log-energy approaches zero, making `z = (x - mu) / sigma` produce extreme values.
 - **Diagnostic Signals**: Extreme VAD probabilities (0 or 1) on silence, unstable training metrics during quiet passages
 - **Relevant Metrics**: Sigma (standard deviation) distribution, z-score range
-- **Codebase References**: [Bug 2 in INCIDENT_LOSS_VAD_AUDIT_2025_01.md](docs/INCIDENT_LOSS_VAD_AUDIT_2025_01.md) — fixed with `_MIN_VARIANCE = 1e-4` floor; see [`_compute_vad_probs()`](DeepFilterNet/df_mlx/train_dynamic.py#L586)
+- **Codebase References**: [Bug 2 in INCIDENT_LOSS_VAD_AUDIT_2025_01.md](docs/INCIDENT_LOSS_VAD_AUDIT_2025_01.md) — fixed with `_MIN_VARIANCE = 1e-4` floor; see [`_compute_vad_probs()`](DeepFilterNet/df_mlx/training_losses.py)
 
 ---
 
@@ -247,13 +247,13 @@ Catalog known failure modes in speech enhancement to guide model evaluation, los
 | ASR loss | [`ASRLoss`](DeepFilterNet/df/loss.py#L417) | Speech intelligibility preservation |
 | Feature matching | [`FeatureMatchingLoss`](DeepFilterNet/df_mlx/loss.py#L648), [`FeatureMatchingLoss`](DeepFilterNet/df/loss.py#L729) | GAN training stability |
 | Speaker similarity | [`SpeakerContrastiveLoss`](DeepFilterNet/df/loss.py#L744) | Speaker identity preservation |
-| `music_suppression` | [`_compute_pipeline_awesome_losses()`](DeepFilterNet/df_mlx/train_dynamic.py#L1261) | Music handling quality |
-| `mask_saturation` | [`_compute_pipeline_awesome_losses()`](DeepFilterNet/df_mlx/train_dynamic.py#L1270) | Mask prediction confidence |
-| `musicness` | [`_compute_musicness()`](DeepFilterNet/df_mlx/train_dynamic.py#L699) | Music content detection |
-| VAD precision/recall | [`_compute_vad_probs()`](DeepFilterNet/df_mlx/train_dynamic.py#L556) | Speech detection accuracy |
-| Gradient norm | [`clip_grad_norm()`](DeepFilterNet/df_mlx/train_dynamic.py#L1668) | Training stability |
-| Temporal smoothness | [`_compute_pipeline_awesome_losses()`](DeepFilterNet/df_mlx/train_dynamic.py#L1256) | Temporal artifact control |
-| `energy_boost` / `snr_boost` | [`_compute_pipeline_awesome_losses()`](DeepFilterNet/df_mlx/train_dynamic.py#L1224) | Low-signal speech compensation |
+| `music_suppression` | [`_compute_pipeline_awesome_losses()`](DeepFilterNet/df_mlx/training_losses.py) | Music handling quality |
+| `mask_saturation` | [`_compute_pipeline_awesome_losses()`](DeepFilterNet/df_mlx/training_losses.py) | Mask prediction confidence |
+| `musicness` | [`_compute_musicness()`](DeepFilterNet/df_mlx/training_losses.py) | Music content detection |
+| VAD precision/recall | [`_compute_vad_probs()`](DeepFilterNet/df_mlx/training_losses.py) | Speech detection accuracy |
+| Gradient norm | [`clip_grad_norm()`](DeepFilterNet/df_mlx/training_ops.py) | Training stability |
+| Temporal smoothness | [`_compute_pipeline_awesome_losses()`](DeepFilterNet/df_mlx/training_losses.py) | Temporal artifact control |
+| `energy_boost` / `snr_boost` | [`_compute_pipeline_awesome_losses()`](DeepFilterNet/df_mlx/training_losses.py) | Low-signal speech compensation |
 
 ---
 

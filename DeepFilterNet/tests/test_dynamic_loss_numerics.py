@@ -2,7 +2,7 @@ import mlx.core as mx
 
 from df_mlx.loss import si_sdr
 from df_mlx.train import spectral_loss
-from df_mlx.train_dynamic import _build_speech_band_mask, _compute_awesome_losses
+from df_mlx.training_losses import _build_speech_band_mask, _compute_awesome_losses
 
 
 def _finite(x: mx.array) -> bool:

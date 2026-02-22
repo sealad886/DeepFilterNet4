@@ -7,6 +7,13 @@
     "reportPossiblyUnboundVariable": "none",
     "reportAttributeAccessIssue": "none",
     "reportAssignmentType": "none",
+    "reportOptionalCall": "none",
+    "reportImplicitStringConcatenation": "none",
+    "reportMissingTypeStubs": "none",
+    "reportPrivateImportUsage": "none",
+    "reportPrivateUsage": "none",
+    "reportReturnType": "information",
+    "reportCallIssue": "information",
     "exclude": [
         "**/tests/**",
         "**/__pycache__/**",

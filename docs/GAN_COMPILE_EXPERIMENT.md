@@ -23,7 +23,7 @@ under controlled conditions.
 - **Motivation:** the compiled step yields measurable throughput gains; if parts
   of the GAN loop (e.g., generator forward/backward) can remain compiled, the
   overall training wall-time may decrease.
-- **Risk:** the discriminator update at L4983 performs a per-step `mx.eval()`
+- **Risk:** the discriminator update performs a per-step `mx.eval()`
   sync (see `COMPILE_BOUNDARY_AUDIT.md` §2, risk #8). Wrapping both generator
   and discriminator in a single compiled graph may invalidate that sync or
   introduce retrace instability.

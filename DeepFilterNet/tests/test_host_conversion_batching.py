@@ -2,7 +2,7 @@
 
 import mlx.core as mx
 
-from df_mlx.train_dynamic import _batch_to_float
+from df_mlx.training_ops import _batch_to_float
 
 
 class TestBatchToFloat:

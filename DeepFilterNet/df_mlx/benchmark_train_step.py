@@ -50,6 +50,9 @@ import numpy as np
 
 from df_mlx.benchmark_common import batch_size_from_batch as _batch_size_from_batch
 from df_mlx.benchmark_common import build_dataset as _build_dataset
+from df_mlx.benchmark_common import get_chip_name as _get_chip_name
+from df_mlx.benchmark_common import get_gpu_cores as _get_gpu_cores
+from df_mlx.benchmark_common import get_memory_gb as _get_memory_gb
 from df_mlx.benchmark_common import load_source_lists as _load_source_lists
 from df_mlx.benchmark_common import (
     parse_backend_list,
@@ -70,58 +73,6 @@ from df_mlx.train import spectral_loss
 # ---------------------------------------------------------------------------
 # Reproducibility metadata helpers
 # ---------------------------------------------------------------------------
-
-
-def _get_chip_name() -> str:
-    """Return the Apple Silicon chip name via sysctl, or a fallback."""
-    try:
-        result = subprocess.run(
-            ["sysctl", "-n", "machdep.cpu.brand_string"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-    return platform.processor() or platform.machine()
-
-
-def _get_gpu_cores() -> int:
-    """Return GPU core count on macOS via system_profiler, or -1."""
-    try:
-        result = subprocess.run(
-            ["system_profiler", "SPDisplaysDataType"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            for line in result.stdout.splitlines():
-                if "Total Number of Cores" in line:
-                    parts = line.split(":")
-                    if len(parts) == 2:
-                        return int(parts[1].strip())
-    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
-        pass
-    return -1
-
-
-def _get_memory_gb() -> int:
-    """Return total physical memory in GB via sysctl, or -1."""
-    try:
-        result = subprocess.run(
-            ["sysctl", "-n", "hw.memsize"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return int(result.stdout.strip()) // (1024**3)
-    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
-        pass
-    return -1
 
 
 def _get_git_commit() -> str:

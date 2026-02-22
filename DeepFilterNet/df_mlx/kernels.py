@@ -565,3 +565,232 @@ def mel_power_log_kernel(
         raise RuntimeError("mx.fast.metal_kernel is not available")
 
     return _mel_custom(spec_real, spec_imag, mel_fb)
+
+
+# ---------------------------------------------------------------------------
+# Post-filter: fused magnitude + mask + sinusoidal transfer  (differentiable)
+# ---------------------------------------------------------------------------
+
+_POST_FILTER_KERNEL_SOURCE = """
+    uint elem = thread_position_in_grid.x;
+
+    T beta = beta_arr[0];
+    T eps  = T(1e-12);
+    T pi   = T(3.141592653589793);
+
+    T er = enh_real[elem];
+    T ei = enh_imag[elem];
+    T or_ = orig_real[elem];
+    T oi = orig_imag[elem];
+
+    // Magnitudes
+    T enh_mag  = metal::sqrt(er * er + ei * ei + eps);
+    T orig_mag = metal::sqrt(or_ * or_ + oi * oi + eps);
+
+    // Mask ratio clipped to [eps, 1]
+    T mask_raw = enh_mag / (orig_mag + eps);
+    T mask = metal::max(metal::min(mask_raw, T(1.0)), eps);
+
+    // Sinusoidal transfer: mask * sin(pi * mask / 2), clamped >= eps
+    T mask_sin = metal::max(mask * metal::sin(pi * mask / T(2.0)), eps);
+
+    // Post-filter gain: (1 + beta) / (1 + beta * (mask / mask_sin)^2)
+    T ratio = mask / mask_sin;
+    T pf = (T(1.0) + beta) / (T(1.0) + beta * ratio * ratio);
+
+    out_real[elem] = er * pf;
+    out_imag[elem] = ei * pf;
+"""
+
+if _METAL_AVAILABLE:
+    _post_filter_kernel = mx.fast.metal_kernel(
+        name="post_filter",
+        input_names=["enh_real", "enh_imag", "orig_real", "orig_imag", "beta_arr"],
+        output_names=["out_real", "out_imag"],
+        source=_POST_FILTER_KERNEL_SOURCE,
+    )
+else:
+    _post_filter_kernel = None
+
+
+def _post_filter_forward_metal(
+    enh_real: mx.array,
+    enh_imag: mx.array,
+    orig_real: mx.array,
+    orig_imag: mx.array,
+    beta_arr: mx.array,
+) -> Tuple[mx.array, mx.array]:
+    """Raw Metal kernel dispatch for post-filter (no VJP)."""
+    total_elements = enh_real.size
+    out_shape = enh_real.shape
+
+    assert _post_filter_kernel is not None
+    outputs = _post_filter_kernel(
+        inputs=[enh_real, enh_imag, orig_real, orig_imag, beta_arr],
+        template=[("T", enh_real.dtype)],
+        grid=(total_elements, 1, 1),
+        threadgroup=(min(256, total_elements), 1, 1),
+        output_shapes=[out_shape, out_shape],
+        output_dtypes=[enh_real.dtype, enh_real.dtype],
+    )
+    return outputs[0], outputs[1]
+
+
+def _post_filter_fallback(
+    enh_real: mx.array,
+    enh_imag: mx.array,
+    orig_real: mx.array,
+    orig_imag: mx.array,
+    beta_arr: mx.array,
+) -> Tuple[mx.array, mx.array]:
+    """Pure-MLX post-filter (differentiable fallback)."""
+    beta = beta_arr[0]
+    eps = 1e-12
+    pi = 3.141592653589793
+
+    enh_mag = mx.sqrt(enh_real**2 + enh_imag**2 + eps)
+    orig_mag = mx.sqrt(orig_real**2 + orig_imag**2 + eps)
+    mask = mx.clip(enh_mag / (orig_mag + eps), eps, 1.0)
+    mask_sin = mx.maximum(mask * mx.sin(pi * mask / 2), eps)
+    ratio = mask / mask_sin
+    pf = (1 + beta) / (1 + beta * ratio * ratio)
+
+    return enh_real * pf, enh_imag * pf
+
+
+@mx.custom_function
+def _post_filter_custom(
+    enh_real: mx.array,
+    enh_imag: mx.array,
+    orig_real: mx.array,
+    orig_imag: mx.array,
+    beta_arr: mx.array,
+) -> Tuple[mx.array, mx.array]:
+    """Forward: Metal kernel for post-filter."""
+    return _post_filter_forward_metal(enh_real, enh_imag, orig_real, orig_imag, beta_arr)
+
+
+@_post_filter_custom.vjp
+def _post_filter_vjp(primals, cotangents, _outputs):
+    """Backward: pure-MLX VJP for post-filter.
+
+    Recomputes intermediates and applies chain rule through:
+      pf = (1+β) / (1 + β·r²)  where r = mask / mask_sin
+      out = enh · pf
+
+    Gradients flow to enh_real, enh_imag, orig_real, orig_imag, beta_arr.
+    """
+    enh_real, enh_imag, orig_real, orig_imag, beta_arr = primals
+    d_out_real, d_out_imag = cotangents
+    beta = beta_arr[0]
+    eps = 1e-12
+    pi = 3.141592653589793
+
+    # ---- Recompute forward intermediates ----
+    enh_sq = enh_real**2 + enh_imag**2
+    orig_sq = orig_real**2 + orig_imag**2
+    enh_mag = mx.sqrt(enh_sq + eps)
+    orig_mag = mx.sqrt(orig_sq + eps)
+
+    inv_orig = 1.0 / (orig_mag + eps)
+    mask_raw = enh_mag * inv_orig
+    mask = mx.clip(mask_raw, eps, 1.0)
+
+    sin_val = mx.sin(pi * mask / 2)
+    cos_val = mx.cos(pi * mask / 2)
+    mask_sin_raw = mask * sin_val
+    mask_sin = mx.maximum(mask_sin_raw, eps)
+    mask_sin_active = mask_sin_raw > eps
+
+    ratio = mask / mask_sin
+    denom = 1.0 + beta * ratio * ratio
+    pf = (1.0 + beta) / denom
+
+    # ---- d_out -> d_pf and d_enh ----
+    # out_r = enh_r * pf,  out_i = enh_i * pf
+    d_pf = d_out_real * enh_real + d_out_imag * enh_imag
+    d_enh_real = d_out_real * pf
+    d_enh_imag = d_out_imag * pf
+
+    # ---- d_pf -> d_ratio ----
+    # pf = (1+β) / denom,  denom = 1 + β·r²
+    # d_pf/d_r = -(1+β) · 2βr / denom²
+    d_ratio = d_pf * (-(1.0 + beta) * 2.0 * beta * ratio / (denom * denom))
+
+    # ---- d_ratio -> d_mask, d_mask_sin ----
+    # ratio = mask / mask_sin
+    inv_ms = 1.0 / mask_sin
+    d_mask_from_ratio = d_ratio * inv_ms
+    d_mask_sin = -d_ratio * ratio * inv_ms
+
+    # Gate d_mask_sin by whether mask_sin_raw > eps
+    d_mask_sin = mx.where(mask_sin_active, d_mask_sin, 0.0)
+
+    # ---- d_mask_sin -> d_mask (through mask_sin = mask * sin(π·mask/2)) ----
+    # d(mask·sin(π·mask/2))/d(mask) = sin(π·mask/2) + mask·cos(π·mask/2)·π/2
+    d_mask_from_sin = d_mask_sin * (sin_val + mask * cos_val * (pi / 2.0))
+
+    # ---- Gate by clip boundaries ----
+    # mask = clip(mask_raw, eps, 1.0)  — gradient passes only in [eps, 1]
+    clip_active = (mask_raw >= eps) & (mask_raw <= 1.0)
+    d_mask_total = mx.where(clip_active, d_mask_from_ratio + d_mask_from_sin, 0.0)
+
+    # ---- d_mask -> d_enh_mag, d_orig_mag ----
+    # mask_raw = enh_mag / (orig_mag + eps)
+    d_enh_mag = d_mask_total * inv_orig
+    d_orig_mag = -d_mask_total * mask_raw * inv_orig
+
+    # ---- d_enh_mag -> d_enh_real, d_enh_imag ----
+    # enh_mag = sqrt(enh_r² + enh_i² + eps)
+    inv_enh_mag = 1.0 / enh_mag
+    d_enh_real = d_enh_real + d_enh_mag * enh_real * inv_enh_mag
+    d_enh_imag = d_enh_imag + d_enh_mag * enh_imag * inv_enh_mag
+
+    # ---- d_orig_mag -> d_orig_real, d_orig_imag ----
+    inv_orig_mag = 1.0 / orig_mag
+    d_orig_real = d_orig_mag * orig_real * inv_orig_mag
+    d_orig_imag = d_orig_mag * orig_imag * inv_orig_mag
+
+    # beta gradient: scalar sum
+    # pf = (1+β)/denom,  d_pf/d_β = (denom - (1+β)·r²) / denom²
+    #                              = 1/denom - (1+β)·r²/denom²
+    d_beta = mx.sum(d_pf * (1.0 / denom - (1.0 + beta) * ratio * ratio / (denom * denom)))
+    d_beta_arr = mx.reshape(d_beta, (1,))
+
+    return d_enh_real, d_enh_imag, d_orig_real, d_orig_imag, d_beta_arr
+
+
+def post_filter_kernel(
+    enh_real: mx.array,
+    enh_imag: mx.array,
+    orig_real: mx.array,
+    orig_imag: mx.array,
+    beta: float,
+) -> Tuple[mx.array, mx.array]:
+    """Fused Metal kernel for post-filter (differentiable).
+
+    Computes mask-based post-filter gain from enhanced/original magnitude
+    ratio, applying sinusoidal transfer and beta-controlled attenuation,
+    all in a single kernel dispatch.
+
+    Uses ``mx.custom_function`` so this kernel has a proper VJP and can
+    be used inside ``nn.value_and_grad`` during training.
+
+    Args:
+        enh_real: Enhanced spectrum real part, any shape.
+        enh_imag: Enhanced spectrum imag part, same shape.
+        orig_real: Original spectrum real part, same shape.
+        orig_imag: Original spectrum imag part, same shape.
+        beta: Post-filter strength parameter.
+
+    Returns:
+        Tuple of ``(out_real, out_imag)``, same shape as inputs.
+
+    Raises:
+        RuntimeError: If ``mx.fast.metal_kernel`` is not available.
+    """
+    if _post_filter_kernel is None:
+        raise RuntimeError("mx.fast.metal_kernel is not available")
+
+    beta_arr = mx.array([beta], dtype=enh_real.dtype)
+    return _post_filter_custom(enh_real, enh_imag, orig_real, orig_imag, beta_arr)

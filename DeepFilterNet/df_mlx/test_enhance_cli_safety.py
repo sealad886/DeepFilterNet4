@@ -63,6 +63,15 @@ def test_main_dispatches_to_streaming_path(monkeypatch):
         atten_lim=None,
         streaming=True,
         streaming_chunk_ms=100.0,
+        speech_boost_db=0.0,
+        speech_boost_threshold=0.5,
+        speech_boost_min_speech_ms=250,
+        speech_boost_min_silence_ms=100,
+        speech_boost_pad_ms=30,
+        speech_boost_ramp_ms=10.0,
+        speech_boost_peak_limit=0.99,
+        speech_boost_silero_model_path=None,
+        speech_boost_silero_sample_rate=16000,
     )
     rc = enhance_mod.main(args)
     assert rc == 0
@@ -103,6 +112,15 @@ def test_main_dispatches_to_batch_path(monkeypatch):
         atten_lim=None,
         streaming=False,
         streaming_chunk_ms=100.0,
+        speech_boost_db=0.0,
+        speech_boost_threshold=0.5,
+        speech_boost_min_speech_ms=250,
+        speech_boost_min_silence_ms=100,
+        speech_boost_pad_ms=30,
+        speech_boost_ramp_ms=10.0,
+        speech_boost_peak_limit=0.99,
+        speech_boost_silero_model_path=None,
+        speech_boost_silero_sample_rate=16000,
     )
     rc = enhance_mod.main(args)
     assert rc == 0

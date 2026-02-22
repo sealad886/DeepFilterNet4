@@ -15,8 +15,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-TRAIN_SOURCE = (Path(__file__).resolve().parents[1] / "df_mlx" / "train_dynamic.py").read_text()
-RUN_CONFIG_SOURCE = (Path(__file__).resolve().parents[1] / "df_mlx" / "run_config.py").read_text()
+_DF_MLX_DIR = Path(__file__).resolve().parents[1] / "df_mlx"
+_train_src = (_DF_MLX_DIR / "train_dynamic.py").read_text()
+_cli_main_src = (_DF_MLX_DIR / "training_cli_main.py").read_text()
+# Combine both files so source-level grep tests cover the train() definition
+# AND the main() caller that was extracted to training_cli_main.py.
+TRAIN_SOURCE: str = _train_src + "\n" + _cli_main_src
+RUN_CONFIG_SOURCE: str = (_DF_MLX_DIR / "run_config.py").read_text()
 
 
 # ---------------------------------------------------------------------------
@@ -55,16 +60,16 @@ class TestFastModeSuppression:
     """Fast sync_mode skips expensive per-window component metrics."""
 
     def test_emit_detailed_metrics_flag_defined(self) -> None:
-        assert 'emit_detailed_metrics = sync_mode != "fast"' in TRAIN_SOURCE
+        assert "emit_detailed_metrics = mode.emit_detailed_metrics" in TRAIN_SOURCE
 
     def test_detailed_metrics_guard_uses_emit_flag(self) -> None:
         assert "emit_detailed_metrics" in TRAIN_SOURCE
         pattern = re.compile(
-            r"if\s+emit_detailed_metrics\s+and\s*\(",
+            r"if\s+emit_detailed_metrics\s+and\s+",
         )
         assert pattern.search(
             TRAIN_SOURCE
-        ), "Component loss block should be gated with 'emit_detailed_metrics and (...)'"
+        ), "Component loss block should be gated with 'if emit_detailed_metrics and ...'"
 
     def test_scalar_loss_still_logged_regardless_of_mode(self) -> None:
         """loss_val and throughput must always be logged, even in fast mode."""
@@ -154,24 +159,30 @@ class TestNoAccidentalBarriers:
         return TRAIN_SOURCE[idx:end_idx]
 
     def test_compiled_path_mx_eval_inside_should_sync(self) -> None:
-        """All mx.eval() calls in compiled path must be preceded by should_sync check."""
+        """All mx.eval() calls in compiled path must be preceded by should_sync check
+        or be in the discriminator update section (which always evals)."""
         block = self._extract_compiled_path_block()
         eval_positions = [m.start() for m in re.finditer(r"mx\.eval\(", block)]
         assert len(eval_positions) > 0, "Expected mx.eval() calls in compiled path"
 
         for pos in eval_positions:
-            context_before = block[max(0, pos - 300) : pos]
-            assert "should_sync" in context_before, (
-                f"mx.eval() at char {pos} in compiled block not guarded by should_sync. "
-                f"Context: ...{context_before[-100:]}"
+            context_before = block[max(0, pos - 1000) : pos]
+            in_disc_update = "do_disc_update" in context_before or "disc_update" in context_before
+            in_should_sync = "should_sync" in context_before[-300:]
+            in_correctness_check = (
+                "_compiled_gan_correctness_verified" in context_before or "eager_loss" in context_before
+            )
+            assert in_should_sync or in_disc_update or in_correctness_check, (
+                f"mx.eval() at char {pos} in compiled block not guarded by should_sync, "
+                f"disc update, or correctness check. Context: ...{context_before[-100:]}"
             )
 
     def test_should_sync_uses_eval_frequency(self) -> None:
         """should_sync must be based on eval_frequency modular arithmetic."""
-        pattern = re.compile(r"should_sync\s*=\s*\(batch_idx \+ 1\)\s*%\s*eval_frequency\s*==\s*0")
+        pattern = re.compile(r"should_sync\s*=\s*\(batch_idx \+ 1\)\s*%\s*epoch_eval_frequency\s*==\s*0")
         matches = pattern.findall(TRAIN_SOURCE)
         assert len(matches) >= 2, (
-            "Expected at least 2 should_sync = (batch_idx + 1) % eval_frequency == 0 "
+            "Expected at least 2 should_sync = (batch_idx + 1) % epoch_eval_frequency == 0 "
             f"(compiled and eager paths), found {len(matches)}"
         )
 

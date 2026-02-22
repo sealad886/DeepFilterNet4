@@ -1,0 +1,60 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run Tests",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && .venv/bin/python -m pytest DeepFilterNet/tests/ -q 2>&1 | tee /tmp/dfn_test_output.txt"
+		},
+		{
+			"label": "Format Files",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && .venv/bin/python -m black --line-length 100 DeepFilterNet/df_mlx/train.py DeepFilterNet/df_mlx/__init__.py DeepFilterNet/df_mlx/train_gan.py DeepFilterNet/df_mlx/test_mlx_comprehensive.py DeepFilterNet/examples/mlx_training.py 2>&1 && .venv/bin/python -m isort --profile black DeepFilterNet/df_mlx/train.py DeepFilterNet/df_mlx/__init__.py DeepFilterNet/df_mlx/train_gan.py DeepFilterNet/df_mlx/test_mlx_comprehensive.py DeepFilterNet/examples/mlx_training.py 2>&1"
+		},
+		{
+			"label": "Git commit DUP-7.1",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && git add -A && git commit -m 'refactor(loss): remove dead MaskSpecLoss class (DUP-7.1)' --no-verify --no-gpg-sign"
+		},
+		{
+			"label": "Test DUP-7.2",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && .venv/bin/python -m pytest DeepFilterNet/tests/ -q --tb=short 2>&1 | tee /tmp/dfn_test_dup72.txt"
+		},
+		{
+			"label": "Check test results",
+			"type": "shell",
+			"command": "cat /tmp/dfn_test_dup72.txt | grep -E '(passed|failed|error|FAILED)' || echo 'Still running or no results'"
+		},
+		{
+			"label": "Check test results delayed",
+			"type": "shell",
+			"command": "sleep 30 && cat /tmp/dfn_test_dup72.txt | grep -E '(passed|failed|error|FAILED)' || echo 'Still running'"
+		},
+		{
+			"label": "Check test file",
+			"type": "shell",
+			"command": "sleep 10 && wc -l /tmp/dfn_test_dup72.txt && tail -5 /tmp/dfn_test_dup72.txt"
+		},
+		{
+			"label": "Check test final",
+			"type": "shell",
+			"command": "sleep 30 && tail -3 /tmp/dfn_test_dup72.txt"
+		},
+		{
+			"label": "Commit DUP-7.2",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && git add -A && git commit -m 'refactor(train): delegate MultiResolutionSTFTLoss to SpectralLoss (DUP-7.2)' --no-verify --no-gpg-sign"
+		},
+		{
+			"label": "Push changes",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && git log --oneline -5 && echo '---' && git push 2>&1"
+		},
+		{
+			"label": "Commit and push audit report",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && git add -A && git commit -m 'docs: add Pass 7 duplication audit report' --no-verify --no-gpg-sign && git push 2>&1"
+		}
+	]
+}

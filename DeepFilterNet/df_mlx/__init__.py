@@ -47,7 +47,7 @@ Optional:
     - pesq (for PESQ metric)
 """
 
-__version__ = "0.1.0"
+__version__ = "0.7.0"
 
 # Check MLX availability
 try:
@@ -78,7 +78,12 @@ if MLX_AVAILABLE:
     from .convert import load_mlx_checkpoint  # noqa: F401
     from .convert import save_mlx_checkpoint  # noqa: F401
     from .convert import load_pytorch_checkpoint as load_pytorch_ckpt  # noqa: F401
-    from .datastore import DatastoreConfig, MLXDataLoader, MLXDatastoreWriter, StreamingMLXDataLoader  # noqa: F401
+    from .datastore import (  # noqa: F401
+        DatastoreConfig,
+        MLXDataLoader,
+        MLXDatastoreWriter,
+        StreamingMLXDataLoader,
+    )
 
     # Legacy model architectures (GRU-based)
     from .deepfilternet import DFNet1, ModelParams1  # noqa: F401
@@ -103,8 +108,6 @@ if MLX_AVAILABLE:
         PeriodDiscriminator,
         ScaleDiscriminator,
         SpectralDiscriminator,
-        compute_discriminator_loss,
-        compute_generator_loss,
     )
     from .evaluation import (  # noqa: F401
         EvaluationResults,
@@ -148,7 +151,13 @@ if MLX_AVAILABLE:
         cosine_scheduler,
         create_scheduler,
     )
-    from .mamba import BidirectionalMamba, GroupedLinear, Mamba, MambaBlock, SqueezedMamba  # noqa: F401
+    from .mamba import (  # noqa: F401
+        BidirectionalMamba,
+        GroupedLinear,
+        Mamba,
+        MambaBlock,
+        SqueezedMamba,
+    )
     from .model import DfNet4, DfNet4Lite, count_parameters, init_model, model_summary  # noqa: F401
     from .modules import (  # noqa: F401
         ComplexMask,
@@ -167,7 +176,15 @@ if MLX_AVAILABLE:
     )
 
     # Multi-frame processing modules
-    from .multiframe import CRM, DF, DFreal, MfMvdr, MfWf, MultiFrameModule, MultiResolutionDF  # noqa: F401
+    from .multiframe import (  # noqa: F401
+        CRM,
+        DF,
+        DFreal,
+        MfMvdr,
+        MfWf,
+        MultiFrameModule,
+        MultiResolutionDF,
+    )
     from .ops import erb_fb as make_erb_fb  # noqa: F401
     from .ops import erb_fb_and_inverse, erb_transform, istft, stft  # noqa: F401
     from .stoi import stoi, stoi_loss, stoi_numpy  # noqa: F401
@@ -175,7 +192,6 @@ if MLX_AVAILABLE:
         Trainer,
         convert_pytorch_weights,
         load_pytorch_checkpoint,
-        multi_resolution_stft_loss,
         spectral_loss,
         train,
     )
@@ -262,7 +278,6 @@ if MLX_AVAILABLE:
         "Trainer",
         "train",
         "spectral_loss",
-        "multi_resolution_stft_loss",
         "load_pytorch_checkpoint",
         "convert_pytorch_weights",
         # Checkpoint conversion
@@ -319,8 +334,6 @@ if MLX_AVAILABLE:
         "MultiScaleDiscriminator",
         "CombinedDiscriminator",
         "SpectralDiscriminator",
-        "compute_discriminator_loss",
-        "compute_generator_loss",
         # STOI (new)
         "stoi",
         "stoi_numpy",

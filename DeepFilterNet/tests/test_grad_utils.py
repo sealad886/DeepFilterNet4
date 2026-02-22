@@ -3,8 +3,8 @@ import numpy as np
 
 from df_mlx.benchmark_train_step import _clip_grad_norm as benchmark_clip_grad_norm
 from df_mlx.grad_utils import clip_grad_norm_tree
-from df_mlx.train_dynamic import clip_grad_norm as train_dynamic_clip_grad_norm
 from df_mlx.train_with_data import clip_grad_norm as train_with_data_clip_grad_norm
+from df_mlx.training_ops import clip_grad_norm as train_dynamic_clip_grad_norm
 
 
 def _tree_to_numpy(tree):

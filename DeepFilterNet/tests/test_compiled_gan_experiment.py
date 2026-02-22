@@ -10,7 +10,7 @@ except ImportError:  # pragma: no cover
     import tomli as tomllib  # type: ignore
 
 from df_mlx.run_config import RunConfig, apply_run_config_dict, generate_run_config_example
-from df_mlx.train_dynamic import resolve_epoch_train_mode
+from df_mlx.training_checkpoints import resolve_epoch_train_mode
 
 _COMPILED = "COMPILED"
 _EAGER = "EAGER"

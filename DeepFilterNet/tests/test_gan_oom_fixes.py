@@ -24,7 +24,7 @@ from df_mlx.run_config import RunConfig, apply_run_config_dict
 # ---------------------------------------------------------------------------
 
 if HAS_MLX:
-    from df_mlx.train_dynamic import _disc_crop_waveform
+    from df_mlx.training_waveform import _disc_crop_waveform
 
 
 @pytest.mark.skipif(not HAS_MLX, reason="MLX not available")
@@ -125,7 +125,7 @@ class TestGanConfigFields:
 @pytest.mark.skipif(not HAS_MLX, reason="MLX not available")
 class TestEpochEvalFrequencyOverride:
     def test_resolve_epoch_train_mode_gan_forces_eager(self):
-        from df_mlx.train_dynamic import _TRAIN_MODE_EAGER, resolve_epoch_train_mode
+        from df_mlx.training_checkpoints import _TRAIN_MODE_EAGER, resolve_epoch_train_mode
 
         mode, use_compiled = resolve_epoch_train_mode(
             compiled_step_base_enabled=True,
@@ -138,12 +138,35 @@ class TestEpochEvalFrequencyOverride:
         assert use_compiled is False
 
     def test_eval_frequency_override_concept(self):
-        """When GAN is active, epoch_eval_frequency should be 1 regardless of config."""
+        """When GAN is active, epoch_eval_frequency = min(eval_freq, gan_eval_freq)."""
         eval_frequency = 10
-        gan_active = True
-        epoch_eval_frequency = 1 if gan_active else eval_frequency
-        assert epoch_eval_frequency == 1
+        gan_eval_frequency = 2  # default
 
+        # GAN active: clamped to min(eval_frequency, gan_eval_frequency)
+        gan_active = True
+        epoch_eval_frequency = eval_frequency
+        if gan_active:
+            epoch_eval_frequency = min(eval_frequency, gan_eval_frequency)
+        assert epoch_eval_frequency == 2
+
+        # GAN inactive: original eval_frequency
         gan_active = False
-        epoch_eval_frequency = 1 if gan_active else eval_frequency
+        epoch_eval_frequency = eval_frequency
+        if gan_active:
+            epoch_eval_frequency = min(eval_frequency, gan_eval_frequency)
         assert epoch_eval_frequency == 10
+
+        # Custom high gan_eval_frequency: no effect
+        gan_active = True
+        gan_eval_frequency = 20
+        epoch_eval_frequency = eval_frequency
+        if gan_active:
+            epoch_eval_frequency = min(eval_frequency, gan_eval_frequency)
+        assert epoch_eval_frequency == 10
+
+        # gan_eval_frequency=1: legacy behavior (every step)
+        gan_eval_frequency = 1
+        epoch_eval_frequency = eval_frequency
+        if gan_active:
+            epoch_eval_frequency = min(eval_frequency, gan_eval_frequency)
+        assert epoch_eval_frequency == 1

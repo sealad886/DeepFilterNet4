@@ -58,6 +58,7 @@ LD_OVERRIDE=""
 CARGO_INCLUDE_PYDF=0
 DRY_RUN=0
 PRINT_ENV=0
+PY_EDITABLE=0
 
 usage() {
   cat <<'EOF'
@@ -68,7 +69,8 @@ Python (default on):
   --python-bin PATH         Python interpreter to use (default: python3.10)
   --venv DIR                Virtualenv directory (default: .venv)
   --no-python               Skip Python environment setup
-  --all                     Convenience: enables extras dev,train,eval and builds pyDF + pyDF-data + pyDF-augment
+  --editable                Install Python packages in editable mode (pip install -e .)
+  --all                     Convenience: enables extras dev,train,eval and builds pyDF + pyDF-data + pyDF-augment; also sets editable mode for Python.
 
 Cargo (default on):
   --cargo-flags "FLAGS"     Override cargo flags (default: --workspace --release --all-features)
@@ -157,6 +159,10 @@ while [[ $# -gt 0 ]]; do
       DRY_RUN=1
       shift 1
       ;;
+    --editable)
+      PY_EDITABLE=1
+      shift 1
+      ;;
     -h|--help)
       usage
       exit 0
@@ -175,6 +181,7 @@ if [[ $USE_ALL -eq 1 ]]; then
   BUILD_PYDF=1
   BUILD_PYDF_DATA=1
   BUILD_PYDF_AUGMENT=1
+  PY_EDITABLE=1
 fi
 
 # ------------------------- print-env ------------------------- #
@@ -214,6 +221,7 @@ if [[ $PRINT_ENV -eq 1 ]]; then
   echo "  BUILD_PYDF:      $BUILD_PYDF"
   echo "  BUILD_PYDF_DATA: $BUILD_PYDF_DATA"
   echo "  BUILD_PYDF_AUG:  $BUILD_PYDF_AUGMENT"
+  echo "  PY_EDITABLE:     $PY_EDITABLE"
   exit 0
 fi
 
@@ -226,7 +234,8 @@ if [[ $DRY_RUN -eq 1 ]]; then
 
   if [[ $BUILD_PYTHON -eq 1 ]]; then
     echo "[WOULD] Create/use venv at: $VENV_DIR"
-    echo "[WOULD] Install extras: ${DEFAULT_EXTRAS[*]} ${USER_EXTRAS[*]:-}"
+    edit_msg=""; [[ $PY_EDITABLE -eq 1 ]] && edit_msg=" (editable)"
+    echo "[WOULD] Install extras: ${DEFAULT_EXTRAS[*]} ${USER_EXTRAS[*]:-}${edit_msg}"
 
     # Warn about MLX if applicable
     for extra in "${DEFAULT_EXTRAS[@]}" "${USER_EXTRAS[@]}"; do
@@ -366,13 +375,21 @@ if [[ $BUILD_PYTHON -eq 1 ]]; then
     IFS=',' read -r extras_str <<<"$(printf "%s," "${uniq_extras[@]}" | sed 's/,$//')"
   fi
 
-  if [[ -n "$extras_str" ]]; then
-    echo "Installing project with extras: [$extras_str]"
-    python -m pip install ".[${extras_str}]"
-  else
-    echo "Installing project without extras"
-    python -m pip install .
+  pip_install_args=()
+  if [[ $PY_EDITABLE -eq 1 ]]; then
+    pip_install_args+=(-e)
   fi
+
+  if [[ -n "$extras_str" ]]; then
+    edit_label=""; [[ $PY_EDITABLE -eq 1 ]] && edit_label=" (editable)"
+    echo "Installing project with extras: [$extras_str]${edit_label}"
+    pip_install_args+=(".[${extras_str}]")
+  else
+    edit_label=""; [[ $PY_EDITABLE -eq 1 ]] && edit_label=" (editable)"
+    echo "Installing project without extras${edit_label}"
+    pip_install_args+=(".")
+  fi
+  python -m pip install "${pip_install_args[@]}"
 
   popd
 fi

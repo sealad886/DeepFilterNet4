@@ -8,7 +8,7 @@ import mlx.optimizers as optim
 # Ensure the df_mlx package is importable when running tests from repo root
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from df_mlx.train_dynamic import (  # noqa: E402
+from df_mlx.training_checkpoints import (  # noqa: E402
     _TRAIN_MODE_COMPILED,
     _TRAIN_MODE_EAGER,
     maybe_skip_resume_batches,
@@ -146,8 +146,9 @@ def test_resolve_epoch_train_mode_respects_base_compiled_blockers():
 
 def test_train_loop_logs_modes_and_guards_against_gan_compiled_mix():
     source = (Path(__file__).resolve().parents[1] / "df_mlx" / "train_dynamic.py").read_text()
-    assert '_TRAIN_MODE_COMPILED = "COMPILED"' in source
-    assert '_TRAIN_MODE_EAGER = "EAGER"' in source
+    checkpoints_source = (Path(__file__).resolve().parents[1] / "df_mlx" / "training_checkpoints.py").read_text()
+    assert '_TRAIN_MODE_COMPILED = "COMPILED"' in checkpoints_source
+    assert '_TRAIN_MODE_EAGER = "EAGER"' in checkpoints_source
     assert "TRAIN_MODE={train_mode}" in source
     assert "GAN active epoch cannot run compiled step" in source
 
@@ -163,4 +164,4 @@ def test_compiled_grad_accumulation_uses_compiled_loss_and_grad_path():
     source = (Path(__file__).resolve().parents[1] / "df_mlx" / "train_dynamic.py").read_text()
     assert "def compiled_loss_and_grad_step(" in source
     assert "if grad_accumulation_steps > 1:" in source
-    assert "loss, model_out, grads = compiled_loss_and_grad_step(" in source
+    assert "loss, model_out, cached_out_wav, cached_clean_wav, grads = active_compiled_lag(" in source

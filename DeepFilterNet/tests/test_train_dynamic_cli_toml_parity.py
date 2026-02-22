@@ -51,12 +51,15 @@ def _collect_override_flags(module: ast.Module) -> set[str]:
 
 
 def test_all_runtime_cli_flags_have_toml_mapping():
-    train_dynamic = Path(__file__).resolve().parents[1] / "df_mlx" / "train_dynamic.py"
-    src = train_dynamic.read_text(encoding="utf-8")
-    module = ast.parse(src)
+    df_mlx_dir = Path(__file__).resolve().parents[1] / "df_mlx"
+    training_cli_main = df_mlx_dir / "training_cli_main.py"
+    training_cli = df_mlx_dir / "training_cli.py"
 
-    parser_flags = _collect_parser_flags(module)
-    mapped_flags = _collect_override_flags(module)
+    cli_main_module = ast.parse(training_cli_main.read_text(encoding="utf-8"))
+    cli_module = ast.parse(training_cli.read_text(encoding="utf-8"))
+
+    parser_flags = _collect_parser_flags(cli_main_module)
+    mapped_flags = _collect_override_flags(cli_module)
 
     # These control how the TOML is loaded/printed and are intentionally CLI-only.
     meta_only_flags = {"--run-config", "--print-run-config", "--preset"}

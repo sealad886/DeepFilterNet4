@@ -21,6 +21,7 @@ from typing import Any, Callable, Dict, List, Tuple
 
 import mlx.core as mx
 
+from df_mlx.benchmark_common import safe_percentile as _safe_percentile
 from df_mlx.benchmark_train_step import collect_reproducibility_metadata
 from df_mlx.dnsmos_proxy import MelSpectrogram
 from df_mlx.loss import SpectralLoss
@@ -170,18 +171,6 @@ def _make_spectral_loss_input(case: HotspotCase) -> Tuple[SpectralLoss, mx.array
 # ---------------------------------------------------------------------------
 # Benchmark runner
 # ---------------------------------------------------------------------------
-
-
-def _safe_percentile(values: List[float], pct: float) -> float:
-    """Return the *pct*-th percentile of *values* (0-100 scale)."""
-    if not values:
-        return 0.0
-    s = sorted(values)
-    k = (pct / 100.0) * (len(s) - 1)
-    lo = int(k)
-    hi = min(lo + 1, len(s) - 1)
-    frac = k - lo
-    return s[lo] * (1.0 - frac) + s[hi] * frac
 
 
 def _build_op_fn(case: HotspotCase) -> Tuple[Callable[[], None], Any]:

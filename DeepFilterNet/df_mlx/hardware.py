@@ -228,7 +228,8 @@ def _build_config_for_profile(profile: HardwareProfile) -> HardwareConfig:
     else:
         config.prefetch_batches = 16
 
-    # FP16 is generally stable on Apple Silicon
+    # FP16/BF16 — BF16 is used for mixed precision on Apple Silicon
+    # (same exponent range as FP32, avoids gradient overflow)
     config.use_fp16 = True
 
     return config
@@ -438,6 +439,106 @@ def recommend_batch_size(
             return batch_size
 
     return 1
+
+
+def print_hardware_diagnostics():
+    """Print comprehensive hardware and MLX diagnostics."""
+    import multiprocessing
+
+    print("\n" + "=" * 70)
+    print("HARDWARE DIAGNOSTICS")
+    print("=" * 70)
+
+    # System info
+    print("\n[System]")
+    print(f"  Platform:     {platform.platform()}")
+    print(f"  Python:       {platform.python_version()}")
+    print(f"  Processor:    {platform.processor() or 'Unknown'}")
+
+    # MLX device info
+    print("\n[MLX]")
+    print(f"  Default device: {mx.default_device()}")
+    print(f"  MLX version:    {mx.__version__ if hasattr(mx, '__version__') else 'Unknown'}")  # type: ignore
+
+    # Try to get Apple Silicon info
+    try:
+        result = subprocess.run(
+            ["sysctl", "-n", "machdep.cpu.brand_string"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            print(f"  CPU:            {result.stdout.strip()}")
+    except Exception:
+        pass
+
+    # Memory info
+    try:
+        result = subprocess.run(
+            ["sysctl", "-n", "hw.memsize"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            mem_bytes = int(result.stdout.strip())
+            mem_gb = mem_bytes / (1024**3)
+            print(f"  Total RAM:      {mem_gb:.1f} GB")
+    except Exception:
+        pass
+
+    # GPU cores (Apple Silicon)
+    try:
+        result = subprocess.run(
+            ["system_profiler", "SPDisplaysDataType"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.split("\n"):
+                if "Total Number of Cores" in line:
+                    print(f"  GPU Cores:      {line.split(':')[-1].strip()}")
+                    break
+    except Exception:
+        pass
+
+    # CPU core info
+    try:
+        perf_cores = subprocess.run(
+            ["sysctl", "-n", "hw.perflevel0.logicalcpu"],
+            capture_output=True,
+            text=True,
+        )
+        eff_cores = subprocess.run(
+            ["sysctl", "-n", "hw.perflevel1.logicalcpu"],
+            capture_output=True,
+            text=True,
+        )
+        if perf_cores.returncode == 0 and eff_cores.returncode == 0:
+            p = perf_cores.stdout.strip()
+            e = eff_cores.stdout.strip()
+            print(f"  CPU Cores:      {p} performance + {e} efficiency")
+    except Exception:
+        pass
+
+    # Current process CPU affinity / thread count
+    print("\n[Process]")
+    print(f"  PID:            {os.getpid()}")
+    print(f"  CPU count:      {multiprocessing.cpu_count()}")
+
+    # MLX memory (if available)
+    try:
+        # MLX doesn't have direct memory query, but we can check metal
+        result = subprocess.run(
+            ["sysctl", "-n", "iogpu.wired_limit_mb"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            print(f"  GPU Wired Limit: {result.stdout.strip()} MB")
+    except Exception:
+        pass
+
+    print("=" * 70 + "\n")
 
 
 # Quick test when run directly

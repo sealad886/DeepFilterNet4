@@ -104,7 +104,7 @@ if pytest is not None:
 
 def import_loss_functions():
     """Import loss functions from train_dynamic.py."""
-    from df_mlx.train_dynamic import (
+    from df_mlx.training_losses import (
         _EPS,
         _compute_awesome_losses,
         _compute_pipeline_awesome_losses,

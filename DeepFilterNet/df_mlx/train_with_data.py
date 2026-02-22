@@ -28,10 +28,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
-from typing import Tuple, cast
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -41,7 +41,7 @@ from tqdm import tqdm
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from df_mlx.grad_utils import clip_grad_norm_tree  # noqa: E402
+from df_mlx.training_ops import clip_grad_norm  # noqa: E402
 
 
 def save_checkpoint(
@@ -53,7 +53,9 @@ def save_checkpoint(
     loss: float,
     best_valid_loss: float,
 ) -> None:
-    """Save a training checkpoint.
+    """Save a training checkpoint atomically.
+
+    Uses temp files + atomic rename to prevent corruption on crash.
 
     Args:
         model: Model to save
@@ -66,22 +68,30 @@ def save_checkpoint(
     from mlx.utils import tree_flatten
 
     path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_weights = path.with_name(f"{path.stem}.tmp{path.suffix}")
 
-    # Flatten nested params for safetensors
     params = model.parameters()
     flat_params = tree_flatten(params)
     weights = {k: v for k, v in flat_params}
-    mx.save_safetensors(str(path), weights)
+    if weights:
+        mx.eval(*weights.values())
+    mx.save_safetensors(str(tmp_weights), weights)
 
-    # Save training state
     state_path = path.with_suffix(".state.json")
+    tmp_state = state_path.with_name(f"{state_path.stem}.tmp{state_path.suffix}")
     state = {
         "epoch": epoch,
         "loss": loss,
         "best_valid_loss": best_valid_loss,
     }
-    with open(state_path, "w") as f:
+    with open(tmp_state, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+
+    tmp_weights.replace(path)
+    tmp_state.replace(state_path)
 
 
 def load_checkpoint(model: nn.Module, path: str | Path) -> dict:
@@ -94,13 +104,26 @@ def load_checkpoint(model: nn.Module, path: str | Path) -> dict:
     Returns:
         Training state dict
     """
+    from mlx.utils import tree_flatten, tree_unflatten
+
     ckpt_path = Path(path)
 
-    # Load weights
     weights = mx.load(str(ckpt_path))
-    model.load_weights(weights)
 
-    # Load training state
+    flat_model = tree_flatten(model.parameters())
+    pairs = []
+    missing = []
+    for name, param in flat_model:
+        if isinstance(weights, dict) and name in weights:
+            pairs.append((name, weights[name]))
+        else:
+            pairs.append((name, param))
+            missing.append(name)
+
+    model.update(tree_unflatten(pairs))
+    if missing:
+        print(f"⚠️  {len(missing)} parameters were missing in checkpoint")
+
     state_path = ckpt_path.with_suffix(".state.json")
     state = {}
     if state_path.exists():
@@ -108,20 +131,6 @@ def load_checkpoint(model: nn.Module, path: str | Path) -> dict:
             state = json.load(f)
 
     return state  # type: ignore[return-value]
-
-
-def clip_grad_norm(grads, max_norm: float) -> Tuple[dict, float]:
-    """Clip gradients by global norm.
-
-    Args:
-        grads: Nested dict/list of gradients
-        max_norm: Maximum norm
-
-    Returns:
-        Tuple of (clipped_grads, grad_norm)
-    """
-    clipped, total_norm = clip_grad_norm_tree(grads, max_norm)
-    return cast(dict, clipped), float(total_norm)
 
 
 def train(
@@ -279,7 +288,8 @@ def train(
 
             # Gradient clipping (returns clipped grads and norm)
             if max_grad_norm > 0:
-                grads, grad_norm = clip_grad_norm(grads, max_grad_norm)
+                grads, grad_norm_arr = clip_grad_norm(grads, max_grad_norm)
+                grad_norm = float(grad_norm_arr)
 
             # Update parameters
             optimizer.update(model, grads)
