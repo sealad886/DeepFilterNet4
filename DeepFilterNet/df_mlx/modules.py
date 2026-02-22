@@ -17,6 +17,8 @@ from typing import Optional, Tuple, Union, cast
 import mlx.core as mx
 import mlx.nn as nn
 
+from .kernels import df_op_kernel, metal_kernels_available
+from .ops import as_strided_frames
 from .ops import erb_fb as make_erb_fb
 
 # ============================================================================
@@ -467,10 +469,17 @@ class DfOp(nn.Module):
     This is the core operation of DeepFilterNet - it learns to apply
     different filters to different frequency bins based on the input.
 
+    When ``use_metal_kernel=True`` (the default) and ``mx.fast.metal_kernel``
+    is available, the gather + complex-MAC hotspot is dispatched as a single
+    fused Metal kernel **at inference time only**.  During training
+    (``self.training == True``) the differentiable pure-MLX fallback is always
+    used because Metal kernels do not implement VJP.
+
     Args:
         nb_df: Number of DF frequency bins
         df_order: Filter order (number of taps)
         df_lookahead: Number of lookahead frames
+        use_metal_kernel: Attempt to use the fused Metal kernel path at inference.
     """
 
     def __init__(
@@ -478,12 +487,14 @@ class DfOp(nn.Module):
         nb_df: int = 96,
         df_order: int = 5,
         df_lookahead: int = 0,
+        use_metal_kernel: bool = True,
     ):
         super().__init__()
 
         self.nb_df = nb_df
         self.df_order = df_order
         self.df_lookahead = df_lookahead
+        self.use_metal_kernel = use_metal_kernel and metal_kernels_available()
 
     def __call__(
         self,
@@ -514,43 +525,23 @@ class DfOp(nn.Module):
         df_real_pad = mx.pad(df_real, [(0, 0), (pad_past, pad_future), (0, 0)])
         df_imag_pad = mx.pad(df_imag, [(0, 0), (pad_past, pad_future), (0, 0)])
 
-        # Apply filtering frame by frame
-        out_real_list = []
-        out_imag_list = []
+        # Filter coefficients: (batch, time, nb_df, df_order)
+        coef_r = coef[:, :, :, :, 0]
+        coef_i = coef[:, :, :, :, 1]
 
-        for t in range(time):
-            # Get filter coefficients for this frame
-            coef_t = coef[:, t, :, :, :]  # (batch, nb_df, df_order, 2)
-            coef_real = coef_t[:, :, :, 0]  # (batch, nb_df, df_order)
-            coef_imag = coef_t[:, :, :, 1]
-
-            # Get input frames for this output
-            # (batch, df_order, nb_df)
-            in_real = []
-            in_imag = []
-            for k in range(self.df_order):
-                in_real.append(df_real_pad[:, t + k, :])
-                in_imag.append(df_imag_pad[:, t + k, :])
-
-            in_real = mx.stack(in_real, axis=1)  # (batch, df_order, nb_df)
-            in_imag = mx.stack(in_imag, axis=1)
-
-            # Transpose for multiplication: (batch, nb_df, df_order)
-            in_real = mx.transpose(in_real, (0, 2, 1))
-            in_imag = mx.transpose(in_imag, (0, 2, 1))
-
-            # Complex multiplication and sum over filter taps
-            # (a+bi)(c+di) = (ac-bd) + (ad+bc)i
-            # Sum over df_order dimension
-            y_real = mx.sum(coef_real * in_real - coef_imag * in_imag, axis=-1)
-            y_imag = mx.sum(coef_real * in_imag + coef_imag * in_real, axis=-1)
-
-            out_real_list.append(y_real)
-            out_imag_list.append(y_imag)
-
-        # Stack time frames
-        df_out_real = mx.stack(out_real_list, axis=1)  # (batch, time, nb_df)
-        df_out_imag = mx.stack(out_imag_list, axis=1)
+        if self.use_metal_kernel:
+            df_out_real, df_out_imag = df_op_kernel(
+                spec_real_pad=df_real_pad,
+                spec_imag_pad=df_imag_pad,
+                coef_real=coef_r,
+                coef_imag=coef_i,
+                output_time=time,
+                nb_df=self.nb_df,
+                df_order=self.df_order,
+                batch_size=batch,
+            )
+        else:
+            df_out_real, df_out_imag = self._fallback(df_real_pad, df_imag_pad, coef_r, coef_i)
 
         # Combine with non-DF frequencies (pass-through)
         if n_freqs > self.nb_df:
@@ -561,6 +552,28 @@ class DfOp(nn.Module):
             out_imag = df_out_imag
 
         return (out_real, out_imag)
+
+    @staticmethod
+    def _fallback(
+        df_real_pad: mx.array,
+        df_imag_pad: mx.array,
+        coef_real: mx.array,
+        coef_imag: mx.array,
+    ) -> Tuple[mx.array, mx.array]:
+        """Pure-MLX gather + complex MAC (original implementation)."""
+        df_order = coef_real.shape[-1]
+
+        in_real = as_strided_frames(df_real_pad, frame_length=df_order, hop_length=1, axis=1)
+        in_imag = as_strided_frames(df_imag_pad, frame_length=df_order, hop_length=1, axis=1)
+        in_real = mx.transpose(in_real, (0, 1, 3, 2))
+        in_imag = mx.transpose(in_imag, (0, 1, 3, 2))
+
+        # Complex multiplication and sum over taps:
+        # (a+bi)(c+di) = (ac-bd) + (ad+bc)i
+        df_out_real = mx.sum(coef_real * in_real - coef_imag * in_imag, axis=-1)
+        df_out_imag = mx.sum(coef_real * in_imag + coef_imag * in_real, axis=-1)
+
+        return df_out_real, df_out_imag
 
 
 # ============================================================================

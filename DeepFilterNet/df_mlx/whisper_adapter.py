@@ -242,7 +242,7 @@ def to_numpy(arr: ArrayLike) -> np.ndarray:
     if _ensure_torch():
         torch = _get_torch()
         if isinstance(arr, torch.Tensor):
-            return arr.detach().cpu().numpy()
+            return arr.detach().cpu().numpy()  # type: ignore[union-attr]
     # Assume MLX array
     return np.array(arr)
 
@@ -625,8 +625,8 @@ class MLXWhisperBackend:
         if not isinstance(audio, type(mx.array([0]))):
             audio = mx.array(to_numpy(audio))
         if length is None:
-            return self._mlx_audio.pad_or_trim(audio)
-        return self._mlx_audio.pad_or_trim(audio, length)
+            return self._mlx_audio.pad_or_trim(audio)  # type: ignore[return-value]
+        return self._mlx_audio.pad_or_trim(audio, length)  # type: ignore[return-value]
 
     def log_mel_spectrogram(self, audio: ArrayLike, n_mels: Optional[int] = None) -> "mx.array":
         """
@@ -654,13 +654,13 @@ class MLXWhisperBackend:
         Returns:
             Audio waveform as numpy array.
         """
-        return self._mlx_audio.load_audio(path)
+        return self._mlx_audio.load_audio(path)  # type: ignore[return-value]
 
     def to_backend_array(self, arr: ArrayLike) -> "mx.array":
         """Convert input to MLX array."""
         mx = _get_mx()
         if isinstance(arr, type(mx.array([0]))):
-            return arr
+            return arr  # type: ignore[return-value]
         return mx.array(to_numpy(arr))
 
     def to_numpy(self, arr: ArrayLike) -> np.ndarray:
@@ -769,7 +769,7 @@ class PyTorchWhisperBackend:
             mel = torch.from_numpy(mel)
         elif _ensure_mlx() and not isinstance(mel, torch.Tensor):
             mel = torch.from_numpy(to_numpy(mel))
-        return self._model.embed_audio(mel.to(self._device))
+        return self._model.embed_audio(mel.to(self._device))  # type: ignore[union-attr]
 
     def logits(self, tokens: ArrayLike, audio_features: ArrayLike) -> "torch.Tensor":
         """
@@ -793,7 +793,7 @@ class PyTorchWhisperBackend:
         elif _ensure_mlx() and not isinstance(audio_features, torch.Tensor):
             audio_features = torch.from_numpy(to_numpy(audio_features))
 
-        return self._model.logits(tokens.to(self._device), audio_features.to(self._device))
+        return self._model.logits(tokens.to(self._device), audio_features.to(self._device))  # type: ignore[union-attr]
 
     def decode(self, mel: ArrayLike, options: Any = None) -> WhisperDecodingResult:
         """
@@ -815,7 +815,7 @@ class PyTorchWhisperBackend:
         elif _ensure_mlx() and not isinstance(mel, torch.Tensor):
             mel = torch.from_numpy(to_numpy(mel))
 
-        result = self._whisper.decode(self._model, mel.to(self._device), options)
+        result = self._whisper.decode(self._model, mel.to(self._device), options)  # type: ignore[union-attr]
         assert isinstance(result, self._whisper.DecodingResult)
 
         return WhisperDecodingResult(
@@ -909,8 +909,8 @@ class PyTorchWhisperBackend:
         elif _ensure_mlx() and not isinstance(audio, torch.Tensor):
             audio = torch.from_numpy(to_numpy(audio))
         if length is None:
-            return self._whisper.pad_or_trim(audio)
-        return self._whisper.pad_or_trim(audio, length)
+            return self._whisper.pad_or_trim(audio)  # type: ignore[return-value]
+        return self._whisper.pad_or_trim(audio, length)  # type: ignore[return-value]
 
     def log_mel_spectrogram(self, audio: ArrayLike, n_mels: Optional[int] = None) -> "torch.Tensor":
         """
@@ -950,7 +950,7 @@ class PyTorchWhisperBackend:
         """Convert input to PyTorch tensor on the correct device."""
         torch = _get_torch()
         if isinstance(arr, torch.Tensor):
-            return arr.to(self._device)
+            return arr.to(self._device)  # type: ignore[union-attr]
         return torch.from_numpy(to_numpy(arr)).to(self._device)
 
     def to_numpy(self, arr: ArrayLike) -> np.ndarray:
@@ -1072,7 +1072,7 @@ def compute_asr_features(
             mel = mx.expand_dims(mel, axis=0)
         else:
             # PyTorch backend returns torch.Tensor with .unsqueeze()
-            mel = mel.unsqueeze(0)  # noqa: B010
+            mel = mel.unsqueeze(0)  # type: ignore[union-attr]  # noqa: B010
 
     # Get audio embeddings
     embeddings = backend.embed_audio(mel)
@@ -1108,7 +1108,7 @@ def compute_whisper_loss(
     # Compute L1 loss between embeddings
     if backend.backend_name == "mlx":
         mx = _get_mx()
-        diff = mx.abs(clean_emb - enhanced_emb)
+        diff = mx.abs(clean_emb - enhanced_emb)  # type: ignore[operator]
         if reduction == "mean":
             return mx.mean(diff)
         elif reduction == "sum":
@@ -1116,7 +1116,7 @@ def compute_whisper_loss(
         return diff
     else:
         torch = _get_torch()
-        diff = torch.abs(clean_emb - enhanced_emb)
+        diff = torch.abs(clean_emb - enhanced_emb)  # type: ignore[operator]
         if reduction == "mean":
             return diff.mean()
         elif reduction == "sum":

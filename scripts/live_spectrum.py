@@ -1,5 +1,6 @@
 import struct
 from queue import Queue
+from typing import Any
 
 import inquirer
 import matplotlib.animation as animation
@@ -27,8 +28,10 @@ q = [inquirer.List("id", "Select device", choices=devices.values())]
 answers = inquirer.prompt(q)
 
 device_id = int(answers["id"].split(":")[0])
-device_info = p.get_device_info_by_index(device_id)
+device_info: dict[str, Any] = p.get_device_info_by_index(device_id)
 sr = int(device_info["defaultSampleRate"])
+device_info.update({"maxInputChannels": int(device_info["maxInputChannels"])})
+device_info.update({"maxOutputChannels": int(device_info["maxOutputChannels"])})
 channels = (
     device_info["maxInputChannels"]
     if (device_info["maxOutputChannels"] < device_info["maxInputChannels"])

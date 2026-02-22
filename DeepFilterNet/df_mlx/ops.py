@@ -135,6 +135,48 @@ def stft(
         return mx.stack([real, imag], axis=-1)
 
 
+@lru_cache(maxsize=8)
+def _cached_window_norm(
+    window_type: str,
+    win_length: int,
+    n_fft: int,
+    hop_length: int,
+    num_frames: int,
+) -> mx.array:
+    """Precompute the window normalization array for iSTFT overlap-add.
+
+    The window-sum denominator is identical for all calls with the same
+    parameters, so caching avoids reconstructing it every forward pass.
+    """
+    win = get_window(window_type, win_length)
+    if win_length < n_fft:
+        pad_left = (n_fft - win_length) // 2
+        pad_right_w = n_fft - win_length - pad_left
+        win = mx.pad(win, [(pad_left, pad_right_w)])
+
+    win_sq = win * win
+    nover = n_fft // hop_length
+    output_length = (num_frames - 1) * hop_length + n_fft
+    window_sum = mx.zeros((1, output_length))
+
+    for g in range(nover):
+        num_group_frames = len(range(g, num_frames, nover))
+        if num_group_frames == 0:
+            continue
+        win_group = mx.broadcast_to(win_sq[None, :], (num_group_frames, n_fft)).reshape(1, num_group_frames * n_fft)
+        start_offset = g * hop_length
+        flat_len = num_group_frames * n_fft
+        pad_right = output_length - start_offset - flat_len
+        if pad_right >= 0:
+            win_group = mx.pad(win_group, [(0, 0), (start_offset, pad_right)])
+        else:
+            win_group = mx.pad(win_group, [(0, 0), (start_offset, 0)])[:, :output_length]
+        window_sum = window_sum + win_group
+
+    mx.eval(window_sum)  # Force evaluation for caching
+    return mx.maximum(window_sum, 1e-8)
+
+
 def istft(
     spec: Union[Tuple[mx.array, mx.array], mx.array],
     n_fft: int = 960,
@@ -143,6 +185,7 @@ def istft(
     window: str = "sqrt_hann",
     center: bool = True,
     length: Optional[int] = None,
+    use_metal_kernel: bool = True,
 ) -> mx.array:
     """Inverse Short-Time Fourier Transform.
 
@@ -154,6 +197,9 @@ def istft(
         window: Window type
         center: Whether signal was center-padded
         length: Desired output length
+        use_metal_kernel: If True and available, use fused Metal kernel for
+            overlap-add + normalization. Falls back to pure-MLX when the
+            kernel API is absent or this flag is False.
 
     Returns:
         Reconstructed audio signal
@@ -192,25 +238,73 @@ def istft(
     # Apply window
     frames = frames * win
 
-    # Overlap-add (loop is necessary as MLX lacks scatter_add)
+    # Overlap-add
     output_length = (num_frames - 1) * hop_length + n_fft
-    output = mx.zeros((batch_size, output_length))
+    nover = n_fft // hop_length
 
-    # Pre-compute window sum (same for all batches, compute once)
-    window_sum = mx.zeros((output_length,))
-    win_squared = win * win
-    for i in range(num_frames):
-        start = i * hop_length
-        window_sum = window_sum.at[start : start + n_fft].add(win_squared)
+    # Use cached window normalization — identical for same params
+    window_sum = _cached_window_norm(window, win_length, n_fft, hop_length, num_frames)
 
-    # Overlap-add frames
-    for i in range(num_frames):
-        start = i * hop_length
-        output = output.at[:, start : start + n_fft].add(frames[:, i, :])
+    # Try fused Metal kernel path (overlap-add + normalization in one dispatch)
+    _use_kernel = False
+    if use_metal_kernel and n_fft % hop_length == 0 and nover > 0:
+        from df_mlx.kernels import istft_overlap_add_kernel, metal_kernels_available
 
-    # Normalize by window sum
-    window_sum = mx.maximum(window_sum, 1e-8)
-    output = output / window_sum
+        if metal_kernels_available():
+            _use_kernel = True
+
+    if _use_kernel:
+        # Squeeze window_sum from (1, output_length) to (output_length,)
+        wn_1d = mx.squeeze(window_sum, axis=0)
+        output = istft_overlap_add_kernel(
+            frames=frames,
+            window_norm=wn_1d,
+            hop_length=hop_length,
+            output_length=output_length,
+            batch_size=batch_size,
+        )
+    elif n_fft % hop_length == 0 and nover > 0:
+        # Vectorized path: group frames into nover non-overlapping groups.
+        # Within each group consecutive frames are n_fft apart, so the
+        # windowed samples can be reshaped into a contiguous block —
+        # no scatter_add needed.  O(nover) ops instead of O(num_frames).
+        output = mx.zeros((batch_size, output_length))
+
+        for g in range(nover):
+            group_frames = frames[:, g::nover, :]  # (batch, num_group_frames, n_fft)
+            num_group_frames = group_frames.shape[1]
+
+            if num_group_frames == 0:
+                continue
+
+            flat = group_frames.reshape(batch_size, num_group_frames * n_fft)
+
+            start_offset = g * hop_length
+            flat_len = num_group_frames * n_fft
+            pad_right = output_length - start_offset - flat_len
+
+            if pad_right >= 0:
+                flat = mx.pad(flat, [(0, 0), (start_offset, pad_right)])
+            else:
+                flat = mx.pad(flat, [(0, 0), (start_offset, 0)])[:, :output_length]
+
+            output = output + flat
+
+        # Normalize by window sum
+        output = output / window_sum
+    else:
+        # Fallback: original loop for non-integer overlap ratios
+        output = mx.zeros((batch_size, output_length))
+        window_sum_fb = mx.zeros((output_length,))
+        win_squared = win * win
+        for i in range(num_frames):
+            start = i * hop_length
+            window_sum_fb = window_sum_fb.at[start : start + n_fft].add(win_squared)
+        for i in range(num_frames):
+            start = i * hop_length
+            output = output.at[:, start : start + n_fft].add(frames[:, i, :])
+        window_sum_fb = mx.maximum(window_sum_fb, 1e-8)
+        output = output / window_sum_fb[None, :]
 
     # Remove center padding
     if center:

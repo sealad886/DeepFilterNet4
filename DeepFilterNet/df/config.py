@@ -118,6 +118,7 @@ class Config:
             self.parser.add_section(section.lower())
         if option.upper() in os.environ:
             value = os.environ[option.upper()]
+            logger.warning(f"Config '{option}' overridden by environment variable {option.upper()}={value}")
             if save:
                 self.parser.set(section, option, self.tostr(value, cast))
         elif self.parser.has_option(section, option):
@@ -160,9 +161,9 @@ class Config:
 
     def overwrite(self, section: str, option: str, value: Any):
         if not self.parser.has_section(section):
-            return ValueError(f"Section not found: '{section}'")
+            raise ValueError(f"Section not found: '{section}'")
         if not self.parser.has_option(section, option):
-            return ValueError(f"Option not found '{option}' in section '{section}'")
+            raise ValueError(f"Option not found '{option}' in section '{section}'")
         self.modified = True
         cast = type(value)
         return self.parser.set(section, option, self.tostr(value, cast))

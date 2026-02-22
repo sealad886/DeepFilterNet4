@@ -22,7 +22,7 @@ repos:
 
   # Python formatting - matches python_lint.yml CI
   - repo: https://github.com/psf/black
-    rev: 25.12.0
+    rev: 26.1.0
     hooks:
       - id: black
         # Uses pyproject.toml [tool.black] config automatically
@@ -44,6 +44,15 @@ repos:
   # Rust formatting and linting - matches rust_lint.yml CI
   - repo: local
     hooks:
+      - id: forbid-upstream-remote
+        name: forbid upstream remote
+        description: Prevent forbidden upstream remote
+        entry: scripts/guard-upstream-remote.sh enforce
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit, pre-push]
+
       - id: cargo-fmt
         name: cargo fmt
         description: Run cargo fmt to check Rust formatting (uses nightly)

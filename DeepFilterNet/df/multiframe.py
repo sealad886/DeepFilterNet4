@@ -494,7 +494,7 @@ class MfWf(MultiFrameModule):
         if self.enforce_constraints and not self.inverse and not self.cholesky_decomp:
             # If we have a cholesky_decomp input the constraints are already enforced.
             # We have a standard correlation matrix as input. Imaginary part on the diagonal should be 0.
-            torch.diagonal(iRxx, dim1=-1, dim2=-2).imag = 0.0
+            torch.diagonal(iRxx, dim1=-1, dim2=-2).imag = 0.0  # type: ignore[misc]
             # Triu should be complex conj of tril
             tril_conj = iRxx[:, :, :, self.tril_idcs[0], self.tril_idcs[1]].conj()
             iRxx[:, :, :, self.triu_idcs[0], self.triu_idcs[1]] = tril_conj
@@ -589,7 +589,7 @@ class MfMvdr(MultiFrameModule):
         if self.enforce_constraints and not self.inverse and not self.cholesky_decomp:
             # If we have a cholesky_decomp input the constraints are already enforced.
             # We have a standard correlation matrix as input. Imaginary part on the diagonal should be 0.
-            torch.diagonal(iRnn, dim1=-1, dim2=-2).imag = 0.0
+            torch.diagonal(iRnn, dim1=-1, dim2=-2).imag = 0.0  # type: ignore[misc]
             # Triu should be complex conj of tril
             tril_conj = iRnn[:, :, :, self.tril_idcs[0], self.tril_idcs[1]].conj()
             iRnn[:, :, :, self.triu_idcs[0], self.triu_idcs[1]] = tril_conj
@@ -657,7 +657,8 @@ def compute_corr(X: Tensor, N: int):
 
 
 def compute_ideal_wf(rxx_via_rssrnn=True, cholesky_decomp=False, inverse=True, enforce_constraints=True, manual=False):
-    from icecream import ic, install
+    from icecream import ic
+    from icecream.builtins import install
 
     import libdf
     from df.config import config
@@ -732,7 +733,8 @@ def compute_ideal_wf(rxx_via_rssrnn=True, cholesky_decomp=False, inverse=True, e
 
 
 def compute_ideal_mvdr(cholesky_decomp=False, inverse=True, enforce_constraints=True, manual=False):
-    from icecream import ic, install
+    from icecream import ic
+    from icecream.builtins import install
 
     import libdf
     from df.config import config

@@ -1,0 +1,924 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/sealad886/DeepFilterNet4/schemas/run-config.schema.json",
+  "title": "DeepFilterNet4 Run Configuration",
+  "description": "Configuration schema for df_mlx.train_dynamic run configs.\n\nThis schema defines the complete runtime configuration for training DeepFilterNet4 models with MLX backend, including dataset, training parameters, model architecture, loss functions, and debugging options.",
+  "type": "object",
+  "x-taplo": {
+    "docs": {
+      "main": "# DeepFilterNet4 Run Configuration\n\nComplete configuration schema for training with `df_mlx.train_dynamic`. Supports dynamic dataset configuration, multi-loss training, GAN adversarial training, and comprehensive VAD (Voice Activity Detection) integration."
+    },
+    "initKeys": ["dataset", "training", "model", "checkpoint"]
+  },
+  "properties": {
+    "dataset": {
+      "type": "object",
+      "title": "Dataset Configuration",
+      "description": "Configure dataset paths, mixing parameters, SNR ranges, and audio augmentation strategies.",
+      "x-taplo": {
+        "docs": {
+          "main": "Dataset configuration paths and mixing parameters.\n\n- **Lists** can point to plain text files with paths (one per line) for speech, noise, and RIRs\n- **SNR ranges** control signal-to-noise mixing ratios in dB\n- **Probabilities** control frequency of augmentation application (0-1)"
+        },
+        "initKeys": ["cache_dir", "speech_list", "noise_list", "config"]
+      },
+      "properties": {
+        "cache_dir": {
+          "type": ["string", "null"],
+          "title": "Audio Cache Directory",
+          "description": "Path to pre-built audio cache (from build_audio_cache.py). If provided, speeds up data loading by using cached spectrograms."
+        },
+        "speech_list": {
+          "type": ["string", "null"],
+          "title": "Speech File List",
+          "description": "Path to file containing speech file paths (one per line). Speech comprises the clean signal portion of training mixtures."
+        },
+        "noise_list": {
+          "type": ["string", "null"],
+          "title": "Noise File List",
+          "description": "Path to file containing noise file paths (one per line). Noise is mixed with speech to create noisy targets."
+        },
+        "rir_list": {
+          "type": ["string", "null"],
+          "title": "Room Impulse Response List",
+          "description": "Path to file containing RIR file paths (one per line). RIRs simulate room acoustics."
+        },
+        "config": {
+          "type": ["string", "null"],
+          "title": "Mixer Configuration Path",
+          "description": "Dataset/mixer config JSON path specifying mixing strategy and augmentation settings."
+        },
+        "snr_range": {
+          "type": ["array", "null"],
+          "title": "Base SNR Range (dB)",
+          "description": "Override base Signal-to-Noise Ratio range in dB. Example: [-5, 40] means SNR varies from -5 dB (noisy) to +40 dB (clean).",
+          "items": { "type": "number" },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "snr_range_extreme": {
+          "type": ["array", "null"],
+          "title": "Extreme SNR Range (dB)",
+          "description": "Override extreme Signal-to-Noise Ratio range in dB (e.g., [-20, -5]). Very noisy conditions sampled with probability p_extreme_snr.",
+          "items": { "type": "number" },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "p_extreme_snr": {
+          "type": ["number", "null"],
+          "title": "Extreme SNR Probability",
+          "description": "Probability of sampling from extreme SNR range (0-1). Controls data augmentation diversity.",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "snr_range_very_low": {
+          "type": ["array", "null"],
+          "title": "Very Low SNR Range (dB)",
+          "description": "Override very-low Signal-to-Noise Ratio range in dB (e.g., [-30, -20]). Extremely challenging conditions.",
+          "items": { "type": "number" },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "p_very_low_snr": {
+          "type": ["number", "null"],
+          "title": "Very Low SNR Probability",
+          "description": "Probability of sampling from very-low SNR range (0-1).",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "p_interfer_speech": {
+          "type": ["number", "null"],
+          "title": "Interfering Speech Probability",
+          "description": "Probability of adding interfering (competing) speaker to the mixture (0-1). Improves robustness to multi-speaker scenarios.",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "speech_gain_range": {
+          "type": ["array", "null"],
+          "title": "Speech Gain Range (dB)",
+          "description": "Override speech gain range in dB (e.g., [-12, 12]). Applied as volume augmentation to the speech component.",
+          "items": { "type": "number" },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "noise_gain_range": {
+          "type": ["array", "null"],
+          "title": "Noise Gain Range (dB)",
+          "description": "Override noise gain range in dB (e.g., [-12, 12]). Applied as volume augmentation to the noise component.",
+          "items": { "type": "number" },
+          "minItems": 2,
+          "maxItems": 2
+        }
+      },
+      "additionalProperties": false
+    },
+    "augmentation": {
+      "type": "object",
+      "title": "Audio Augmentation",
+      "description": "Audio augmentation configuration controlling probabilistic application of effects.",
+      "x-taplo": {
+        "docs": {
+          "main": "Augmentation parameters control data-time effects applied during training to improve model robustness."
+        }
+      },
+      "properties": {
+        "p_reverb": {
+          "type": "number",
+          "title": "Reverb Probability",
+          "description": "Probability of applying reverb/room acoustics simulation (0-1).",
+          "default": 0.5,
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "p_clipping": {
+          "type": "number",
+          "title": "Clipping Distortion Probability",
+          "description": "Probability of applying clipping distortion (0-1) - simulates microphone saturation.",
+          "default": 0.0,
+          "minimum": 0.0,
+          "maximum": 1.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "training": {
+      "type": "object",
+      "title": "Training Configuration",
+      "description": "Training hyperparameters including learning rate, batch size, and optimization settings.",
+      "x-taplo": {
+        "docs": {
+          "main": "Hyperparameters for model training using AdamW optimizer with cosine annealing schedule and optional warmup/curriculum learning."
+        },
+        "initKeys": ["epochs", "batch_size", "learning_rate"]
+      },
+      "properties": {
+        "epochs": {
+          "type": "integer",
+          "title": "Training Epochs",
+          "description": "Total number of training epochs (passes through the dataset).",
+          "default": 100,
+          "minimum": 1
+        },
+        "batch_size": {
+          "type": "integer",
+          "title": "Batch Size",
+          "description": "Number of samples per batch. Larger batches improve stability but require more GPU memory.",
+          "default": 8,
+          "minimum": 1
+        },
+        "learning_rate": {
+          "type": "number",
+          "title": "Initial Learning Rate",
+          "description": "Starting learning rate for the optimizer. Follows cosine annealing schedule.",
+          "default": 0.0001,
+          "minimum": 0.0
+        },
+        "learning_rate_min": {
+          "type": ["number", "null"],
+          "title": "Minimum Learning Rate",
+          "description": "Minimum learning rate for cosine annealing schedule. If null, defaults to 1% of base learning rate.",
+          "minimum": 0.0
+        },
+        "weight_decay": {
+          "type": "number",
+          "title": "Weight Decay",
+          "description": "L2 regularization coefficient for AdamW optimizer. Prevents overfitting.",
+          "default": 0.0,
+          "minimum": 0.0
+        },
+        "warmup_epochs": {
+          "type": "integer",
+          "title": "Warmup Epochs",
+          "description": "Number of epochs to linearly warm up learning rate from 0 to base LR.",
+          "default": 5,
+          "minimum": 0
+        },
+        "curriculum_warmup_epochs": {
+          "type": "integer",
+          "title": "Curriculum Learning Warmup",
+          "description": "Curriculum learning warmup epochs (0=disabled). SNR and interferer probabilities gradually ramp from 0 to target values.",
+          "default": 0,
+          "minimum": 0
+        },
+        "patience": {
+          "type": "integer",
+          "title": "Early Stopping Patience",
+          "description": "Number of validation steps with no improvement before early stopping (0=disabled).",
+          "default": 10,
+          "minimum": 0
+        },
+        "grad_accumulation_steps": {
+          "type": "integer",
+          "title": "Gradient Accumulation Steps",
+          "description": "Number of batches to accumulate gradients before optimizer step. Simulates larger effective batch size.",
+          "default": 1,
+          "minimum": 1
+        },
+        "max_grad_norm": {
+          "type": "number",
+          "title": "Maximum Gradient Norm",
+          "description": "Clip gradients to this norm value to prevent exploding gradients.",
+          "default": 1.0,
+          "minimum": 0.0
+        },
+        "eval_frequency": {
+          "type": "integer",
+          "title": "Synchronization/Eval Frequency",
+          "description": "Synchronize metrics and perform evaluation every N batches.",
+          "default": 10,
+          "minimum": 1
+        },
+        "fp16": {
+          "type": ["boolean", "string", "null"],
+          "title": "Mixed Precision Training",
+          "description": "Enable FP16 mixed precision: true/false or 'auto' for hardware default.",
+          "enum": [true, false, "auto", null],
+          "default": "auto",
+          "x-taplo": {
+            "docs": {
+              "enumValues": [
+                "Enable FP16 - uses lower precision for faster training",
+                "Disable FP16 - use full FP32 precision",
+                "Automatic - hardware determines optimal precision",
+                "No override - use system default"
+              ]
+            }
+          }
+        },
+        "seed": {
+          "type": ["integer", "null"],
+          "title": "Random Seed",
+          "description": "Optional RNG seed override for reproducibility (-1 disables override).",
+          "minimum": 0
+        },
+        "train_config": {
+          "type": ["string", "null"],
+          "title": "Legacy Train Config Path",
+          "description": "Path to train.py-compatible INI config file (optional, for backwards compatibility)."
+        }
+      },
+      "additionalProperties": false
+    },
+    "dataloader": {
+      "type": "object",
+      "title": "Data Loader Configuration",
+      "description": "Configuration for efficient batch loading and data pipeline management.",
+      "x-taplo": {
+        "docs": {
+          "main": "Control data loading parallelization, prefetching, and batch limits for optimal throughput."
+        }
+      },
+      "properties": {
+        "num_workers": {
+          "type": "integer",
+          "title": "Number of Workers",
+          "description": "Number of parallel data loading processes. Higher values can improve throughput but increase memory usage.",
+          "default": 4,
+          "minimum": 0
+        },
+        "prefetch_size": {
+          "type": "integer",
+          "title": "Prefetch Size",
+          "description": "Number of batches to prefetch for smoother data pipeline.",
+          "default": 8,
+          "minimum": 1
+        },
+        "use_mlx_data": {
+          "type": "boolean",
+          "title": "Use MLX Data Stream",
+          "description": "Use MLXDataStream backend if available for optimized data loading on Apple Silicon.",
+          "default": true
+        },
+        "max_train_batches": {
+          "type": ["integer", "null"],
+          "title": "Max Training Batches per Epoch",
+          "description": "Limit number of training batches per epoch (-1 or null disables limit). Useful for fast iteration.",
+          "minimum": 1
+        },
+        "max_valid_batches": {
+          "type": ["integer", "null"],
+          "title": "Max Validation Batches per Epoch",
+          "description": "Limit number of validation batches per epoch (-1 or null disables limit).",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "checkpoint": {
+      "type": "object",
+      "title": "Checkpoint Management",
+      "description": "Configure checkpoint saving, resumption, and recovery strategies.",
+      "x-taplo": {
+        "docs": {
+          "main": "Checkpoint configuration for model persistence, training resumption, and data state recovery. Supports auto-detection or explicit checkpoint paths."
+        },
+        "initKeys": ["checkpoint_dir", "save_strategy", "resume"]
+      },
+      "properties": {
+        "checkpoint_dir": {
+          "type": "string",
+          "title": "Checkpoint Directory",
+          "description": "Directory where model checkpoints will be saved.",
+          "default": "checkpoints"
+        },
+        "save_strategy": {
+          "type": "string",
+          "title": "Checkpoint Save Strategy",
+          "description": "When to save checkpoints: 'no' (never), 'epoch' (every epoch), or 'steps' (every N steps).",
+          "enum": ["no", "epoch", "steps"],
+          "default": "epoch",
+          "x-taplo": {
+            "docs": {
+              "enumValues": [
+                "No checkpointing",
+                "Save after each epoch",
+                "Save every N steps (configured in save_steps)"
+              ]
+            }
+          }
+        },
+        "save_steps": {
+          "type": "integer",
+          "title": "Steps Between Checkpoints",
+          "description": "Save checkpoint every N steps (used when save_strategy is 'steps').",
+          "default": 500,
+          "minimum": 1
+        },
+        "save_total_limit": {
+          "type": ["integer", "null"],
+          "title": "Maximum Checkpoints to Keep",
+          "description": "Maximum number of recent checkpoints to keep (-1 or null disables pruning, keeps all).",
+          "minimum": 1
+        },
+        "checkpoint_batches": {
+          "type": "integer",
+          "title": "Data Checkpoint Frequency",
+          "description": "Save data checkpoint every N batches (0 disables). Enables faster data state resumption.",
+          "default": 0,
+          "minimum": 0
+        },
+        "validate_every": {
+          "type": "integer",
+          "title": "Validation Frequency",
+          "description": "Perform validation every N epochs.",
+          "default": 1,
+          "minimum": 1
+        },
+        "resume": {
+          "type": ["boolean", "string"],
+          "title": "Resume Training",
+          "description": "Resume from checkpoint: true (auto-detect), false (start fresh), or explicit checkpoint path.",
+          "default": false,
+          "x-taplo": {
+            "docs": {
+              "main": "Resume from a previous checkpoint. Set to true for auto-detection, false to start fresh, or provide a path to a specific checkpoint directory or file."
+            }
+          }
+        },
+        "resume_data": {
+          "type": ["boolean", "string"],
+          "title": "Resume Data State",
+          "description": "Resume data iterator state: true (auto-detect), false (start fresh), or explicit path.",
+          "default": false
+        },
+        "check_chkpts": {
+          "type": "boolean",
+          "title": "Validate Checkpoints at Startup",
+          "description": "Verify checkpoints are loadable before starting training.",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "model": {
+      "type": "object",
+      "title": "Model Architecture",
+      "description": "Model architecture selection and variant configuration.",
+      "x-taplo": {
+        "docs": {
+          "main": "Choose backbone architecture (Mamba, GRU, or Attention) and model size (full or lite). Mamba is recommended for optimal performance."
+        },
+        "initKeys": ["backbone_type", "variant"]
+      },
+      "properties": {
+        "backbone_type": {
+          "type": "string",
+          "title": "Backbone Architecture",
+          "description": "Backbone architecture type: 'mamba' (recommended), 'gru', or 'attention'.",
+          "enum": ["mamba", "gru", "attention"],
+          "default": "mamba",
+          "x-taplo": {
+            "docs": {
+              "enumValues": [
+                "Mamba - State-space model backbone (recommended for efficiency)",
+                "GRU - Gated Recurrent Unit (traditional RNN)",
+                "Attention - Transformer attention backbone"
+              ]
+            }
+          }
+        },
+        "variant": {
+          "type": "string",
+          "title": "Model Size Variant",
+          "description": "Model size: 'full' (standard), or 'lite' (compressed for inference).",
+          "enum": ["full", "lite"],
+          "default": "full",
+          "x-taplo": {
+            "docs": {
+              "enumValues": [
+                "Full - Standard model size with full capacity",
+                "Lite - Compressed variant for faster inference"
+              ]
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "loss": {
+      "type": "object",
+      "title": "Loss Function Configuration",
+      "description": "Configuration for loss functions including basic MSE, AWESOME, Multi-resolution STFT, and auxiliary losses.",
+      "x-taplo": {
+        "docs": {
+          "main": "Multi-component loss function combining reconstruction loss, AWESOME perceptual loss, Multi-resolution STFT loss, and optional GAN adversarial signal. Choose dynamic_loss strategy: 'baseline' (MSE), 'awesome' (AWESOME + MSE), or 'pipeline_awesome' (pipeline integration)."
+        },
+        "initKeys": ["dynamic_loss", "awesome"]
+      },
+      "properties": {
+        "dynamic_loss": {
+          "type": "string",
+          "title": "Dynamic Loss Strategy",
+          "description": "Loss function strategy: 'baseline' (MSE only), 'awesome' (AWESOME + MSE), or 'pipeline_awesome' (pipeline integrated).",
+          "enum": ["baseline", "awesome", "pipeline_awesome"],
+          "default": "baseline",
+          "x-taplo": {
+            "docs": {
+              "enumValues": [
+                "Baseline MSE loss - simple reconstruction error",
+                "AWESOME + MSE - adds perceptual quality loss",
+                "Pipeline AWESOME - integrated into data pipeline"
+              ]
+            }
+          }
+        },
+        "awesome": {
+          "type": "object",
+          "title": "AWESOME Loss Configuration",
+          "description": "AWESOME loss parameters (used when dynamic_loss is 'awesome' or 'pipeline_awesome'). Provides perceptually-weighted speech enhancement.",
+          "x-taplo": {
+            "docs": {
+              "main": "AWESOME (Attention-Weighted Spectral Loss for Optimization of Model Enhancement) improves perceptual quality by weighting loss based on speech activity and frequency importance."
+            },
+            "initKeys": ["loss_weight", "mask_sharpness"]
+          },
+          "properties": {
+            "loss_weight": {
+              "type": "number",
+              "title": "AWESOME Loss Weight",
+              "description": "Weight of AWESOME loss relative to baseline loss (0-1). Higher values emphasize perceptual quality.",
+              "default": 0.4,
+              "minimum": 0.0
+            },
+            "mask_sharpness": {
+              "type": "number",
+              "title": "Mask Sharpness",
+              "description": "Speech/noise mask sharpness factor. Higher values create sharper boundaries between speech and noise.",
+              "default": 6.0,
+              "minimum": 0.0
+            },
+            "warmup_steps": {
+              "type": "integer",
+              "title": "AWESOME Warmup Steps",
+              "description": "Number of training steps before AWESOME loss is applied. Allows model to learn basic reconstruction first.",
+              "default": 0,
+              "minimum": 0
+            },
+            "proxy_enabled": {
+              "type": "boolean",
+              "title": "Enable VAD Proxy Gating",
+              "description": "Enable cheap VAD proxy gating for speech/silence decision.",
+              "default": true
+            }
+          },
+          "additionalProperties": false
+        },
+        "mrstft": {
+          "type": "object",
+          "title": "Multi-Resolution STFT Loss",
+          "description": "Multi-resolution Short-Time Fourier Transform loss for frequency-domain reconstruction accuracy.",
+          "x-taplo": {
+            "docs": {
+              "main": "STFT loss evaluates reconstruction quality across multiple frequency resolutions, improving overall spectral accuracy."
+            }
+          },
+          "properties": {
+            "factor": {
+              "type": "number",
+              "title": "MRSTFT Loss Weight",
+              "description": "Multi-resolution STFT loss weight relative to baseline (0 disables).",
+              "default": 0.0,
+              "minimum": 0.0
+            },
+            "gamma": {
+              "type": "number",
+              "title": "Magnitude Compression Exponent",
+              "description": "Exponent for magnitude compression (log-scale weighting). Higher values emphasize smaller magnitudes.",
+              "default": 1.0,
+              "minimum": 0.0
+            },
+            "f_complex": {
+              "type": ["number", "null"],
+              "title": "Complex Loss Weight",
+              "description": "Weight for complex-valued (magnitude + phase) loss component. Null disables complex loss (phase ignored).",
+              "minimum": 0.0
+            },
+            "fft_sizes": {
+              "type": "array",
+              "title": "FFT Sizes",
+              "description": "FFT window sizes for multi-resolution analysis.",
+              "items": { "type": "integer", "minimum": 1 },
+              "default": [512, 1024, 2048]
+            },
+            "hop_sizes": {
+              "type": ["array", "null"],
+              "title": "Hop Sizes",
+              "description": "Hop sizes for STFT (stride). If null, defaults to fft_size / 4 for each FFT size.",
+              "items": { "type": "integer", "minimum": 1 }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "gan": {
+      "type": "object",
+      "title": "GAN Adversarial Training",
+      "description": "Generative Adversarial Network configuration for adversarial training. Improves speech naturalness but requires careful tuning.",
+      "x-taplo": {
+        "docs": {
+          "main": "Adversarial training using Multiple Discriminators (MPD, MSD). Adds discriminator loss to generator training for improved speech quality. Recommended only for advanced users - leave disabled for baseline training."
+        },
+        "initKeys": ["enabled", "discriminator", "adv_weight"]
+      },
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "title": "Enable GAN Training",
+          "description": "Enable adversarial GAN training (training with discriminators).",
+          "default": false
+        },
+        "start_epoch": {
+          "type": "integer",
+          "title": "GAN Start Epoch",
+          "description": "Epoch to begin GAN training (0-based). Allows model to learn basic reconstruction before adding adversarial component.",
+          "default": 0,
+          "minimum": 0
+        },
+        "ramp_epochs": {
+          "type": "integer",
+          "title": "GAN Weight Ramp-up",
+          "description": "Linearly ramp GAN adversarial and feature matching weights over N epochs (0 disables ramp).",
+          "default": 0,
+          "minimum": 0
+        },
+        "adv_weight": {
+          "type": "number",
+          "title": "Adversarial Loss Weight",
+          "description": "Generator adversarial loss weight. Controls strength of discriminator feedback.",
+          "default": 0.0,
+          "minimum": 0.0
+        },
+        "fm_weight": {
+          "type": "number",
+          "title": "Feature Matching Loss Weight",
+          "description": "Feature matching loss weight (intermediate discriminator features). Stabilizes training.",
+          "default": 0.0,
+          "minimum": 0.0
+        },
+        "discriminator": {
+          "type": "string",
+          "title": "Discriminator Type",
+          "description": "Discriminator architecture: 'combined' (both MPD and MSD), 'mpd' (Multi-Period), or 'msd' (Multi-Scale).",
+          "enum": ["combined", "mpd", "msd"],
+          "default": "combined",
+          "x-taplo": {
+            "docs": {
+              "enumValues": [
+                "Combined - Uses both Multi-Period and Multi-Scale discriminators",
+                "MPD - Multi-Period Discriminator only",
+                "MSD - Multi-Scale Discriminator only"
+              ]
+            }
+          }
+        },
+        "mpd_periods": {
+          "type": "array",
+          "title": "MPD Periods",
+          "description": "Periods for Multi-Period Discriminator.",
+          "items": { "type": "integer", "minimum": 1 },
+          "default": [2, 3, 5, 7, 11]
+        },
+        "msd_scales": {
+          "type": "integer",
+          "title": "MSD Number of Scales",
+          "description": "Number of scales for Multi-Scale Discriminator.",
+          "default": 3,
+          "minimum": 1
+        },
+        "disc_lr": {
+          "type": "number",
+          "title": "Discriminator Learning Rate",
+          "description": "Learning rate for discriminator optimizer (usually equal to generator LR).",
+          "default": 0.0001,
+          "minimum": 0.0
+        },
+        "disc_weight_decay": {
+          "type": "number",
+          "title": "Discriminator Weight Decay",
+          "description": "L2 regularization for discriminator parameters.",
+          "default": 0.0,
+          "minimum": 0.0
+        },
+        "disc_grad_clip": {
+          "type": "number",
+          "title": "Discriminator Gradient Clipping",
+          "description": "Maximum gradient norm for discriminator to prevent instability.",
+          "default": 1.0,
+          "minimum": 0.0
+        },
+        "disc_update_freq": {
+          "type": "integer",
+          "title": "Discriminator Update Frequency",
+          "description": "Update discriminator every N generator steps (1 = every step, N > 1 = slower updates).",
+          "default": 1,
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "vad": {
+      "type": "object",
+      "title": "Voice Activity Detection Configuration",
+      "description": "Voice Activity Detection (VAD) settings for speech activity measurement and speech-centric loss weighting.",
+      "x-taplo": {
+        "docs": {
+          "main": "VAD (Voice Activity Detection) configuration includes auxiliary VAD loss for speech detection, SNR gating for noisy conditions, frequency band selection, and evaluation settings. Improves performance on challenging scenarios."
+        },
+        "initKeys": ["loss_weight", "threshold", "eval"]
+      },
+      "properties": {
+        "loss_weight": {
+          "type": "number",
+          "title": "VAD Loss Weight",
+          "description": "Weight of VAD auxiliary loss component relative to main loss.",
+          "default": 0.05,
+          "minimum": 0.0
+        },
+        "threshold": {
+          "type": "number",
+          "title": "VAD Speech Threshold",
+          "description": "VAD probability threshold for speech/silence classification and gating (0-1).",
+          "default": 0.6,
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "margin": {
+          "type": "number",
+          "title": "VAD Margin",
+          "description": "VAD margin for smooth transitions between speech and silence regions.",
+          "default": 0.05,
+          "minimum": 0.0
+        },
+        "speech_loss_weight": {
+          "type": "number",
+          "title": "VAD Speech Structure Loss",
+          "description": "Weight for VAD speech-structure loss (auxiliary fine-grained VAD loss).",
+          "default": 0.0,
+          "minimum": 0.0
+        },
+        "warmup_epochs": {
+          "type": "integer",
+          "title": "VAD Warmup Epochs",
+          "description": "Number of epochs before applying VAD loss (allows initial model training).",
+          "default": 5,
+          "minimum": 0
+        },
+        "snr_gate_db": {
+          "type": "number",
+          "title": "SNR Gate Threshold (dB)",
+          "description": "SNR gate threshold in dB. Below this threshold, SNR gates VAD output.",
+          "default": -10.0
+        },
+        "snr_gate_width": {
+          "type": "number",
+          "title": "SNR Gate Softness (dB)",
+          "description": "SNR gate transition width (softness) in dB. Controls smoothness of SNR gating.",
+          "default": 6.0,
+          "minimum": 0.001
+        },
+        "band_low_hz": {
+          "type": "number",
+          "title": "Speech Band Low Cutoff (Hz)",
+          "description": "Low frequency cutoff for speech detection band (Hz).",
+          "default": 300.0,
+          "minimum": 1.0
+        },
+        "band_high_hz": {
+          "type": "number",
+          "title": "Speech Band High Cutoff (Hz)",
+          "description": "High frequency cutoff for speech detection band (Hz).",
+          "default": 3400.0,
+          "minimum": 1.0
+        },
+        "z_threshold": {
+          "type": "number",
+          "title": "VAD Z-Score Threshold",
+          "description": "Z-score threshold for statistical VAD (0 = disabled).",
+          "default": 0.0
+        },
+        "z_slope": {
+          "type": "number",
+          "title": "VAD Z-Score Slope",
+          "description": "Z-score slope parameter for smooth transitions.",
+          "default": 1.0,
+          "minimum": 0.001
+        },
+        "eval": {
+          "type": "object",
+          "title": "VAD Evaluation Configuration",
+          "description": "Options for evaluating VAD performance during training.",
+          "x-taplo": {
+            "initKeys": ["mode", "every", "batches"]
+          },
+          "properties": {
+            "mode": {
+              "type": "string",
+              "title": "VAD Evaluation Mode",
+              "description": "VAD eval mode strategy: 'auto' (best available), 'proxy' (fast), 'silero' (accurate external), or 'off' (disabled).",
+              "enum": ["auto", "proxy", "silero", "off"],
+              "default": "auto",
+              "x-taplo": {
+                "docs": {
+                  "enumValues": [
+                    "Auto - Use best available evaluator",
+                    "Proxy - Use fast built-in proxy evaluator",
+                    "Silero - Use Silero ONNX model (requires model file)",
+                    "Off - Disable VAD evaluation"
+                  ]
+                }
+              }
+            },
+            "every": {
+              "type": "integer",
+              "title": "VAD Evaluation Frequency",
+              "description": "Evaluate VAD metrics every N epochs.",
+              "default": 1,
+              "minimum": 1
+            },
+            "batches": {
+              "type": "integer",
+              "title": "VAD Evaluation Batches",
+              "description": "Number of batches to use for VAD metrics computation.",
+              "default": 8,
+              "minimum": 1
+            },
+            "max_seconds": {
+              "type": "number",
+              "title": "Max Clip Length for VAD Eval",
+              "description": "Maximum seconds per clip for VAD evaluation (0 disables limit).",
+              "default": 0.0,
+              "minimum": 0.0
+            },
+            "silero_model_path": {
+              "type": ["string", "null"],
+              "title": "Silero VAD Model Path",
+              "description": "Path to silero_vad.onnx model file (required when mode='silero')."
+            },
+            "silero_sample_rate": {
+              "type": "integer",
+              "title": "Silero Sample Rate",
+              "description": "Sample rate for Silero VAD model (Hz). Must match model requirements.",
+              "default": 16000,
+              "minimum": 8000
+            }
+          },
+          "additionalProperties": false
+        },
+        "train": {
+          "type": "object",
+          "title": "VAD Training Regularization",
+          "description": "VAD training regularizer configuration for on-the-fly VAD robustness improvement.",
+          "properties": {
+            "prob": {
+              "type": "number",
+              "title": "VAD Regularizer Probability",
+              "description": "Probability that VAD regularizer will be applied per batch (0-1).",
+              "default": 0.0,
+              "minimum": 0.0,
+              "maximum": 1.0
+            },
+            "every_steps": {
+              "type": "integer",
+              "title": "VAD Regularizer Frequency",
+              "description": "Apply VAD regularizer every N training steps (0 disables frequency-based application).",
+              "default": 0,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "metrics": {
+      "type": "object",
+      "title": "Evaluation Metrics Configuration",
+      "description": "Configuration for metric computation during validation.",
+      "properties": {
+        "eval_sisdr": {
+          "type": "boolean",
+          "title": "Compute SI-SDR Metric",
+          "description": "Compute SI-SDR (Scale-Invariant Source-to-Distortion Ratio) during validation benchmark (slower but more accurate quality metric).",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "debug": {
+      "type": "object",
+      "title": "Debugging Configuration",
+      "description": "Debugging options for troubleshooting numeric stability and model behavior.",
+      "x-taplo": {
+        "docs": {
+          "main": "Debugging utilities for tracking numeric stability, detecting NaN/Inf values, and diagnosing training issues. Recommended for development and troubleshooting only."
+        },
+        "initKeys": ["verbose", "debug_numerics", "nan_skip_batch"]
+      },
+      "properties": {
+        "verbose": {
+          "type": "boolean",
+          "title": "Verbose Logging",
+          "description": "Enable verbose timing and logging output during training.",
+          "default": false
+        },
+        "debug_numerics": {
+          "type": "boolean",
+          "title": "Enable Numeric Debugging",
+          "description": "Enable numeric debug mode for NaN/Inf detection.",
+          "default": false
+        },
+        "debug_numerics_fail_fast": {
+          "type": "boolean",
+          "title": "Fail Fast on Non-Finite",
+          "description": "Stop training immediately when non-finite (NaN/Inf) values are detected.",
+          "default": true
+        },
+        "debug_numerics_every": {
+          "type": "integer",
+          "title": "Numeric Check Frequency",
+          "description": "Check for numeric issues every N training steps.",
+          "default": 1,
+          "minimum": 1
+        },
+        "debug_numerics_dump_dir": {
+          "type": ["string", "null"],
+          "title": "Numeric Debug Dump Directory",
+          "description": "Directory for saving numeric debug dumps (empty string or null disables)."
+        },
+        "debug_numerics_dump_arrays": {
+          "type": "boolean",
+          "title": "Dump Array Slices",
+          "description": "Dump small tensor slices in debug output for detailed inspection.",
+          "default": false
+        },
+        "debug_numerics_max_dumps": {
+          "type": "integer",
+          "title": "Maximum Debug Dumps",
+          "description": "Maximum number of debug dump files to create.",
+          "default": 5,
+          "minimum": 1
+        },
+        "nan_skip_batch": {
+          "type": "boolean",
+          "title": "Skip NaN Batches",
+          "description": "Skip optimizer update when non-finite values are detected (allows training continuation).",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "train_ini": {
+      "type": "object",
+      "title": "Legacy Train.py INI Configuration",
+      "description": "Embedded legacy train.py INI file sections (optional). Use [train_ini.<section>] to inline INI-style configuration for backwards compatibility. Supported sections: df, train, optim, distortion, deepfilternet4, loss, MultiResSpecLoss, GANLoss, FeatureMatchingLoss.",
+      "x-taplo": {
+        "docs": {
+          "main": "Legacy INI-style configuration fallback. Include entire INI sections here for compatibility with older train.py scripts. Modern configs should use top-level TOML sections instead."
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}

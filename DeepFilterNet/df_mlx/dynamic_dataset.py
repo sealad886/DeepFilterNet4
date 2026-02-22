@@ -36,14 +36,21 @@ import json
 import random
 import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from queue import Queue
+from queue import Full, Queue
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union, cast
 
 import mlx.core as mx
 import numpy as np
 from scipy import signal as scipy_signal
+
+from .augment_ext import biquad_filter as _ext_biquad_filter
+from .augment_ext import combine_noises as _ext_combine_noises
+from .augment_ext import mix_audio as _ext_mix_audio
+from .feature_ops import compute_df_features, compute_erb_features, compute_stft, create_erb_filterbank
+from .file_lists import read_file_list as _read_file_list
 
 # Optional mlx-data import (for MLXDataStream)
 try:
@@ -111,7 +118,9 @@ class DatasetConfig:
     # Mixing parameters
     snr_range: Tuple[float, float] = (-5.0, 40.0)  # dB, matching Rust [-5, 0, 5, 10, 20, 40]
     snr_range_extreme: Tuple[float, float] = (-20.0, -5.0)  # dB, near-obscured speech
+    snr_range_very_low: Tuple[float, float] = (-30.0, -20.0)  # dB, severely obscured speech
     p_extreme_snr: float = 0.1  # Probability of sampling from snr_range_extreme
+    p_very_low_snr: float = 0.0  # Probability of sampling from snr_range_very_low
     gain_range: Tuple[float, float] = (-6.0, 6.0)  # dB (legacy; retained for compatibility)
     speech_gain_range: Tuple[float, float] = (-12.0, 12.0)  # dB, varies absolute speech loudness
     noise_gain_range: Tuple[float, float] = (-12.0, 12.0)  # dB, varies relative noise contributions
@@ -121,6 +130,7 @@ class DatasetConfig:
     p_clipping: float = 0.0  # Probability of clipping distortion
     p_bandwidth_ext: float = 0.0  # Probability of bandwidth extension
     p_interfer_speech: float = 0.0  # Probability of interfering speaker
+    interfer_speech_snr_range: Tuple[float, float] = (-10.0, 10.0)  # dB, SNR of interferer vs target
 
     # Noise mixing
     n_noise_min: int = 2  # Minimum noises to combine
@@ -529,8 +539,7 @@ class Augmentations:
         a: np.ndarray,
     ) -> np.ndarray:
         """Apply biquad filter to audio."""
-        result = scipy_signal.lfilter(b, a, audio)
-        return np.asarray(result, dtype=np.float32)
+        return _ext_biquad_filter(audio, b, a)
 
     @staticmethod
     def high_pass(
@@ -698,7 +707,7 @@ def mix_audio(
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Mix clean speech with noise at specified SNR.
 
-    This matches the Rust mix_audio_signal function.
+    Routes through Rust extension when available for performance.
 
     Args:
         clean: Clean speech signal
@@ -709,38 +718,7 @@ def mix_audio(
     Returns:
         Tuple of (clean_out, noise_out, noisy_mixture)
     """
-    # Apply gain to speech
-    gain = 10 ** (gain_db / 20)
-    clean_out = clean * gain
-
-    # Match lengths
-    if len(noise) < len(clean_out):
-        repeats = int(np.ceil(len(clean_out) / len(noise)))
-        noise = np.tile(noise, repeats)
-    noise = noise[: len(clean_out)]
-
-    # Compute mixing factor for target SNR
-    clean_power = np.mean(clean_out**2) + 1e-10
-    noise_power = np.mean(noise**2) + 1e-10
-    target_noise_power = clean_power / (10 ** (snr_db / 10))
-    mix_factor = np.sqrt(target_noise_power / noise_power)
-
-    noise_scaled = noise * mix_factor
-    noisy = clean_out + noise_scaled
-
-    # Guard against clipping
-    max_val = max(
-        np.abs(clean_out).max(),
-        np.abs(noise_scaled).max(),
-        np.abs(noisy).max(),
-    )
-    if max_val > 1.0 - 1e-10:
-        scale = 1.0 / (max_val + 1e-10)
-        clean_out = clean_out * scale
-        noise_scaled = noise_scaled * scale
-        noisy = noisy * scale
-
-    return clean_out, noise_scaled, noisy
+    return _ext_mix_audio(clean, noise, snr_db, gain_db)
 
 
 def combine_noises(
@@ -750,6 +728,8 @@ def combine_noises(
 ) -> np.ndarray:
     """Combine multiple noise signals into one.
 
+    Routes through Rust extension when available for performance.
+
     Args:
         noises: List of noise signals
         target_len: Target output length
@@ -758,129 +738,7 @@ def combine_noises(
     Returns:
         Combined noise signal
     """
-    if not noises:
-        return np.zeros(target_len, dtype=np.float32)
-
-    if gains_db is None:
-        gains_db = [0.0] * len(noises)
-
-    combined = np.zeros(target_len, dtype=np.float32)
-
-    for noise, gain_db in zip(noises, gains_db):
-        gain = 10 ** (gain_db / 20)
-
-        # Random start position for this noise
-        if len(noise) < target_len:
-            # Repeat noise to fill
-            repeats = int(np.ceil(target_len / len(noise)))
-            noise = np.tile(noise, repeats)
-
-        # Random offset
-        max_offset = len(noise) - target_len
-        if max_offset > 0:
-            offset = random.randint(0, max_offset)
-            noise = noise[offset : offset + target_len]
-        else:
-            noise = noise[:target_len]
-
-        combined += noise * gain
-
-    return combined
-
-
-def compute_stft(
-    audio: np.ndarray,
-    fft_size: int = 960,
-    hop_size: int = 480,
-    window: Optional[np.ndarray] = None,
-) -> np.ndarray:
-    """Compute STFT of audio signal.
-
-    Args:
-        audio: Input audio (samples,)
-        fft_size: FFT size
-        hop_size: Hop size
-        window: Optional window function
-
-    Returns:
-        Complex STFT (time, freq)
-    """
-    if window is None:
-        window = np.sqrt(np.hanning(fft_size + 1)[:-1]).astype(np.float32)
-
-    # Pad audio
-    pad_len = fft_size - hop_size
-    audio_padded = np.pad(audio, (pad_len, pad_len), mode="constant")
-
-    # Frame extraction using stride tricks
-    num_frames = (len(audio_padded) - fft_size) // hop_size + 1
-    shape = (num_frames, fft_size)
-    strides = (audio_padded.strides[0] * hop_size, audio_padded.strides[0])
-    frames = np.lib.stride_tricks.as_strided(audio_padded, shape=shape, strides=strides, writeable=False)
-
-    # Apply window and compute FFT
-    windowed = frames * window
-    stft = np.fft.rfft(windowed, n=fft_size, axis=-1)
-
-    return stft
-
-
-def create_erb_filterbank(
-    sr: int = 48000,
-    fft_size: int = 960,
-    nb_erb: int = 32,
-    min_freq: float = 20.0,
-    max_freq: Optional[float] = None,
-) -> np.ndarray:
-    """Create ERB filterbank matrix."""
-    if max_freq is None:
-        max_freq = sr / 2
-
-    n_freqs = fft_size // 2 + 1
-    freqs = np.linspace(0, sr / 2, n_freqs)
-
-    def hz_to_erb(f):
-        return 9.265 * np.log(1 + f / (24.7 * 9.265))
-
-    def erb_to_hz(erb):
-        return 24.7 * 9.265 * (np.exp(erb / 9.265) - 1)
-
-    erb_min = hz_to_erb(min_freq)
-    erb_max = hz_to_erb(max_freq)
-    erb_centers = np.linspace(erb_min, erb_max, nb_erb)
-    center_freqs = erb_to_hz(erb_centers)
-
-    fb = np.zeros((n_freqs, nb_erb), dtype=np.float32)
-
-    for i in range(nb_erb):
-        center = center_freqs[i]
-        erb_bandwidth = 24.7 * (4.37 * center / 1000 + 1)
-        low = center - erb_bandwidth / 2
-        high = center + erb_bandwidth / 2
-
-        for j, f in enumerate(freqs):
-            if low <= f <= center:
-                fb[j, i] = (f - low) / (center - low + 1e-10)
-            elif center < f <= high:
-                fb[j, i] = (high - f) / (high - center + 1e-10)
-
-    fb = fb / (fb.sum(axis=0, keepdims=True) + 1e-10)
-    return fb
-
-
-def compute_erb_features(spec: np.ndarray, erb_fb: np.ndarray) -> np.ndarray:
-    """Compute ERB band features from spectrum."""
-    mag_sq = np.abs(spec) ** 2
-    erb = np.matmul(mag_sq, erb_fb)
-    erb = np.log10(np.maximum(erb, 1e-10))
-    return erb.astype(np.float32)
-
-
-def compute_df_features(spec: np.ndarray, nb_df: int = 96) -> np.ndarray:
-    """Compute DF-band features (complex coefficients)."""
-    df_spec = spec[:, :nb_df]
-    df_feat = np.stack([df_spec.real, df_spec.imag], axis=-1)
-    return df_feat.astype(np.float32)
+    return _ext_combine_noises(noises, target_len, gains_db)
 
 
 @dataclass
@@ -893,6 +751,50 @@ class Sample:
     feat_spec: np.ndarray  # DF-band features
     snr: float
     gain: float
+
+
+def _assemble_batch(samples: List[Sample]) -> Dict[str, mx.array]:
+    """Assemble a list of Samples into a batched dict of mx.arrays.
+
+    Pre-allocates numpy buffers based on the first sample's shape, then fills
+    them via indexed assignment — avoids 7 growing Python lists + np.stack copies
+    per batch.
+    """
+    n = len(samples)
+    if n == 0:
+        raise ValueError("Cannot assemble empty batch")
+
+    s0 = samples[0]
+    spec_shape = s0.noisy_spec.real.shape
+    erb_shape = s0.feat_erb.shape
+    spec_feat_shape = s0.feat_spec.shape
+
+    noisy_real = np.empty((n, *spec_shape), dtype=np.float32)
+    noisy_imag = np.empty((n, *spec_shape), dtype=np.float32)
+    clean_real = np.empty((n, *spec_shape), dtype=np.float32)
+    clean_imag = np.empty((n, *spec_shape), dtype=np.float32)
+    feat_erb = np.empty((n, *erb_shape), dtype=np.float32)
+    feat_spec = np.empty((n, *spec_feat_shape), dtype=np.float32)
+    snr_arr = np.empty(n, dtype=np.float32)
+
+    for i, s in enumerate(samples):
+        noisy_real[i] = s.noisy_spec.real
+        noisy_imag[i] = s.noisy_spec.imag
+        clean_real[i] = s.clean_spec.real
+        clean_imag[i] = s.clean_spec.imag
+        feat_erb[i] = s.feat_erb
+        feat_spec[i] = s.feat_spec
+        snr_arr[i] = s.snr
+
+    return {
+        "noisy_real": mx.array(noisy_real),
+        "noisy_imag": mx.array(noisy_imag),
+        "clean_real": mx.array(clean_real),
+        "clean_imag": mx.array(clean_imag),
+        "feat_erb": mx.array(feat_erb),
+        "feat_spec": mx.array(feat_spec),
+        "snr": mx.array(snr_arr),
+    }
 
 
 class DynamicDataset:
@@ -963,11 +865,11 @@ class DynamicDataset:
 
         # Epoch and randomization
         self._epoch = 0
-        self._rng = random.Random(config.seed)
 
         # Current split
         self._current_split = "train"
         self._indices: List[int] = []
+        self._regenerate_indices()
 
     def _split_files(self) -> None:
         """Split speech files into train/valid/test."""
@@ -1022,7 +924,7 @@ class DynamicDataset:
                 return self.rir_cache.load(path)
         return self.audio_cache.load(path)
 
-    def _load_speech(self, idx: int) -> Optional[np.ndarray]:
+    def _load_speech(self, idx: int, rng: random.Random) -> Optional[np.ndarray]:
         """Load and prepare a speech sample.
 
         Returns None if the audio is shorter than segment_samples.
@@ -1041,19 +943,19 @@ class DynamicDataset:
 
             # Extract random segment
             if len(audio) > self.segment_samples:
-                start = self._rng.randint(0, len(audio) - self.segment_samples)
+                start = rng.randint(0, len(audio) - self.segment_samples)
                 audio = audio[start : start + self.segment_samples]
 
             return audio
         except Exception:
             return None
 
-    def _load_noise(self) -> Tuple[np.ndarray, float]:
+    def _load_noise(self, rng: random.Random) -> Tuple[np.ndarray, float]:
         """Load a random noise sample or generate synthetic noise."""
         # Occasionally generate synthetic noise
-        if self._rng.random() < self.config.p_random_noise:
+        if rng.random() < self.config.p_random_noise:
             noise = self.noise_generator.generate_random(self.segment_samples)
-            gain = self._rng.choice([-24.0, -12.0, -6.0, 0.0])
+            gain = rng.choice([-24.0, -12.0, -6.0, 0.0])
             return noise, gain
 
         # Load from file
@@ -1062,22 +964,22 @@ class DynamicDataset:
             # Fallback to white noise
             return self.noise_generator.generate(0.0, self.segment_samples), 0.0
 
-        path = self._rng.choice(noise_files)
+        path = rng.choice(noise_files)
         try:
             noise = self._load_audio(path, "noise")
-            gain = self._rng.uniform(*self.config.noise_gain_range)
+            gain = rng.uniform(*self.config.noise_gain_range)
             return noise, gain
         except Exception:
             # Fallback
             return self.noise_generator.generate(0.0, self.segment_samples), 0.0
 
-    def _load_rir(self) -> Optional[np.ndarray]:
+    def _load_rir(self, rng: random.Random) -> Optional[np.ndarray]:
         """Load a random RIR if available."""
         rir_files = self.config.rir_files
         if not rir_files:
             return None
 
-        path = self._rng.choice(rir_files)
+        path = rng.choice(rir_files)
         try:
             return self._load_audio(path, "rir")
         except Exception:
@@ -1094,28 +996,39 @@ class DynamicDataset:
         5. Mix at random SNR/gain
         6. Compute STFT and features
         """
-        # Set RNG seed for reproducibility within epoch
+        # Use per-sample RNG so get_sample() remains thread-safe under prefetch workers.
+        if idx < 0 or idx >= len(self._indices):
+            raise IndexError(
+                f"Sample index {idx} out of range for split '{self._current_split}' " f"(size={len(self._indices)})."
+            )
+
         sample_seed = self.config.seed + self._epoch * 1000000 + idx
-        self._rng = random.Random(sample_seed)
+        rng = random.Random(sample_seed)
 
         # Load speech
-        speech = self._load_speech(self._indices[idx])
+        speech = self._load_speech(self._indices[idx], rng)
         if speech is None:
             return None
 
-        # Sample SNR and gain
-        if self.config.p_extreme_snr > 0 and self._rng.random() < self.config.p_extreme_snr:
-            snr = self._rng.uniform(*self.config.snr_range_extreme)
+        # Sample SNR and gain with 3-tier SNR distribution
+        r = rng.random()
+        if self.config.p_very_low_snr > 0 and r < self.config.p_very_low_snr:
+            # Very low SNR: severely obscured speech (for whisper/distant mic training)
+            snr = rng.uniform(*self.config.snr_range_very_low)
+        elif self.config.p_extreme_snr > 0 and r < (self.config.p_very_low_snr + self.config.p_extreme_snr):
+            # Extreme SNR: near-obscured speech
+            snr = rng.uniform(*self.config.snr_range_extreme)
         else:
-            snr = self._rng.uniform(*self.config.snr_range)
-        gain = self._rng.uniform(*self.config.speech_gain_range)
+            # Base SNR: normal range
+            snr = rng.uniform(*self.config.snr_range)
+        gain = rng.uniform(*self.config.speech_gain_range)
 
         # Load and combine multiple noises (2-5 like Rust)
-        n_noises = self._rng.randint(self.config.n_noise_min, self.config.n_noise_max)
+        n_noises = rng.randint(self.config.n_noise_min, self.config.n_noise_max)
         noises = []
         noise_gains = []
         for _ in range(n_noises):
-            noise, ng = self._load_noise()
+            noise, ng = self._load_noise(rng)
             noises.append(noise)
             noise_gains.append(ng)
 
@@ -1123,8 +1036,8 @@ class DynamicDataset:
 
         # Optionally apply RIR
         speech_for_mix = speech.copy()
-        if self.config.rir_files and self._rng.random() < self.config.p_reverb:
-            rir = self._load_rir()
+        if self.config.rir_files and rng.random() < self.config.p_reverb:
+            rir = self._load_rir(rng)
             if rir is not None:
                 speech_for_mix, combined_noise, _, _ = self.reverb.apply(speech, combined_noise, rir)
 
@@ -1145,6 +1058,23 @@ class DynamicDataset:
                     sr=self.sample_rate,
                     prob=self.config.p_bandwidth_ext,
                 )
+
+            # Add interfering speaker (vocal music / competing talker simulation)
+            if self.config.p_interfer_speech > 0 and rng.random() < self.config.p_interfer_speech:
+                # Load a different speech file as interferer
+                interfer_idx = rng.randint(0, len(self._indices) - 1)
+                if interfer_idx != self._indices[idx]:
+                    interfer_speech = self._load_speech(interfer_idx, rng)
+                    if interfer_speech is not None:
+                        # Mix interferer into noise at a random SNR relative to target
+                        interfer_snr = rng.uniform(*self.config.interfer_speech_snr_range)
+                        # Scale interferer relative to target speech
+                        target_rms = np.sqrt(np.mean(speech_for_mix**2) + 1e-8)
+                        interfer_rms = np.sqrt(np.mean(interfer_speech**2) + 1e-8)
+                        scale = target_rms / (interfer_rms + 1e-8) * (10 ** (-interfer_snr / 20))
+                        interfer_scaled = interfer_speech * scale
+                        # Add to combined noise (interferer is treated as noise, not target)
+                        combined_noise = combined_noise + interfer_scaled
 
         # Mix
         clean_out, _, noisy = mix_audio(speech_for_mix, combined_noise, snr, gain)
@@ -1194,52 +1124,17 @@ class DynamicDataset:
             - feat_spec: (B, T, D, 2) DF-band features
             - snr: (B,) SNR values
         """
-        batch_noisy_real = []
-        batch_noisy_imag = []
-        batch_clean_real = []
-        batch_clean_imag = []
-        batch_erb = []
-        batch_spec = []
-        batch_snr = []
+        batch_samples: List[Sample] = []
 
         for sample in self.iter_samples():
-            batch_noisy_real.append(sample.noisy_spec.real)
-            batch_noisy_imag.append(sample.noisy_spec.imag)
-            batch_clean_real.append(sample.clean_spec.real)
-            batch_clean_imag.append(sample.clean_spec.imag)
-            batch_erb.append(sample.feat_erb)
-            batch_spec.append(sample.feat_spec)
-            batch_snr.append(sample.snr)
+            batch_samples.append(sample)
 
-            if len(batch_noisy_real) >= batch_size:
-                yield {
-                    "noisy_real": mx.array(np.stack(batch_noisy_real)),
-                    "noisy_imag": mx.array(np.stack(batch_noisy_imag)),
-                    "clean_real": mx.array(np.stack(batch_clean_real)),
-                    "clean_imag": mx.array(np.stack(batch_clean_imag)),
-                    "feat_erb": mx.array(np.stack(batch_erb)),
-                    "feat_spec": mx.array(np.stack(batch_spec)),
-                    "snr": mx.array(np.array(batch_snr)),
-                }
-                batch_noisy_real = []
-                batch_noisy_imag = []
-                batch_clean_real = []
-                batch_clean_imag = []
-                batch_erb = []
-                batch_spec = []
-                batch_snr = []
+            if len(batch_samples) >= batch_size:
+                yield _assemble_batch(batch_samples)
+                batch_samples = []
 
-        # Handle last batch
-        if batch_noisy_real and not drop_last:
-            yield {
-                "noisy_real": mx.array(np.stack(batch_noisy_real)),
-                "noisy_imag": mx.array(np.stack(batch_noisy_imag)),
-                "clean_real": mx.array(np.stack(batch_clean_real)),
-                "clean_imag": mx.array(np.stack(batch_clean_imag)),
-                "feat_erb": mx.array(np.stack(batch_erb)),
-                "feat_spec": mx.array(np.stack(batch_spec)),
-                "snr": mx.array(np.array(batch_snr)),
-            }
+        if batch_samples and not drop_last:
+            yield _assemble_batch(batch_samples)
 
 
 class PrefetchDataLoader:
@@ -1256,39 +1151,130 @@ class PrefetchDataLoader:
         num_workers: int = 4,
         prefetch_factor: int = 2,
         drop_last: bool = True,
+        strict_failures: bool = True,
+        shuffle_buffer_size: int = 0,
     ):
         self.dataset = dataset
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.prefetch_factor = prefetch_factor
         self.drop_last = drop_last
+        self.strict_failures = strict_failures
+        self.shuffle_buffer_size = shuffle_buffer_size
 
     def __iter__(self) -> Iterator[Dict[str, mx.array]]:
         """Iterate with background prefetching."""
         # Queue to hold prefetched batches
         prefetch_queue: Queue = Queue(maxsize=self.prefetch_factor)
         stop_event = threading.Event()
+        worker_errors: List[BaseException] = []
+        stats: Dict[str, int] = {"samples_succeeded": 0, "samples_failed": 0}
+
+        def _to_batch(samples: List[Sample]) -> Dict[str, mx.array]:
+            return _assemble_batch(samples)
+
+        def _queue_put(item: Optional[Dict[str, mx.array]]) -> bool:
+            while not stop_event.is_set():
+                try:
+                    prefetch_queue.put(item, timeout=0.1)
+                    return True
+                except Full:
+                    continue
+            return False
 
         def worker():
             """Background worker that fills the prefetch queue."""
+            n_samples = len(self.dataset)
+            max_workers = max(1, self.num_workers)
+            max_pending = max(max_workers, max_workers * self.prefetch_factor)
+            pending: Dict[int, Future[Optional[Sample]]] = {}
+            next_submit = 0
+            next_consume = 0
+            batch_samples: List[Sample] = []
+
+            def submit_pending(executor: ThreadPoolExecutor) -> None:
+                nonlocal next_submit
+                while next_submit < n_samples and len(pending) < max_pending and not stop_event.is_set():
+                    pending[next_submit] = executor.submit(self.dataset.get_sample, next_submit)
+                    next_submit += 1
+
             try:
-                for batch in self.dataset.iter_batches(self.batch_size, self.drop_last):
-                    if stop_event.is_set():
-                        break
-                    prefetch_queue.put(batch)
+                with ThreadPoolExecutor(
+                    max_workers=max_workers,
+                    thread_name_prefix="df-mlx-prefetch",
+                ) as executor:
+                    submit_pending(executor)
+                    while next_consume < n_samples and not stop_event.is_set():
+                        future = pending.pop(next_consume)
+                        next_consume += 1
+                        submit_pending(executor)
+
+                        sample_idx = next_consume - 1
+                        failed_on_exception = False
+                        try:
+                            sample = future.result()
+                        except Exception as exc:
+                            failed_on_exception = True
+                            stats["samples_failed"] += 1
+                            if self.strict_failures:
+                                worker_errors.append(
+                                    RuntimeError(
+                                        f"PrefetchDataLoader failed while loading sample index " f"{sample_idx}: {exc}"
+                                    )
+                                )
+                                return
+                            sample = None
+                        if sample is None:
+                            if not failed_on_exception:
+                                stats["samples_failed"] += 1
+                            continue
+
+                        stats["samples_succeeded"] += 1
+                        batch_samples.append(sample)
+                        if len(batch_samples) == self.batch_size:
+                            if not _queue_put(_to_batch(batch_samples)):
+                                return
+                            batch_samples = []
+
+                    if batch_samples and not self.drop_last and not stop_event.is_set():
+                        _queue_put(_to_batch(batch_samples))
             finally:
-                prefetch_queue.put(None)  # Signal completion
+                if not stop_event.is_set():
+                    _queue_put(None)  # Signal completion
 
         # Start worker thread
         worker_thread = threading.Thread(target=worker, daemon=True)
         worker_thread.start()
 
         try:
-            while True:
-                batch = prefetch_queue.get()
-                if batch is None:
-                    break
-                yield batch
+            if self.shuffle_buffer_size > 0:
+                buf_rng = random.Random(getattr(self.dataset.config, "seed", 0) + getattr(self.dataset, "_epoch", 0))
+                buffer: List[Dict[str, mx.array]] = []
+                while True:
+                    batch = prefetch_queue.get()
+                    if batch is None:
+                        break
+                    buffer.append(batch)
+                    if len(buffer) >= self.shuffle_buffer_size:
+                        idx = buf_rng.randrange(len(buffer))
+                        yield buffer.pop(idx)
+                buf_rng.shuffle(buffer)
+                yield from buffer
+            else:
+                while True:
+                    batch = prefetch_queue.get()
+                    if batch is None:
+                        break
+                    yield batch
+
+            if worker_errors:
+                raise worker_errors[0]
+
+            if self.strict_failures and len(self.dataset) > 0 and stats["samples_succeeded"] == 0:
+                raise RuntimeError(
+                    "PrefetchDataLoader failed to load any samples from non-empty dataset. "
+                    "This matches MLXDataStream failure semantics; verify input files/cache."
+                )
         finally:
             stop_event.set()
             worker_thread.join(timeout=1.0)
@@ -1303,15 +1289,7 @@ class PrefetchDataLoader:
 
 def read_file_list(path: str) -> List[str]:
     """Read list of audio file paths from text file."""
-    files = []
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith("#"):
-                if "\t" in line:
-                    line = line.split("\t")[0]
-                files.append(line)
-    return files
+    return _read_file_list(path, split_tab=True)
 
 
 def create_dataset_from_lists(
@@ -1543,15 +1521,19 @@ class MLXDataStream:
         for try_idx in indices_to_try:
             sample = self.dataset.get_sample(try_idx)
             if sample is not None:
-                # mlx-data requires contiguous arrays with consistent dtypes
-                # numpy rfft returns complex128 -> real/imag are float64, must cast to float32
+                # compute_stft guarantees complex64, so .real/.imag are float32 views.
+                # np.require ensures C-contiguity without copying when already satisfied.
+                noisy_r = sample.noisy_spec.real
+                noisy_i = sample.noisy_spec.imag
+                clean_r = sample.clean_spec.real
+                clean_i = sample.clean_spec.imag
                 return {
-                    "noisy_real": np.ascontiguousarray(sample.noisy_spec.real, dtype=np.float32),
-                    "noisy_imag": np.ascontiguousarray(sample.noisy_spec.imag, dtype=np.float32),
-                    "clean_real": np.ascontiguousarray(sample.clean_spec.real, dtype=np.float32),
-                    "clean_imag": np.ascontiguousarray(sample.clean_spec.imag, dtype=np.float32),
-                    "feat_erb": np.ascontiguousarray(sample.feat_erb, dtype=np.float32),
-                    "feat_spec": np.ascontiguousarray(sample.feat_spec, dtype=np.float32),
+                    "noisy_real": np.require(noisy_r, dtype=np.float32, requirements="C"),
+                    "noisy_imag": np.require(noisy_i, dtype=np.float32, requirements="C"),
+                    "clean_real": np.require(clean_r, dtype=np.float32, requirements="C"),
+                    "clean_imag": np.require(clean_i, dtype=np.float32, requirements="C"),
+                    "feat_erb": np.require(sample.feat_erb, dtype=np.float32, requirements="C"),
+                    "feat_spec": np.require(sample.feat_spec, dtype=np.float32, requirements="C"),
                     "snr": np.array([sample.snr], dtype=np.float32),
                     "gain": np.array([sample.gain], dtype=np.float32),
                 }
@@ -1660,6 +1642,27 @@ class MLXDataStream:
         """
         self._checkpoint.split = split
         self.dataset.set_split(split)
+        self._stream = None
+
+    def set_resume_position(self, epoch: int, batch_idx: int, *, split: str | None = None) -> None:
+        """Set an explicit resume position for deterministic mid-epoch recovery.
+
+        Args:
+            epoch: Epoch index to resume within.
+            batch_idx: Number of micro-batches already consumed in that epoch.
+            split: Optional split override (defaults to current split).
+        """
+        if batch_idx < 0:
+            raise ValueError(f"batch_idx must be >= 0, got {batch_idx}")
+
+        if split is not None and split != self._checkpoint.split:
+            self.set_split(split)
+
+        self._checkpoint.epoch = epoch
+        self._checkpoint.batch_idx = batch_idx
+        self._checkpoint.samples_processed = batch_idx * self.batch_size
+        self.dataset.set_epoch(epoch)
+        self._batch_count = batch_idx
         self._stream = None
 
     def __iter__(self) -> Iterator[Dict[str, mx.array]]:

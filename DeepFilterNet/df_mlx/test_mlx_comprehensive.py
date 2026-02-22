@@ -18,7 +18,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
 import numpy as np
-import pytest
+import pytest  # type: ignore[import-not-found]
 
 # ============================================================================
 # Fixtures

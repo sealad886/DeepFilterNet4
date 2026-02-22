@@ -8,7 +8,6 @@ out/
 export/
 assets/valid_cache*
 DeepFilterNet/poetry.lock
-.vscode
 data/
 .*ignore
 !.gitignore
@@ -16,6 +15,7 @@ data/
 .ruff_cache/
 .fastembed_cache
 .codanna/
+models/
 
 ### Rust gitignore ###
 

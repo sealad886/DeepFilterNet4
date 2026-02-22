@@ -279,18 +279,21 @@ def download_file(url: str, download_dir: str, extract: bool = False):
 
     import requests
 
+    os.makedirs(download_dir, exist_ok=True)
     local_filename = url.split("/")[-1]
     local_filename = os.path.join(download_dir, local_filename)
-    with requests.get(url, stream=True) as r:
+    with requests.get(url, stream=True, timeout=(10, 120)) as r:
         if r.status_code >= 400:
-            logger.error(f"Error downloading file {url} ({r.status_code}): {r.reason}")
-            exit(1)
+            msg = f"Error downloading file {url} ({r.status_code}): {r.reason}"
+            logger.error(msg)
+            raise RuntimeError(msg)
         with open(local_filename, "wb") as f:
             shutil.copyfileobj(r.raw, f)
     if extract:
         if os.path.splitext(local_filename)[1] != ".zip":
-            logger.error("File not supported. Cannot extract.")
-            exit(1)
+            msg = "File not supported. Cannot extract."
+            logger.error(msg)
+            raise ValueError(msg)
 
         with zipfile.ZipFile(local_filename) as zf:
             zf.extractall(download_dir)

@@ -1,0 +1,19 @@
+# DeepFilterNet4 Run Config — Pro Preset
+# Target: Apple M1-M3 Pro (14-18 GPU cores, 16-36GB RAM)
+# Tuning rationale: Balanced throughput with moderate memory usage.
+# Four workers saturate NVMe throughput without starving GPU-side memory.
+# PrefetchDataLoader is preferred; the thread-pool overhead is manageable
+# and avoids the higher baseline RSS of MLXDataStream.
+
+[training]
+batch_size = 4
+eval_frequency = 10
+fp16 = "auto"
+
+[dataloader]
+num_workers = 4
+prefetch_size = 8
+use_mlx_data = false
+
+[debug]
+sync_mode = "normal"

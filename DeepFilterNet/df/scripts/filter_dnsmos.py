@@ -72,7 +72,7 @@ def main(args):
                 audio = to_f32(audio)
                 for ch in range(audio.shape[0]):
                     resampled = resample(audio[ch], sr, dnsmos.SR)
-                    (ch_sig, ch_bak, ch_ovr) = dnsmos.dnsmos_local(resampled, onnx_sig, onnx_bak_ovr)
+                    ch_sig, ch_bak, ch_ovr = dnsmos.dnsmos_local(resampled, onnx_sig, onnx_bak_ovr)
                 sig, bak, ovr = np.mean(ch_sig), np.mean(ch_bak), np.mean(ch_ovr)
                 print(f" sig: {sig:.2f}, bak: {bak:.2f}, ovr: {ovr:.2f} ... ", end="")
                 if sig > t[0] and bak > t[1] and ovr > t[2]:
@@ -84,7 +84,9 @@ def main(args):
                             audio = to_int16(audio)
                         if audio.dim() == 1:
                             audio = audio.unsqueeze(0)
-                        data = encode(audio, sr, codec_write, compression=8)
+                        # Use dtype from source dataset attributes or default to float32
+                        dtype = str(ds.attrs.get("dtype", "float32"))
+                        data = encode(audio, sr, codec_write, dtype)
                     if key in group_write:
                         del group_write[key]
                     ds_write = group_write.create_dataset(

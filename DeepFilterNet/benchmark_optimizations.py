@@ -2,7 +2,7 @@
 """Benchmark all optimized operations for performance measurement."""
 
 import time
-from typing import Callable, Tuple
+from typing import Callable, Tuple, cast
 
 import mlx.core as mx
 
@@ -36,7 +36,7 @@ def benchmark_fn(
 
     import numpy as np
 
-    return np.mean(times), np.std(times)
+    return cast(float, np.mean(times)), cast(float, np.std(times))
 
 
 def benchmark_stft():

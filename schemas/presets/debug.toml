@@ -1,0 +1,20 @@
+# DeepFilterNet4 Run Config — Debug Preset
+# Target: Any Apple Silicon (development/debugging)
+# Tuning rationale: Full observability with every-step sync barriers.
+# FP16 is disabled to eliminate precision-related debugging noise.
+# Small batch size keeps iterations fast for rapid feedback loops.
+# PrefetchDataLoader avoids mlx-data complexity during debugging.
+
+[training]
+batch_size = 2
+eval_frequency = 1
+fp16 = false
+
+[dataloader]
+num_workers = 2
+prefetch_size = 4
+use_mlx_data = false
+
+[debug]
+sync_mode = "debug"
+verbose = true

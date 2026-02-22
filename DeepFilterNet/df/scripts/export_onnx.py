@@ -98,7 +98,7 @@ def onnx_check(
     onnx.checker.check_model(model, full_check=True)  # type: ignore[possibly-undefined]
 
     sess = ort.InferenceSession(path, providers=providers)  # type: ignore[possibly-undefined]
-    return sess.run(list(output_names), {k: v.numpy() for (k, v) in input_dict.items()})
+    return sess.run(list(output_names), {k: v.numpy() for (k, v) in input_dict.items()})  # type: ignore[return-value]
 
 
 def export_impl(

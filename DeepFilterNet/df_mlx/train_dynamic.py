@@ -21,6 +21,12 @@ Usage:
         --config dataset_config.json \
         --epochs 100
 
+    # Or with a train.py-compatible INI config
+    python -m df_mlx.train_dynamic \
+        --config dataset_config.json \
+        --train-config training_config.ini \
+        --epochs 100
+
 Features:
     - Dynamic on-the-fly mixing (matches original training strategy)
     - Full dataset diversity each epoch
@@ -28,6 +34,7 @@ Features:
     - Gradient clipping for stability
     - Periodic checkpointing
     - Validation with fixed noise/RIR for reproducibility
+    - Optional GAN adversarial + feature matching loss for perceptual cleanup
 """
 
 from __future__ import annotations
@@ -35,6 +42,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import math
 import os
 import random
 import re
@@ -43,8 +51,9 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+from itertools import islice
 from pathlib import Path
-from typing import Any, Literal, Tuple, cast
+from typing import TYPE_CHECKING, Any, Callable, Literal, Tuple, cast
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -53,6 +62,22 @@ import numpy as np
 from tqdm.auto import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from df_mlx.grad_utils import clip_grad_norm_tree  # noqa: E402
+from df_mlx.run_config import (  # noqa: E402
+    RunConfig,
+    SyncMode,
+    generate_run_config_example,
+    load_preset_config,
+    load_run_config,
+    set_by_path,
+    validate_run_config,
+)
+from df_mlx.train_dynamic_config import apply_train_ini_config, apply_train_ini_tables  # noqa: E402
+
+if TYPE_CHECKING:
+    from df_mlx.config import ModelParams4
+    from df_mlx.run_config import MultiResSpecLossConfig
 
 # =============================================================================
 # tqdm configuration
@@ -99,6 +124,507 @@ _AWESOME_MUSICNESS_THR = 0.55
 _AWESOME_MUSICNESS_WIDTH = 0.15
 _AWESOME_MUSIC_FLUX_THR = 0.08
 _AWESOME_MUSIC_FLUX_WIDTH = 0.05
+_AWESOME_MASK_LOGIT_CLAMP = 30.0
+_VAD_LOGIT_CLAMP = 20.0
+
+# =============================================================================
+# Pipeline Awesome loss constants (improved speech preservation + music suppression)
+# =============================================================================
+_PIPELINE_MIN_MASK_FLOOR = 0.08  # Prevent complete suppression
+_PIPELINE_LOW_ENERGY_ADDITIVE = 0.25  # Additive boost for quiet speech
+_PIPELINE_LOW_SNR_ADDITIVE = 0.25  # Additive boost for low-SNR
+_PIPELINE_PROXY_FLOOR = 0.15  # Higher minimum proxy weight
+_PIPELINE_SPEECH_BAND_WEIGHT = 2.0  # Extra weight on speech band (300-3400 Hz)
+_PIPELINE_MUSIC_SUPPRESSION_WEIGHT = 1.5  # Music suppression strength
+_PIPELINE_VOCAL_HARMONIC_THR = 0.4  # Threshold for vocal harmonic detection
+_PIPELINE_PITCH_STABILITY_THR = 0.3  # Threshold for pitch stability (vocals)
+_PIPELINE_ARTIFACT_SMOOTH_WEIGHT = 0.3  # Temporal smoothing for artifact control
+_PIPELINE_MASK_SATURATION_PENALTY = 0.1  # Penalty for extreme mask values
+
+
+def _batch_to_float(*arrays: mx.array) -> tuple[float, ...]:
+    """Evaluate multiple MLX arrays in one sync, then extract Python floats.
+
+    Reduces N individual ``float(mx_array)`` sync barriers to a single ``mx.eval()``.
+    """
+    mx.eval(*arrays)
+    return tuple(float(a) for a in arrays)
+
+
+@dataclass
+class NumericDebugConfig:
+    enabled: bool = False
+    fail_fast: bool = True
+    skip_batch: bool = False
+    every: int = 1
+    dump_dir: Path | None = None
+    dump_arrays: bool = False
+    max_dumps: int = 5
+    check_grads: bool = True
+
+
+class NumericDebugger:
+    """Helper for fail-fast finite checks and debug dumps."""
+
+    def __init__(self, config: NumericDebugConfig):
+        self.config = config
+        self.dump_count = 0
+
+    def _should_check(self, ctx: dict[str, Any] | None) -> bool:
+        if not self.config.enabled:
+            return False
+        if ctx is None:
+            return True
+        step = ctx.get("global_step")
+        if isinstance(step, int):
+            return (step % max(self.config.every, 1)) == 0
+        return True
+
+    def _dump_stats(self, name: str, tensor: mx.array, ctx: dict[str, Any] | None) -> None:
+        if self.config.dump_dir is None:
+            return
+        if self.dump_count >= self.config.max_dumps:
+            return
+        self.config.dump_dir.mkdir(parents=True, exist_ok=True)
+        arr = np.asarray(tensor, dtype=np.float32)
+        finite_mask = np.isfinite(arr)
+        finite_vals = arr[finite_mask]
+        if finite_vals.size > 0:
+            stats = {
+                "min": float(finite_vals.min()),
+                "max": float(finite_vals.max()),
+                "mean": float(finite_vals.mean()),
+            }
+        else:
+            stats = {"min": None, "max": None, "mean": None}
+        dump = {
+            "name": name,
+            "shape": list(arr.shape),
+            "dtype": str(arr.dtype),
+            "finite_pct": float(100.0 * finite_mask.mean()),
+            "nonfinite_count": int(arr.size - finite_mask.sum()),
+            "stats": stats,
+            "context": ctx or {},
+        }
+        out_path = self.config.dump_dir / f"nonfinite_{self.dump_count:03d}_{name}.json"
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(dump, f, indent=2)
+        if self.config.dump_arrays:
+            slices = tuple(slice(0, min(dim, 8)) for dim in arr.shape)
+            sample = arr[slices]
+            np.savez_compressed(
+                self.config.dump_dir / f"nonfinite_{self.dump_count:03d}_{name}.npz",
+                sample=sample,
+            )
+        self.dump_count += 1
+
+    def check(self, name: str, tensor: mx.array, ctx: dict[str, Any] | None = None) -> bool:
+        if not self._should_check(ctx):
+            return True
+        is_finite = mx.isfinite(tensor)
+        if bool(mx.all(is_finite)):
+            return True
+        self._dump_stats(name, tensor, ctx)
+        message = f"Non-finite detected in {name}"
+        if ctx:
+            message += f" | ctx={ctx}"
+        if self.config.fail_fast:
+            raise FloatingPointError(message)
+        return False
+
+    def check_tree(self, name: str, tree: Any, ctx: dict[str, Any] | None = None) -> bool:
+        """Check gradient tree for non-finite values.
+
+        Never raises even when fail_fast is set — gradient non-finiteness is
+        handled by skipping the optimizer update, not by crashing.  Dumps are
+        still written for post-mortem analysis.
+        """
+        if not self._should_check(ctx) or not self.config.check_grads:
+            return True
+        from mlx.utils import tree_flatten
+
+        all_finite = True
+        for key, value in tree_flatten(tree):
+            if value is None:
+                continue
+            if not bool(mx.all(mx.isfinite(value))):
+                key_name = f"{name}.{key}"
+                self._dump_stats(key_name, value, ctx)
+                all_finite = False
+        if not all_finite:
+            from tqdm import tqdm
+
+            tqdm.write(f"⚠️  Non-finite gradients in {name} " f"(ctx={ctx}) — skipping optimizer update")
+        return all_finite
+
+
+def _tree_all_finite(tree: Any) -> bool:
+    """Fast tree-wide finite check (no dumps)."""
+    from mlx.utils import tree_flatten
+
+    for _, value in tree_flatten(tree):
+        if value is None:
+            continue
+        if not bool(mx.all(mx.isfinite(value))):
+            return False
+    return True
+
+
+# =============================================================================
+# Curriculum Learning Scheduler
+# =============================================================================
+
+
+def curriculum_schedule(
+    epoch: int,
+    total_epochs: int,
+    warmup_epochs: int,
+    target_p_extreme: float,
+    target_p_very_low: float,
+    target_p_interfer: float,
+) -> tuple[float, float, float]:
+    """Compute curriculum-scheduled SNR and interferer probabilities.
+
+    During warmup, we start with easy (high SNR) samples and gradually
+    introduce harder samples. After warmup, we use the full target distribution.
+
+    Schedule:
+    - Epoch 0 to warmup_epochs: linear ramp from 0 to target values
+    - After warmup_epochs: use full target values
+
+    Args:
+        epoch: Current training epoch (0-indexed)
+        total_epochs: Total training epochs
+        warmup_epochs: Number of warmup epochs for curriculum
+        target_p_extreme: Final probability for extreme SNR
+        target_p_very_low: Final probability for very-low SNR
+        target_p_interfer: Final probability for interfering speech
+
+    Returns:
+        Tuple of (p_extreme_snr, p_very_low_snr, p_interfer_speech)
+    """
+    if warmup_epochs <= 0 or epoch >= warmup_epochs:
+        # Past warmup: use full target distribution
+        return target_p_extreme, target_p_very_low, target_p_interfer
+
+    # Linear ramp during warmup
+    progress = epoch / warmup_epochs
+    return (
+        progress * target_p_extreme,
+        progress * target_p_very_low,
+        progress * target_p_interfer,
+    )
+
+
+def _flag_in_argv(flags: list[str], argv: list[str]) -> bool:
+    for arg in argv:
+        for flag in flags:
+            if arg == flag or arg.startswith(f"{flag}="):
+                return True
+    return False
+
+
+def _parse_pipeline_stages_cli(raw: str | None) -> list[dict[str, Any]]:
+    """Parse --pipeline-stages JSON string into a normalized stage list."""
+    if raw is None or raw.strip() == "":
+        return []
+
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("--pipeline-stages must be valid JSON") from exc
+
+    if not isinstance(value, list):
+        raise ValueError("--pipeline-stages must be a JSON array of stage objects")
+
+    normalized: list[dict[str, Any]] = []
+    seen_epochs: set[int] = set()
+    for i, stage in enumerate(value):
+        if not isinstance(stage, dict):
+            raise ValueError(f"pipeline stage at index {i} must be an object")
+        if "start_epoch" not in stage:
+            raise ValueError(f"pipeline stage at index {i} is missing required key 'start_epoch'")
+
+        start_epoch = int(stage["start_epoch"])
+        if start_epoch < 0:
+            raise ValueError("pipeline stage start_epoch must be >= 0")
+        if start_epoch in seen_epochs:
+            raise ValueError(f"duplicate pipeline stage start_epoch={start_epoch}")
+        seen_epochs.add(start_epoch)
+
+        item: dict[str, Any] = {"start_epoch": start_epoch}
+        if "name" in stage and stage["name"] is not None:
+            item["name"] = str(stage["name"])
+
+        for key in ("awesome_loss_weight", "vad_loss_weight", "vad_speech_loss_weight"):
+            if key in stage and stage[key] is not None:
+                val = float(stage[key])
+                if val < 0.0:
+                    raise ValueError(f"pipeline stage {key} must be >= 0")
+                item[key] = val
+
+        normalized.append(item)
+
+    normalized.sort(key=lambda x: int(x["start_epoch"]))
+    return normalized
+
+
+def _resolve_pipeline_stage(epoch: int, stages: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return active stage metadata for the provided epoch."""
+    if not stages:
+        return {
+            "index": 0,
+            "name": "default",
+            "start_epoch": 0,
+            "awesome_loss_weight": None,
+            "vad_loss_weight": None,
+            "vad_speech_loss_weight": None,
+        }
+
+    active_idx = 0
+    for i, stage in enumerate(stages):
+        if epoch >= int(stage["start_epoch"]):
+            active_idx = i
+        else:
+            break
+
+    active = stages[active_idx]
+    return {
+        "index": active_idx,
+        "name": str(active.get("name", f"stage_{active_idx}")),
+        "start_epoch": int(active["start_epoch"]),
+        "awesome_loss_weight": active.get("awesome_loss_weight"),
+        "vad_loss_weight": active.get("vad_loss_weight"),
+        "vad_speech_loss_weight": active.get("vad_speech_loss_weight"),
+    }
+
+
+def _apply_cli_overrides(cfg: RunConfig, args: argparse.Namespace, argv: list[str]) -> None:
+    overrides: list[tuple[list[str], str, Any]] = [
+        (["--cache-dir"], "dataset.cache_dir", getattr(args, "cache_dir", None)),
+        (["--speech-list"], "dataset.speech_list", getattr(args, "speech_list", None)),
+        (["--noise-list"], "dataset.noise_list", getattr(args, "noise_list", None)),
+        (["--rir-list"], "dataset.rir_list", getattr(args, "rir_list", None)),
+        (["--config"], "dataset.config", getattr(args, "config", None)),
+        (["--train-config"], "training.train_config", getattr(args, "train_config", None)),
+        (["--snr-range"], "dataset.snr_range", getattr(args, "snr_range", None)),
+        (
+            ["--snr-range-extreme"],
+            "dataset.snr_range_extreme",
+            getattr(args, "snr_range_extreme", None),
+        ),
+        (
+            ["--snr-range-very-low"],
+            "dataset.snr_range_very_low",
+            getattr(args, "snr_range_very_low", None),
+        ),
+        (["--p-extreme-snr"], "dataset.p_extreme_snr", getattr(args, "p_extreme_snr", None)),
+        (["--p-very-low-snr"], "dataset.p_very_low_snr", getattr(args, "p_very_low_snr", None)),
+        (
+            ["--p-interfer-speech"],
+            "dataset.p_interfer_speech",
+            getattr(args, "p_interfer_speech", None),
+        ),
+        (
+            ["--curriculum-warmup-epochs"],
+            "training.curriculum_warmup_epochs",
+            getattr(args, "curriculum_warmup_epochs", None),
+        ),
+        (
+            ["--speech-gain-range"],
+            "dataset.speech_gain_range",
+            getattr(args, "speech_gain_range", None),
+        ),
+        (
+            ["--noise-gain-range"],
+            "dataset.noise_gain_range",
+            getattr(args, "noise_gain_range", None),
+        ),
+        (["--p-reverb"], "augmentation.p_reverb", getattr(args, "p_reverb", None)),
+        (["--p-clipping"], "augmentation.p_clipping", getattr(args, "p_clipping", None)),
+        (["--epochs"], "training.epochs", getattr(args, "epochs", None)),
+        (["--batch-size"], "training.batch_size", getattr(args, "batch_size", None)),
+        (["--learning-rate"], "training.learning_rate", getattr(args, "learning_rate", None)),
+        (
+            ["--learning-rate-min"],
+            "training.learning_rate_min",
+            getattr(args, "learning_rate_min", None),
+        ),
+        (["--weight-decay"], "training.weight_decay", getattr(args, "weight_decay", None)),
+        (["--warmup-epochs"], "training.warmup_epochs", getattr(args, "warmup_epochs", None)),
+        (["--patience"], "training.patience", getattr(args, "patience", None)),
+        (
+            ["--grad-accumulation-steps"],
+            "training.grad_accumulation_steps",
+            getattr(args, "grad_accumulation_steps", None),
+        ),
+        (["--max-grad-norm"], "training.max_grad_norm", getattr(args, "max_grad_norm", None)),
+        (["--eval-frequency"], "training.eval_frequency", getattr(args, "eval_frequency", None)),
+        (["--seed"], "training.seed", getattr(args, "seed", None)),
+        (["--num-workers"], "dataloader.num_workers", getattr(args, "num_workers", None)),
+        (["--prefetch-size"], "dataloader.prefetch_size", getattr(args, "prefetch_size", None)),
+        (
+            ["--max-train-batches"],
+            "dataloader.max_train_batches",
+            getattr(args, "max_train_batches", None),
+        ),
+        (
+            ["--max-valid-batches"],
+            "dataloader.max_valid_batches",
+            getattr(args, "max_valid_batches", None),
+        ),
+        (["--checkpoint-dir"], "checkpoint.checkpoint_dir", getattr(args, "checkpoint_dir", None)),
+        (["--save-strategy"], "checkpoint.save_strategy", getattr(args, "save_strategy", None)),
+        (["--save-steps"], "checkpoint.save_steps", getattr(args, "save_steps", None)),
+        (
+            ["--save-total-limit"],
+            "checkpoint.save_total_limit",
+            getattr(args, "save_total_limit", None),
+        ),
+        (
+            ["--checkpoint-batches"],
+            "checkpoint.checkpoint_batches",
+            getattr(args, "checkpoint_batches", None),
+        ),
+        (["--validate-every"], "checkpoint.validate_every", getattr(args, "validate_every", None)),
+        (["--resume"], "checkpoint.resume", getattr(args, "resume", None)),
+        (["--resume-data"], "checkpoint.resume_data", getattr(args, "resume_data", None)),
+        (["--check-chkpts"], "checkpoint.check_chkpts", getattr(args, "check_chkpts", None)),
+        (
+            ["--backbone", "--backbone-type"],
+            "model.backbone_type",
+            getattr(args, "backbone_type", None),
+        ),
+        (["--model-variant"], "model.variant", getattr(args, "model_variant", None)),
+        (["--dynamic-loss"], "loss.dynamic_loss", getattr(args, "dynamic_loss", None)),
+        (
+            ["--awesome-loss-weight"],
+            "loss.awesome.loss_weight",
+            getattr(args, "awesome_loss_weight", None),
+        ),
+        (
+            ["--awesome-mask-sharpness"],
+            "loss.awesome.mask_sharpness",
+            getattr(args, "awesome_mask_sharpness", None),
+        ),
+        (
+            ["--awesome-warmup-steps"],
+            "loss.awesome.warmup_steps",
+            getattr(args, "awesome_warmup_steps", None),
+        ),
+        (["--mrstft-factor"], "loss.mrstft.factor", getattr(args, "mrstft_factor", None)),
+        (["--mrstft-gamma"], "loss.mrstft.gamma", getattr(args, "mrstft_gamma", None)),
+        (["--mrstft-f-complex"], "loss.mrstft.f_complex", getattr(args, "mrstft_f_complex", None)),
+        (["--mrstft-fft-sizes"], "loss.mrstft.fft_sizes", getattr(args, "mrstft_fft_sizes", None)),
+        (["--mrstft-hop-sizes"], "loss.mrstft.hop_sizes", getattr(args, "mrstft_hop_sizes", None)),
+        (["--gan-enabled"], "gan.enabled", getattr(args, "gan_enabled", None)),
+        (["--gan-start-epoch"], "gan.start_epoch", getattr(args, "gan_start_epoch", None)),
+        (["--gan-ramp-epochs"], "gan.ramp_epochs", getattr(args, "gan_ramp_epochs", None)),
+        (["--gan-adv-weight"], "gan.adv_weight", getattr(args, "gan_adv_weight", None)),
+        (["--gan-fm-weight"], "gan.fm_weight", getattr(args, "gan_fm_weight", None)),
+        (["--gan-discriminator"], "gan.discriminator", getattr(args, "gan_discriminator", None)),
+        (["--gan-mpd-periods"], "gan.mpd_periods", getattr(args, "gan_mpd_periods", None)),
+        (["--gan-msd-scales"], "gan.msd_scales", getattr(args, "gan_msd_scales", None)),
+        (["--gan-disc-lr"], "gan.disc_lr", getattr(args, "gan_disc_lr", None)),
+        (
+            ["--gan-disc-weight-decay"],
+            "gan.disc_weight_decay",
+            getattr(args, "gan_disc_weight_decay", None),
+        ),
+        (["--gan-disc-grad-clip"], "gan.disc_grad_clip", getattr(args, "gan_disc_grad_clip", None)),
+        (
+            ["--gan-disc-update-freq"],
+            "gan.disc_update_freq",
+            getattr(args, "gan_disc_update_freq", None),
+        ),
+        (["--vad-loss-weight"], "vad.loss_weight", getattr(args, "vad_loss_weight", None)),
+        (["--vad-threshold"], "vad.threshold", getattr(args, "vad_threshold", None)),
+        (["--vad-margin"], "vad.margin", getattr(args, "vad_margin", None)),
+        (
+            ["--vad-speech-loss-weight"],
+            "vad.speech_loss_weight",
+            getattr(args, "vad_speech_loss_weight", None),
+        ),
+        (["--vad-warmup-epochs"], "vad.warmup_epochs", getattr(args, "vad_warmup_epochs", None)),
+        (["--vad-snr-gate"], "vad.snr_gate_db", getattr(args, "vad_snr_gate", None)),
+        (["--vad-snr-gate-width"], "vad.snr_gate_width", getattr(args, "vad_snr_gate_width", None)),
+        (["--vad-band-low"], "vad.band_low_hz", getattr(args, "vad_band_low", None)),
+        (["--vad-band-high"], "vad.band_high_hz", getattr(args, "vad_band_high", None)),
+        (["--vad-z-threshold"], "vad.z_threshold", getattr(args, "vad_z_threshold", None)),
+        (["--vad-z-slope"], "vad.z_slope", getattr(args, "vad_z_slope", None)),
+        (["--vad-eval-mode"], "vad.eval.mode", getattr(args, "vad_eval_mode", None)),
+        (["--vad-eval-every"], "vad.eval.every", getattr(args, "vad_eval_every", None)),
+        (["--vad-eval-batches"], "vad.eval.batches", getattr(args, "vad_eval_batches", None)),
+        (
+            ["--vad-eval-max-seconds"],
+            "vad.eval.max_seconds",
+            getattr(args, "vad_eval_max_seconds", None),
+        ),
+        (
+            ["--vad-silero-model-path"],
+            "vad.eval.silero_model_path",
+            getattr(args, "vad_silero_model_path", None),
+        ),
+        (
+            ["--vad-silero-sample-rate"],
+            "vad.eval.silero_sample_rate",
+            getattr(args, "vad_silero_sample_rate", None),
+        ),
+        (["--vad-train-prob"], "vad.train.prob", getattr(args, "vad_train_prob", None)),
+        (
+            ["--vad-train-every-steps"],
+            "vad.train.every_steps",
+            getattr(args, "vad_train_every_steps", None),
+        ),
+        (["--eval-sisdr"], "metrics.eval_sisdr", getattr(args, "eval_sisdr", None)),
+        (["-v", "--verbose"], "debug.verbose", getattr(args, "verbose", None)),
+        (["--debug-numerics"], "debug.debug_numerics", getattr(args, "debug_numerics", None)),
+        (
+            ["--debug-numerics-no-fail-fast"],
+            "debug.debug_numerics_fail_fast",
+            not getattr(args, "debug_numerics_no_fail_fast", False),
+        ),
+        (
+            ["--debug-numerics-every"],
+            "debug.debug_numerics_every",
+            getattr(args, "debug_numerics_every", None),
+        ),
+        (
+            ["--debug-numerics-dump-dir"],
+            "debug.debug_numerics_dump_dir",
+            getattr(args, "debug_numerics_dump_dir", None),
+        ),
+        (
+            ["--debug-numerics-dump-arrays"],
+            "debug.debug_numerics_dump_arrays",
+            getattr(args, "debug_numerics_dump_arrays", None),
+        ),
+        (
+            ["--debug-numerics-max-dumps"],
+            "debug.debug_numerics_max_dumps",
+            getattr(args, "debug_numerics_max_dumps", None),
+        ),
+        (["--nan-skip-batch"], "debug.nan_skip_batch", getattr(args, "nan_skip_batch", None)),
+    ]
+
+    if _flag_in_argv(["--fp16"], argv) and _flag_in_argv(["--no-fp16"], argv):
+        raise ValueError("Cannot pass both --fp16 and --no-fp16.")
+    if _flag_in_argv(["--fp16"], argv):
+        set_by_path(cfg, "training.fp16", True)
+    if _flag_in_argv(["--no-fp16"], argv):
+        set_by_path(cfg, "training.fp16", False)
+    if _flag_in_argv(["--no-mlx-data"], argv):
+        set_by_path(cfg, "dataloader.use_mlx_data", False)
+    if _flag_in_argv(["--no-vad-proxy"], argv):
+        set_by_path(cfg, "loss.awesome.proxy_enabled", False)
+
+    for flags, path, value in overrides:
+        if _flag_in_argv(flags, argv):
+            set_by_path(cfg, path, value)
+
+    if _flag_in_argv(["--pipeline-stages"], argv):
+        parsed_stages = _parse_pipeline_stages_cli(getattr(args, "pipeline_stages", None))
+        set_by_path(cfg, "loss.pipeline_stages", parsed_stages)
 
 
 def _build_speech_band_mask(
@@ -118,6 +644,18 @@ def _build_speech_band_mask(
     return mx.array(mask), band_bins
 
 
+def _sync_model_config_with_dataset(model_cfg: Any, dataset_cfg: Any) -> None:
+    """Align MLX model config with dataset audio parameters."""
+    model_cfg.audio.sr = dataset_cfg.sample_rate
+    model_cfg.audio.fft_size = dataset_cfg.fft_size
+    model_cfg.audio.hop_size = dataset_cfg.hop_size
+    n_freqs = dataset_cfg.fft_size // 2 + 1
+    model_cfg.audio.nb_freqs = n_freqs
+    model_cfg.audio.n_freqs = n_freqs
+    model_cfg.erb.nb_erb = dataset_cfg.nb_erb
+    model_cfg.df.nb_df = dataset_cfg.nb_df
+
+
 def _compute_vad_probs(
     clean_real: mx.array,
     clean_imag: mx.array,
@@ -128,8 +666,14 @@ def _compute_vad_probs(
     vad_z_threshold: float,
     vad_z_slope: float,
     eps: float = _EPS,
+    debug: NumericDebugger | None = None,
+    debug_ctx: dict[str, Any] | None = None,
 ) -> tuple[mx.array, mx.array]:
     """Compute soft VAD probabilities from log-band energy (z-scored per utterance)."""
+    clean_real = clean_real.astype(mx.float32)
+    clean_imag = clean_imag.astype(mx.float32)
+    out_real = out_real.astype(mx.float32)
+    out_imag = out_imag.astype(mx.float32)
     clean_power = clean_real**2 + clean_imag**2
     out_power = out_real**2 + out_imag**2
 
@@ -138,14 +682,30 @@ def _compute_vad_probs(
 
     log_clean = mx.log10(clean_band + eps)
     mu = mx.mean(log_clean, axis=1, keepdims=True)
-    sigma = mx.sqrt(mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True) + eps)
+    # Edge case: ensure minimum variance to avoid instability on silence
+    variance = mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True)
+    _MIN_VARIANCE = 1e-4
+    sigma = mx.sqrt(mx.maximum(variance, _MIN_VARIANCE) + eps)
 
-    z_ref = (log_clean - mu) / (sigma + eps)
-    z_out = (mx.log10(out_band + eps) - mu) / (sigma + eps)
+    z_ref_raw = (log_clean - mu) / (sigma + eps)
+    z_out_raw = (mx.log10(out_band + eps) - mu) / (sigma + eps)
+    z_ref = mx.clip(z_ref_raw, -_VAD_LOGIT_CLAMP, _VAD_LOGIT_CLAMP)
+    z_out = mx.clip(z_out_raw, -_VAD_LOGIT_CLAMP, _VAD_LOGIT_CLAMP)
 
     z_slope = max(vad_z_slope, 1e-3)
     p_ref = mx.sigmoid((z_ref - vad_z_threshold) / z_slope)
     p_out = mx.sigmoid((z_out - vad_z_threshold) / z_slope)
+    if debug is not None:
+        debug.check("vad.clean_band", clean_band, debug_ctx)
+        debug.check("vad.out_band", out_band, debug_ctx)
+        debug.check("vad.log_clean", log_clean, debug_ctx)
+        debug.check("vad.sigma", sigma, debug_ctx)
+        debug.check("vad.z_ref_raw", z_ref_raw, debug_ctx)
+        debug.check("vad.z_out_raw", z_out_raw, debug_ctx)
+        debug.check("vad.z_ref", z_ref, debug_ctx)
+        debug.check("vad.z_out", z_out, debug_ctx)
+        debug.check("vad.p_ref", p_ref, debug_ctx)
+        debug.check("vad.p_out", p_out, debug_ctx)
     return p_ref, p_out
 
 
@@ -163,16 +723,13 @@ def _compute_vad_loss(
     vad_snr_gate_width: float,
     vad_z_threshold: float,
     vad_z_slope: float,
+    debug: NumericDebugger | None = None,
+    debug_ctx: dict[str, Any] | None = None,
 ) -> tuple[mx.array, mx.array, mx.array, mx.array]:
     """Compute soft VAD loss and diagnostics.
 
     Penalizes decreases in VAD probability relative to reference speech.
     """
-    clean_real = clean_real.astype(mx.float32)
-    clean_imag = clean_imag.astype(mx.float32)
-    out_real = out_real.astype(mx.float32)
-    out_imag = out_imag.astype(mx.float32)
-
     p_ref, p_out = _compute_vad_probs(
         clean_real,
         clean_imag,
@@ -182,6 +739,8 @@ def _compute_vad_loss(
         band_bins,
         vad_z_threshold,
         vad_z_slope,
+        debug=debug,
+        debug_ctx=debug_ctx,
     )
 
     speech_gate = mx.clip((p_ref - vad_threshold) / (1.0 - vad_threshold + _EPS), 0.0, 1.0)
@@ -190,6 +749,11 @@ def _compute_vad_loss(
     gate = mx.stop_gradient(speech_gate * snr_gate)
 
     vad_loss = mx.mean(mx.maximum(p_ref - p_out - vad_margin, 0.0) * gate)
+    if debug is not None:
+        debug.check("vad.speech_gate", speech_gate, debug_ctx)
+        debug.check("vad.snr_gate", snr_gate, debug_ctx)
+        debug.check("vad.gate", gate, debug_ctx)
+        debug.check("vad.loss", vad_loss, debug_ctx)
     return vad_loss, p_ref, p_out, gate
 
 
@@ -202,8 +766,14 @@ def _compute_speech_band_logmag_loss(
     band_bins: float,
     gate: mx.array,
     eps: float = _EPS,
+    debug: NumericDebugger | None = None,
+    debug_ctx: dict[str, Any] | None = None,
 ) -> mx.array:
     """Compute speech-band log-magnitude L1 loss weighted by VAD gate."""
+    clean_real = clean_real.astype(mx.float32)
+    clean_imag = clean_imag.astype(mx.float32)
+    out_real = out_real.astype(mx.float32)
+    out_imag = out_imag.astype(mx.float32)
     clean_mag = mx.sqrt(clean_real**2 + clean_imag**2 + eps)
     out_mag = mx.sqrt(out_real**2 + out_imag**2 + eps)
 
@@ -213,11 +783,18 @@ def _compute_speech_band_logmag_loss(
     clean_band = mx.sum(clean_log * band_mask, axis=-1) / (band_bins + eps)
     out_band = mx.sum(out_log * band_mask, axis=-1) / (band_bins + eps)
 
-    return mx.mean(mx.abs(out_band - clean_band) * gate)
+    loss = mx.mean(mx.abs(out_band - clean_band) * gate)
+    if debug is not None:
+        debug.check("speech_band.clean_band", clean_band, debug_ctx)
+        debug.check("speech_band.out_band", out_band, debug_ctx)
+        debug.check("speech_band.loss", loss, debug_ctx)
+    return loss
 
 
 def _log1p_mag(real: mx.array, imag: mx.array, eps: float = _EPS) -> mx.array:
     """Compute log1p magnitude for complex STFT."""
+    real = real.astype(mx.float32)
+    imag = imag.astype(mx.float32)
     mag = mx.sqrt(real**2 + imag**2 + eps)
     return mx.log1p(mag)
 
@@ -227,6 +804,8 @@ def _compute_musicness(
     band_mask: mx.array,
     band_bins: float,
     eps: float = _EPS,
+    debug: NumericDebugger | None = None,
+    debug_ctx: dict[str, Any] | None = None,
 ) -> tuple[mx.array, mx.array]:
     """Compute a cheap musicness score and its inverse gate.
 
@@ -234,6 +813,7 @@ def _compute_musicness(
     Returns per-sample musicness and a [0,1] gate (1 = keep speech bias).
     """
     # Spectral flatness over speech band
+    mag = mag.astype(mx.float32)
     log_mag = mx.log(mag + eps)
     mean_log = mx.sum(log_mag * band_mask, axis=-1) / (band_bins + eps)
     geom_mean = mx.exp(mean_log)
@@ -243,14 +823,23 @@ def _compute_musicness(
     tonal_mean = mx.mean(tonal, axis=1, keepdims=True)
 
     # Temporal flux (lower flux => more music-like)
+    # Edge case: with single frame, no flux can be computed - assume speech-like
     band_mag = mag * band_mask
-    flux = mx.sum(mx.abs(band_mag[:, 1:, :] - band_mag[:, :-1, :]), axis=-1) / (band_bins + eps)
-    flux = mx.mean(flux, axis=1, keepdims=True)
+    if mag.shape[1] > 1:
+        flux = mx.sum(mx.abs(band_mag[:, 1:, :] - band_mag[:, :-1, :]), axis=-1) / (band_bins + eps)
+        flux = mx.mean(flux, axis=1, keepdims=True)
+    else:
+        flux = mx.zeros((mag.shape[0], 1))
     flux_gate = mx.sigmoid((_AWESOME_MUSIC_FLUX_THR - flux) / _AWESOME_MUSIC_FLUX_WIDTH)
 
     musicness = mx.clip(tonal_mean * flux_gate, 0.0, 1.0)
     music_gate = 1.0 - mx.sigmoid((musicness - _AWESOME_MUSICNESS_THR) / _AWESOME_MUSICNESS_WIDTH)
-    return musicness.squeeze(-1), music_gate.squeeze(-1)
+    musicness = musicness.squeeze(-1)
+    music_gate = music_gate.squeeze(-1)
+    if debug is not None:
+        debug.check("musicness.score", musicness, debug_ctx)
+        debug.check("musicness.gate", music_gate, debug_ctx)
+    return musicness, music_gate
 
 
 def _compute_proxy_gates(
@@ -267,6 +856,8 @@ def _compute_proxy_gates(
     vad_snr_gate_width: float,
     proxy_enabled: bool,
     eps: float = _EPS,
+    debug: NumericDebugger | None = None,
+    debug_ctx: dict[str, Any] | None = None,
 ) -> tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array, mx.array]:
     """Compute proxy VAD gates and statistics.
 
@@ -279,6 +870,10 @@ def _compute_proxy_gates(
         energy_boost: (B, 1) low-energy boost
         snr_boost: (B, 1) low-SNR boost
     """
+    clean_real = clean_real.astype(mx.float32)
+    clean_imag = clean_imag.astype(mx.float32)
+    noisy_real = noisy_real.astype(mx.float32)
+    noisy_imag = noisy_imag.astype(mx.float32)
     clean_power = clean_real**2 + clean_imag**2
     noise_real = noisy_real - clean_real
     noise_imag = noisy_imag - clean_imag
@@ -290,14 +885,22 @@ def _compute_proxy_gates(
 
     log_clean = mx.log10(clean_band + eps)
     mu = mx.mean(log_clean, axis=1, keepdims=True)
-    sigma = mx.sqrt(mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True) + eps)
-    z_ref = (log_clean - mu) / (sigma + eps)
+    # Edge case: ensure minimum variance to avoid instability on silence
+    variance = mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True)
+    _MIN_VARIANCE = 1e-4
+    sigma = mx.sqrt(mx.maximum(variance, _MIN_VARIANCE) + eps)
+    z_ref_raw = (log_clean - mu) / (sigma + eps)
+    z_ref = mx.clip(z_ref_raw, -_VAD_LOGIT_CLAMP, _VAD_LOGIT_CLAMP)
 
     z_slope = max(vad_z_slope, 1e-3)
     p_ref = mx.sigmoid((z_ref - vad_z_threshold) / z_slope)
 
     # Modulation proxy from z-scored energy trajectory
-    mod_energy = mx.mean(mx.abs(z_ref[:, 1:] - z_ref[:, :-1]), axis=1, keepdims=True)
+    # Edge case: if only 1 frame, no modulation can be computed
+    if z_ref.shape[1] > 1:
+        mod_energy = mx.mean(mx.abs(z_ref[:, 1:] - z_ref[:, :-1]), axis=1, keepdims=True)
+    else:
+        mod_energy = mx.zeros((z_ref.shape[0], 1))
     mod_gate = mx.sigmoid((mod_energy - _AWESOME_MOD_THRESHOLD) / _AWESOME_MOD_WIDTH)
 
     mean_log = mx.mean(log_clean, axis=1, keepdims=True)
@@ -308,7 +911,14 @@ def _compute_proxy_gates(
 
     # Musicness gate from noisy magnitude
     noisy_mag = mx.sqrt(noisy_real**2 + noisy_imag**2 + eps)
-    musicness, music_gate = _compute_musicness(noisy_mag, band_mask, band_bins, eps=eps)
+    musicness, music_gate = _compute_musicness(
+        noisy_mag,
+        band_mask,
+        band_bins,
+        eps=eps,
+        debug=debug,
+        debug_ctx=debug_ctx,
+    )
 
     if not proxy_enabled:
         proxy_frame = mx.ones_like(clean_band)
@@ -321,6 +931,15 @@ def _compute_proxy_gates(
         proxy_frame = mx.clip(proxy_frame, 0.0, 5.0)
 
     proxy_frame = mx.stop_gradient(proxy_frame)
+    if debug is not None:
+        debug.check("proxy.z_ref_raw", z_ref_raw, debug_ctx)
+        debug.check("proxy.z_ref", z_ref, debug_ctx)
+        debug.check("proxy.speech_ratio", speech_ratio, debug_ctx)
+        debug.check("proxy.p_ref", p_ref, debug_ctx)
+        debug.check("proxy.mod_energy", mod_energy, debug_ctx)
+        debug.check("proxy.energy_boost", energy_boost, debug_ctx)
+        debug.check("proxy.snr_boost", snr_boost, debug_ctx)
+        debug.check("proxy.frame", proxy_frame, debug_ctx)
     return proxy_frame, speech_ratio, music_gate, musicness, mod_energy, energy_boost, snr_boost
 
 
@@ -341,7 +960,10 @@ def _compute_awesome_losses(
     vad_snr_gate_width: float,
     proxy_enabled: bool,
     eps: float = _EPS,
+    debug: NumericDebugger | None = None,
+    debug_ctx: dict[str, Any] | None = None,
 ) -> tuple[
+    mx.array,
     mx.array,
     mx.array,
     mx.array,
@@ -358,12 +980,22 @@ def _compute_awesome_losses(
     clean_log = _log1p_mag(clean_real, clean_imag, eps=eps)
     out_log = _log1p_mag(out_real, out_imag, eps=eps)
 
-    noise_real = noisy_real - clean_real
-    noise_imag = noisy_imag - clean_imag
+    noise_real = noisy_real.astype(mx.float32) - clean_real.astype(mx.float32)
+    noise_imag = noisy_imag.astype(mx.float32) - clean_imag.astype(mx.float32)
     noise_log = _log1p_mag(noise_real, noise_imag, eps=eps)
 
-    mask = mx.sigmoid(mask_sharpness * (clean_log - noise_log))
+    mask_logits = mx.clip(
+        mask_sharpness * (clean_log - noise_log),
+        -_AWESOME_MASK_LOGIT_CLAMP,
+        _AWESOME_MASK_LOGIT_CLAMP,
+    )
+    mask = mx.sigmoid(mask_logits)
     mask = mx.stop_gradient(mask)
+    if debug is not None:
+        debug.check("awesome.clean_log", clean_log, debug_ctx)
+        debug.check("awesome.noise_log", noise_log, debug_ctx)
+        debug.check("awesome.mask_logits", mask_logits, debug_ctx)
+        debug.check("awesome.mask", mask, debug_ctx)
 
     (
         proxy_frame,
@@ -387,6 +1019,8 @@ def _compute_awesome_losses(
         vad_snr_gate_width,
         proxy_enabled,
         eps=eps,
+        debug=debug,
+        debug_ctx=debug_ctx,
     )
 
     proxy_frame = proxy_frame[:, :, None]
@@ -400,6 +1034,11 @@ def _compute_awesome_losses(
         smooth_loss = mx.array(0.0)
 
     awesome_loss = speech_loss + noise_loss + _AWESOME_SMOOTH_WEIGHT * smooth_loss
+    if debug is not None:
+        debug.check("awesome.speech_loss", speech_loss, debug_ctx)
+        debug.check("awesome.noise_loss", noise_loss, debug_ctx)
+        debug.check("awesome.smooth_loss", smooth_loss, debug_ctx)
+        debug.check("awesome.loss", awesome_loss, debug_ctx)
 
     return (
         awesome_loss,
@@ -414,6 +1053,361 @@ def _compute_awesome_losses(
         mod_energy,
         energy_boost,
         snr_boost,
+    )
+
+
+def _compute_pitch_stability(
+    mag: mx.array,
+    band_mask: mx.array,
+    band_bins: float,
+    eps: float = _EPS,
+) -> mx.array:
+    """Compute pitch stability metric to detect sustained vocals vs speech.
+
+    Vocals tend to have more stable pitch (lower frame-to-frame variation)
+    while speech has more dynamic pitch contours.
+
+    Returns per-sample pitch stability in [0, 1], where 1 = very stable (vocal-like).
+    """
+    mag = mag.astype(mx.float32)
+    band_mag = mag * band_mask
+
+    # Compute spectral centroid per frame
+    freq_weights = mx.arange(band_mag.shape[-1], dtype=mx.float32)
+    centroid = mx.sum(band_mag * freq_weights, axis=-1) / (mx.sum(band_mag, axis=-1) + eps)
+
+    # Pitch stability = inverse of centroid variation
+    if centroid.shape[1] > 1:
+        centroid_diff = mx.abs(centroid[:, 1:] - centroid[:, :-1])
+        centroid_var = mx.mean(centroid_diff, axis=1, keepdims=True)
+        # Normalize and invert: low variation = high stability
+        stability = mx.exp(-centroid_var / 10.0)
+    else:
+        stability = mx.ones((mag.shape[0], 1))
+
+    return mx.clip(stability, 0.0, 1.0).squeeze(-1)
+
+
+def _compute_harmonic_ratio(
+    mag: mx.array,
+    eps: float = _EPS,
+) -> mx.array:
+    """Compute harmonic-to-noise ratio to detect tonal content (vocals/music).
+
+    Uses autocorrelation proxy: high HNR = more harmonic/tonal content.
+    Returns per-sample HNR score in [0, 1].
+    """
+    mag = mag.astype(mx.float32)
+
+    # Simple proxy: ratio of peak to mean energy in low-mid frequencies
+    # Harmonic content creates spectral peaks
+    low_mid_mag = mag[:, :, : mag.shape[-1] // 2]  # Lower half of spectrum
+    peak_energy = mx.max(low_mid_mag, axis=-1)
+    mean_energy = mx.mean(low_mid_mag, axis=-1) + eps
+
+    hnr_proxy = peak_energy / mean_energy
+    # Normalize to [0, 1] using sigmoid
+    hnr_score = mx.sigmoid((hnr_proxy - 3.0) / 1.0)  # Center at ratio=3
+
+    return mx.mean(hnr_score, axis=1)
+
+
+def _compute_improved_musicness(
+    mag: mx.array,
+    band_mask: mx.array,
+    band_bins: float,
+    snr: mx.array,
+    eps: float = _EPS,
+    debug: NumericDebugger | None = None,
+    debug_ctx: dict[str, Any] | None = None,
+) -> tuple[mx.array, mx.array, mx.array]:
+    """Compute improved musicness score with vocal detection.
+
+    Returns:
+        musicness: (B,) overall musicness score
+        vocal_gate: (B,) gate for vocal content (1 = protect as speech)
+        instrument_gate: (B,) gate for instrumental content (1 = suppress)
+    """
+    mag = mag.astype(mx.float32)
+
+    # Original spectral flatness
+    log_mag = mx.log(mag + eps)
+    mean_log = mx.sum(log_mag * band_mask, axis=-1) / (band_bins + eps)
+    geom_mean = mx.exp(mean_log)
+    arith_mean = mx.sum(mag * band_mask, axis=-1) / (band_bins + eps)
+    flatness = geom_mean / (arith_mean + eps)
+    tonal = 1.0 - mx.clip(flatness, 0.0, 1.0)
+    tonal_mean = mx.mean(tonal, axis=1, keepdims=True)
+
+    # Temporal flux
+    # Edge case: with single frame, no flux can be computed - assume speech-like
+    band_mag = mag * band_mask
+    if mag.shape[1] > 1:
+        flux = mx.sum(mx.abs(band_mag[:, 1:, :] - band_mag[:, :-1, :]), axis=-1) / (band_bins + eps)
+        flux_mean = mx.mean(flux, axis=1, keepdims=True)
+    else:
+        flux_mean = mx.zeros((mag.shape[0], 1))
+    flux_gate = mx.sigmoid((_AWESOME_MUSIC_FLUX_THR - flux_mean) / _AWESOME_MUSIC_FLUX_WIDTH)
+
+    # Pitch stability (vocals = less stable than instruments)
+    pitch_stability = _compute_pitch_stability(mag, band_mask, band_bins, eps)
+
+    # Harmonic ratio
+    harmonic_ratio = _compute_harmonic_ratio(mag, eps)
+
+    # Musicness from original features
+    musicness_base = mx.clip(tonal_mean.squeeze(-1) * flux_gate.squeeze(-1), 0.0, 1.0)
+
+    # Vocal detection: high tonality + moderate pitch stability + present in speech band
+    # Vocals: tonal but with more pitch variation than instruments
+    vocal_indicator = tonal_mean.squeeze(-1) * (1.0 - pitch_stability) * harmonic_ratio
+    vocal_gate = mx.sigmoid((vocal_indicator - _PIPELINE_VOCAL_HARMONIC_THR) / 0.15)
+
+    # Instrumental: high tonality + high pitch stability (sustained notes)
+    instrument_indicator = tonal_mean.squeeze(-1) * pitch_stability * flux_gate.squeeze(-1)
+    instrument_gate = mx.sigmoid((instrument_indicator - _PIPELINE_PITCH_STABILITY_THR) / 0.15)
+
+    # Adjust musicness: reduce for vocals (they should be preserved as speech-like)
+    musicness = musicness_base * (1.0 - 0.5 * vocal_gate)
+
+    if debug is not None:
+        debug.check("improved_musicness.tonal", tonal_mean, debug_ctx)
+        debug.check("improved_musicness.flux", flux_mean, debug_ctx)
+        debug.check("improved_musicness.pitch_stab", pitch_stability, debug_ctx)
+        debug.check("improved_musicness.harmonic", harmonic_ratio, debug_ctx)
+        debug.check("improved_musicness.vocal_gate", vocal_gate, debug_ctx)
+        debug.check("improved_musicness.instrument_gate", instrument_gate, debug_ctx)
+
+    return musicness, vocal_gate, instrument_gate
+
+
+def _compute_pipeline_awesome_losses(
+    noisy_real: mx.array,
+    noisy_imag: mx.array,
+    clean_real: mx.array,
+    clean_imag: mx.array,
+    out_real: mx.array,
+    out_imag: mx.array,
+    snr: mx.array,
+    band_mask: mx.array,
+    band_bins: float,
+    mask_sharpness: float,
+    vad_z_threshold: float,
+    vad_z_slope: float,
+    vad_snr_gate_db: float,
+    vad_snr_gate_width: float,
+    proxy_enabled: bool,
+    min_mask_floor: float = _PIPELINE_MIN_MASK_FLOOR,
+    eps: float = _EPS,
+    debug: NumericDebugger | None = None,
+    debug_ctx: dict[str, Any] | None = None,
+) -> tuple[
+    mx.array,  # total loss
+    mx.array,  # speech loss
+    mx.array,  # noise loss
+    mx.array,  # smooth loss
+    mx.array,  # music suppression loss
+    mx.array,  # mask saturation loss
+    mx.array,  # mask
+    mx.array,  # proxy_frame
+    mx.array,  # speech_ratio
+    mx.array,  # music_gate
+    mx.array,  # musicness
+    mx.array,  # vocal_gate
+    mx.array,  # instrument_gate
+    mx.array,  # mod_energy
+    mx.array,  # energy_boost
+    mx.array,  # snr_boost
+]:
+    """Compute pipeline_awesome loss with improved speech preservation and music suppression.
+
+    Key improvements over basic awesome loss:
+    1. Minimum mask floor to prevent complete speech suppression
+    2. Additive (not multiplicative) boosts for low-energy and low-SNR speech
+    3. Improved musicness detection with vocal/instrument separation
+    4. Speech-band weighted loss
+    5. Mask saturation penalty to encourage confident predictions
+    6. Explicit music suppression loss
+
+    Note: The mask saturation penalty uses mask entropy: mask*(1-mask).
+    This is minimized when mask is near 0 or 1 (confident), and maximized
+    at 0.5 (uncertain). We want to PENALIZE uncertainty, so we use it directly.
+    """
+    # Compute log magnitudes (same as awesome loss)
+    clean_log = _log1p_mag(clean_real, clean_imag, eps=eps)
+    out_log = _log1p_mag(out_real, out_imag, eps=eps)
+
+    noise_real = noisy_real.astype(mx.float32) - clean_real.astype(mx.float32)
+    noise_imag = noisy_imag.astype(mx.float32) - clean_imag.astype(mx.float32)
+    noise_log = _log1p_mag(noise_real, noise_imag, eps=eps)
+
+    # Compute speech/noise dominance mask with floor
+    mask_logits = mx.clip(
+        mask_sharpness * (clean_log - noise_log),
+        -_AWESOME_MASK_LOGIT_CLAMP,
+        _AWESOME_MASK_LOGIT_CLAMP,
+    )
+    raw_mask = mx.sigmoid(mask_logits)
+    # Apply minimum floor to prevent complete suppression
+    mask = mx.maximum(raw_mask, min_mask_floor)
+    mask = mx.stop_gradient(mask)
+
+    if debug is not None:
+        debug.check("pipeline.clean_log", clean_log, debug_ctx)
+        debug.check("pipeline.noise_log", noise_log, debug_ctx)
+        debug.check("pipeline.mask_logits", mask_logits, debug_ctx)
+        debug.check("pipeline.raw_mask", raw_mask, debug_ctx)
+        debug.check("pipeline.mask", mask, debug_ctx)
+
+    # Compute improved proxy gates with additive boosts
+    clean_real_f32 = clean_real.astype(mx.float32)
+    clean_imag_f32 = clean_imag.astype(mx.float32)
+    noisy_real_f32 = noisy_real.astype(mx.float32)
+    noisy_imag_f32 = noisy_imag.astype(mx.float32)
+
+    clean_power = clean_real_f32**2 + clean_imag_f32**2
+    noise_real_f32 = noisy_real_f32 - clean_real_f32
+    noise_imag_f32 = noisy_imag_f32 - clean_imag_f32
+    noise_power = noise_real_f32**2 + noise_imag_f32**2
+
+    clean_band = mx.sum(clean_power * band_mask, axis=-1) / (band_bins + eps)
+    noise_band = mx.sum(noise_power * band_mask, axis=-1) / (band_bins + eps)
+    speech_ratio = clean_band / (clean_band + noise_band + eps)
+
+    # Z-scored log energy for VAD proxy
+    # Edge case handling: if variance is near-zero (silence), use neutral z-scores
+    log_clean = mx.log10(clean_band + eps)
+    mu = mx.mean(log_clean, axis=1, keepdims=True)
+    variance = mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True)
+    # Use a minimum variance threshold to avoid division instability on silence
+    _MIN_VARIANCE = 1e-4
+    sigma = mx.sqrt(mx.maximum(variance, _MIN_VARIANCE) + eps)
+    # When variance is too low, z-scores become unreliable; clamp them
+    z_ref_raw = (log_clean - mu) / (sigma + eps)
+    z_ref = mx.clip(z_ref_raw, -_VAD_LOGIT_CLAMP, _VAD_LOGIT_CLAMP)
+
+    z_slope = max(vad_z_slope, 1e-3)
+    p_ref = mx.sigmoid((z_ref - vad_z_threshold) / z_slope)
+
+    # Modulation proxy
+    # Edge case: with single frame, no modulation can be computed
+    if z_ref.shape[1] > 1:
+        mod_energy = mx.mean(mx.abs(z_ref[:, 1:] - z_ref[:, :-1]), axis=1, keepdims=True)
+    else:
+        mod_energy = mx.zeros((z_ref.shape[0], 1))
+    mod_gate = mx.sigmoid((mod_energy - _AWESOME_MOD_THRESHOLD) / _AWESOME_MOD_WIDTH)
+
+    # Energy and SNR boosts (ADDITIVE, not multiplicative)
+    mean_log = mx.mean(log_clean, axis=1, keepdims=True)
+    energy_boost = mx.sigmoid((_AWESOME_ENERGY_BOOST_DB - mean_log) / _AWESOME_ENERGY_BOOST_WIDTH)
+
+    snr_scale = max(vad_snr_gate_width, 1e-3)
+    snr_boost = mx.sigmoid((vad_snr_gate_db - snr[:, None]) / snr_scale)
+
+    # Improved musicness detection
+    noisy_mag = mx.sqrt(noisy_real_f32**2 + noisy_imag_f32**2 + eps)
+    musicness, vocal_gate, instrument_gate = _compute_improved_musicness(
+        noisy_mag,
+        band_mask,
+        band_bins,
+        snr,
+        eps=eps,
+        debug=debug,
+        debug_ctx=debug_ctx,
+    )
+
+    # Music gate: downweight for instrumental, but preserve vocal-like content
+    music_gate = 1.0 - mx.sigmoid((musicness - _AWESOME_MUSICNESS_THR) / _AWESOME_MUSICNESS_WIDTH)
+    # Boost back for vocals (they should be preserved)
+    music_gate = music_gate + 0.5 * vocal_gate * (1.0 - music_gate)
+
+    if not proxy_enabled:
+        proxy_frame = mx.ones_like(clean_band)
+    else:
+        # Base proxy from VAD and speech ratio (with higher floor)
+        base_proxy = p_ref * (_PIPELINE_PROXY_FLOOR + (1.0 - _PIPELINE_PROXY_FLOOR) * speech_ratio)
+        base_proxy = base_proxy * mod_gate * music_gate[:, None]
+
+        # ADDITIVE boosts (key improvement for low-signal speech)
+        proxy_frame = base_proxy + _PIPELINE_LOW_ENERGY_ADDITIVE * energy_boost + _PIPELINE_LOW_SNR_ADDITIVE * snr_boost
+        proxy_frame = mx.clip(proxy_frame, _PIPELINE_PROXY_FLOOR, 5.0)
+
+    proxy_frame = mx.stop_gradient(proxy_frame)
+
+    if debug is not None:
+        debug.check("pipeline.z_ref", z_ref, debug_ctx)
+        debug.check("pipeline.p_ref", p_ref, debug_ctx)
+        debug.check("pipeline.speech_ratio", speech_ratio, debug_ctx)
+        debug.check("pipeline.energy_boost", energy_boost, debug_ctx)
+        debug.check("pipeline.snr_boost", snr_boost, debug_ctx)
+        debug.check("pipeline.music_gate", music_gate, debug_ctx)
+        debug.check("pipeline.proxy_frame", proxy_frame, debug_ctx)
+
+    # ========== Loss components ==========
+
+    # 1. Speech preservation loss (weighted by proxy)
+    proxy_frame_3d = proxy_frame[:, :, None]
+    speech_loss = mx.mean(mx.abs(out_log - clean_log) * mask * proxy_frame_3d)
+
+    # 2. Noise suppression loss
+    noise_loss = mx.mean(mx.abs(out_log) * (1.0 - mask))
+
+    # 3. Temporal smoothness for artifact control (stronger than base awesome)
+    if out_log.shape[1] > 1:
+        smooth_mask = 1.0 - mask[:, 1:, :]
+        smooth_loss = mx.mean(mx.abs(out_log[:, 1:, :] - out_log[:, :-1, :]) * smooth_mask)
+    else:
+        smooth_loss = mx.array(0.0)
+
+    # 4. Music suppression loss: penalize output energy where instrumental music detected
+    instrument_weight = instrument_gate[:, None, None] * (1.0 - mask)  # Only where noise dominant
+    music_suppression_loss = mx.mean(mx.abs(out_log) * instrument_weight)
+
+    # 5. Mask saturation penalty: encourage confident mask predictions
+    # mask * (1-mask) is an entropy-like term:
+    #   - Minimized at 0 or 1 (confident predictions)
+    #   - Maximized at 0.5 (uncertain predictions)
+    # We PENALIZE uncertainty by using this term directly as the loss.
+    # FIX: Previous implementation inverted this (1.0 - 4.0*entropy), which
+    # rewarded uncertainty. Now we penalize uncertainty directly.
+    mask_entropy = mx.mean(raw_mask * (1.0 - raw_mask))
+    # Scale to [0, 1]: max entropy at mask=0.5 is 0.25, so multiply by 4
+    mask_saturation_loss = 4.0 * mask_entropy
+
+    # Total loss
+    total_loss = (
+        speech_loss
+        + noise_loss
+        + _PIPELINE_ARTIFACT_SMOOTH_WEIGHT * smooth_loss
+        + _PIPELINE_MUSIC_SUPPRESSION_WEIGHT * music_suppression_loss
+        + _PIPELINE_MASK_SATURATION_PENALTY * mask_saturation_loss
+    )
+
+    if debug is not None:
+        debug.check("pipeline.speech_loss", speech_loss, debug_ctx)
+        debug.check("pipeline.noise_loss", noise_loss, debug_ctx)
+        debug.check("pipeline.smooth_loss", smooth_loss, debug_ctx)
+        debug.check("pipeline.music_suppression_loss", music_suppression_loss, debug_ctx)
+        debug.check("pipeline.mask_saturation_loss", mask_saturation_loss, debug_ctx)
+        debug.check("pipeline.total_loss", total_loss, debug_ctx)
+
+    return (
+        total_loss,
+        speech_loss,
+        noise_loss,
+        smooth_loss,
+        music_suppression_loss,
+        mask_saturation_loss,
+        mask,
+        proxy_frame,
+        speech_ratio,
+        music_gate,
+        musicness,
+        vocal_gate,
+        instrument_gate,
+        mod_energy.squeeze(-1),
+        energy_boost.squeeze(-1),
+        snr_boost.squeeze(-1),
     )
 
 
@@ -434,6 +1428,8 @@ def _compute_vad_reg_loss(
     vad_snr_gate_db: float,
     vad_snr_gate_width: float,
     eps: float = _EPS,
+    debug: NumericDebugger | None = None,
+    debug_ctx: dict[str, Any] | None = None,
 ) -> tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array, mx.array]:
     """Compute sparse VAD regularizer loss gated by speech ratio and musicness.
 
@@ -449,6 +1445,8 @@ def _compute_vad_reg_loss(
         vad_z_threshold,
         vad_z_slope,
         eps=eps,
+        debug=debug,
+        debug_ctx=debug_ctx,
     )
 
     vad_decrease = mx.maximum(p_ref - p_out - vad_margin, 0.0)
@@ -467,6 +1465,8 @@ def _compute_vad_reg_loss(
         vad_snr_gate_width,
         proxy_enabled=True,
         eps=eps,
+        debug=debug,
+        debug_ctx=debug_ctx,
     )
 
     ratio_gate = mx.sigmoid((speech_ratio - vad_threshold) / 0.1)
@@ -481,6 +1481,8 @@ def _compute_vad_reg_loss(
         band_bins,
         gate,
         eps=eps,
+        debug=debug,
+        debug_ctx=debug_ctx,
     )
 
     return (
@@ -506,6 +1508,19 @@ def _compute_vad_eval_metrics(
     return p_ref_mean, p_out_mean, vad_decrease
 
 
+def _snr_bucket_name(snr_db: float) -> str:
+    """Map SNR to a stable scenario bucket label."""
+    if snr_db <= -20.0:
+        return "very_low"
+    if snr_db <= -5.0:
+        return "extreme"
+    if snr_db <= 5.0:
+        return "low"
+    if snr_db <= 20.0:
+        return "mid"
+    return "high"
+
+
 # ============================================================================
 # Signal Handling for Graceful Interrupt
 # ============================================================================
@@ -518,6 +1533,8 @@ _interrupt_state = {
     "global_step": 0,
     "model": None,
     "optimizer": None,
+    "discriminator": None,
+    "disc_optimizer": None,
     "loss": 0.0,
     "best_valid_loss": float("inf"),
     "config": {},
@@ -574,6 +1591,8 @@ def _handle_sigint(signum, frame):
                 best_valid_loss=_interrupt_state["best_valid_loss"],
                 config=_interrupt_state["config"],
                 optimizer=_interrupt_state["optimizer"],
+                discriminator=_interrupt_state.get("discriminator"),
+                disc_optimizer=_interrupt_state.get("disc_optimizer"),
                 last_completed_epoch=last_completed,
                 kind="interrupted",
             )
@@ -598,7 +1617,16 @@ def _handle_sigint(signum, frame):
     raise KeyboardInterrupt()
 
 
-def _register_sigint_handler(model, optimizer, checkpoint_dir, config, last_completed_epoch: int = -1):
+def _register_sigint_handler(
+    model,
+    optimizer,
+    checkpoint_dir,
+    config,
+    *,
+    discriminator=None,
+    disc_optimizer=None,
+    last_completed_epoch: int = -1,
+):
     """Register SIGINT handler for graceful training shutdown.
 
     Args:
@@ -610,6 +1638,8 @@ def _register_sigint_handler(model, optimizer, checkpoint_dir, config, last_comp
     """
     _interrupt_state["model"] = model
     _interrupt_state["optimizer"] = optimizer
+    _interrupt_state["discriminator"] = discriminator
+    _interrupt_state["disc_optimizer"] = disc_optimizer
     _interrupt_state["checkpoint_dir"] = checkpoint_dir
     _interrupt_state["config"] = config
     _interrupt_state["last_completed_epoch"] = last_completed_epoch
@@ -745,46 +1775,174 @@ def clip_grad_norm(grads, max_norm: float) -> Tuple[dict, mx.array]:
         Tuple of (clipped_grads, grad_norm) where grad_norm is an MLX array.
         Call float(grad_norm) outside compiled functions to get the scalar value.
     """
-    flat_grads = []
+    clipped, total_norm = clip_grad_norm_tree(grads, max_norm)
+    return cast(dict, clipped), total_norm
 
-    def flatten(x):
+
+def accumulate_grads(accumulated: Any | None, new_grads: Any) -> Any:
+    """Accumulate gradients by summing them element-wise.
+
+    Args:
+        accumulated: Previous accumulated gradients (None for first batch)
+        new_grads: New gradients to add
+
+    Returns:
+        Combined gradient tree
+    """
+    if accumulated is None:
+        return new_grads
+
+    def add_trees(a: Any, b: Any) -> Any:
+        if isinstance(a, mx.array) and isinstance(b, mx.array):
+            return a + b
+        elif isinstance(a, dict) and isinstance(b, dict):
+            return {k: add_trees(a[k], b[k]) for k in a.keys()}
+        elif isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+            result = [add_trees(av, bv) for av, bv in zip(a, b)]
+            return type(a)(result)
+        return b  # fallback (shouldn't happen with valid grad trees)
+
+    return add_trees(accumulated, new_grads)
+
+
+def scale_grads(grads: Any, scale: float) -> Any:
+    """Scale all gradients by a constant factor.
+
+    Args:
+        grads: Gradient tree
+        scale: Scale factor (e.g., 1/grad_accumulation_steps)
+
+    Returns:
+        Scaled gradient tree
+    """
+    scale_arr = mx.array(scale, dtype=mx.float32)
+
+    def apply_scale(x: Any) -> Any:
         if isinstance(x, mx.array):
-            flat_grads.append(x.reshape(-1))
+            return x * scale_arr
         elif isinstance(x, dict):
-            for v in x.values():
-                flatten(v)
-        elif isinstance(x, (list, tuple)):
-            for v in x:
-                flatten(v)
-
-    flatten(grads)
-
-    if not flat_grads:
-        return grads, mx.array(0.0)
-
-    total_norm_sq = sum(mx.sum(g**2) for g in flat_grads)
-    total_norm = mx.sqrt(total_norm_sq)
-
-    clip_coef = max_norm / (total_norm + 1e-6)
-    clip_coef = mx.minimum(clip_coef, mx.array(1.0))
-
-    def apply_clip(x):
-        if isinstance(x, mx.array):
-            return x * clip_coef
-        elif isinstance(x, dict):
-            return {k: apply_clip(v) for k, v in x.items()}
+            return {k: apply_scale(v) for k, v in x.items()}
         elif isinstance(x, list):
-            return [apply_clip(v) for v in x]
+            return [apply_scale(v) for v in x]
         elif isinstance(x, tuple):
-            return tuple(apply_clip(v) for v in x)
+            return tuple(apply_scale(v) for v in x)
         return x
 
-    return cast(dict, apply_clip(grads)), total_norm
+    return apply_scale(grads)
+
+
+def specs_to_wavs(
+    out_spec: tuple[mx.array, mx.array],
+    clean_spec: tuple[mx.array, mx.array],
+    *,
+    istft_fn: Callable[..., mx.array],
+    n_fft: int,
+    hop_length: int,
+    target_len: int,
+    force_fp32: bool = True,
+) -> tuple[mx.array, mx.array]:
+    """Convert complex specs to waveforms with optional FP32 stabilization."""
+    if force_fp32:
+        out_spec = (out_spec[0].astype(mx.float32), out_spec[1].astype(mx.float32))
+        clean_spec = (clean_spec[0].astype(mx.float32), clean_spec[1].astype(mx.float32))
+
+    clean_wav = istft_fn(
+        clean_spec,
+        n_fft=n_fft,
+        hop_length=hop_length,
+        length=target_len,
+    )
+    out_wav = istft_fn(
+        out_spec,
+        n_fft=n_fft,
+        hop_length=hop_length,
+        length=target_len,
+    )
+
+    if force_fp32:
+        if clean_wav.dtype != mx.float32:
+            clean_wav = clean_wav.astype(mx.float32)
+        if out_wav.dtype != mx.float32:
+            out_wav = out_wav.astype(mx.float32)
+
+    return out_wav, clean_wav
+
+
+def compute_mrstft_loss(
+    out_spec: tuple[mx.array, mx.array],
+    clean_spec: tuple[mx.array, mx.array],
+    *,
+    istft_fn: Callable[..., mx.array],
+    loss_fn: Callable[[mx.array, mx.array], mx.array],
+    n_fft: int,
+    hop_length: int,
+    target_len: int,
+    force_fp32: bool = True,
+) -> mx.array:
+    """Compute MRSTFT loss from complex specs with optional FP32 stabilization.
+
+    MRSTFT involves magnitude squaring and power compression, which can overflow
+    in FP16 when the model outputs large spectral magnitudes. We optionally cast
+    to FP32 for this path to keep losses finite while the rest of the training
+    stays in mixed precision.
+    """
+    if istft_fn is None or loss_fn is None:
+        return mx.array(0.0)
+
+    out_wav, clean_wav = specs_to_wavs(
+        out_spec,
+        clean_spec,
+        istft_fn=istft_fn,
+        n_fft=n_fft,
+        hop_length=hop_length,
+        target_len=target_len,
+        force_fp32=force_fp32,
+    )
+
+    return loss_fn(out_wav, clean_wav)
+
+
+def _gan_waveform_view(wav: mx.array, *, use_fp16: bool) -> mx.array:
+    """Return GAN discriminator waveform view in the desired precision.
+
+    GAN discriminator activations are a major memory contributor when adversarial
+    training activates. Keeping this path in model precision (FP16 when enabled)
+    reduces peak memory while MRSTFT can still run in FP32 for stability.
+    """
+    if use_fp16 and wav.dtype != mx.float16:
+        return wav.astype(mx.float16)
+    return wav
+
+
+def _disc_crop_waveform(wav: mx.array, max_samples: int, crop_start: int | None = None) -> tuple[mx.array, int]:
+    """Random-crop waveform along the time axis for discriminator input.
+
+    Waveform-domain discriminators (MPD/MSD) produce enormous activation tensors
+    proportional to input length.  Cropping to a shorter segment (e.g. 1 s at
+    48 kHz = 48 000 samples) cuts discriminator memory by the ratio
+    ``original_len / max_samples`` with negligible quality impact — the
+    discriminator only needs to assess local perceptual quality.
+
+    Args:
+        wav: Waveform tensor ``(batch, samples)``.
+        max_samples: Maximum number of samples to keep (0 = no crop).
+        crop_start: If given, reuse this start index (keeps fake/real aligned).
+
+    Returns:
+        (cropped_wav, crop_start) so the same offset can be reused for the
+        paired waveform.
+    """
+    if max_samples <= 0 or wav.shape[-1] <= max_samples:
+        return wav, 0
+    if crop_start is None:
+        crop_start = random.randint(0, wav.shape[-1] - max_samples)
+    return wav[:, crop_start : crop_start + max_samples], crop_start
 
 
 _CHECKPOINT_KINDS = {"step", "epoch_end", "best", "best_final", "final", "interrupted"}
 _COMPLETED_KINDS = {"epoch_end", "best", "best_final", "final"}
 _IN_PROGRESS_KINDS = {"step", "interrupted"}
+_COUNTER_SEMANTICS_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -826,6 +1984,15 @@ class CheckpointManifest:
         if match := self.complete_re.match(path.name):
             return int(match.group(1)) - 1
         return None
+
+
+def _disc_weights_path(path: Path) -> Path:
+    return path.with_name(f"{path.stem}.disc{path.suffix}")
+
+
+def _is_disc_weights(path: Path, manifest: CheckpointManifest | None = None) -> bool:
+    manifest = manifest or CheckpointManifest()
+    return path.name.endswith(f".disc{manifest.weights_ext}")
 
 
 @dataclass
@@ -896,6 +2063,75 @@ def compute_resume_epoch(state: dict) -> int:
     return epoch
 
 
+def resolve_resume_batch_count(state: dict[str, Any]) -> int:
+    """Resolve resume micro-batch count from checkpoint state.
+
+    Returns the number of micro-batches already consumed in the in-progress
+    epoch. For legacy checkpoints (without counter_semantics_version),
+    batch_idx is interpreted as a 0-based index of the last processed batch and
+    is converted to a processed-count via +1.
+    """
+    kind = state.get("kind", "epoch_end")
+    if kind not in _IN_PROGRESS_KINDS:
+        return 0
+
+    raw_counter = state.get("micro_batches_completed", state.get("batch_idx"))
+    if not isinstance(raw_counter, int) or raw_counter < 0:
+        return 0
+
+    version_raw = state.get("counter_semantics_version", 1)
+    version = version_raw if isinstance(version_raw, int) else 1
+    if version >= _COUNTER_SEMANTICS_VERSION:
+        return raw_counter
+    return raw_counter + 1
+
+
+def maybe_skip_resume_batches(
+    data_iterator,
+    *,
+    resume_from: str | None,
+    epoch: int,
+    start_epoch: int,
+    resume_batch_idx: int,
+):
+    """Skip already-processed micro-batches when resuming an in-progress epoch.
+
+    Returns a tuple of (iterator, did_skip).
+    """
+    if resume_from and epoch == start_epoch and resume_batch_idx > 0:
+        return islice(data_iterator, resume_batch_idx, None), True
+    return data_iterator, False
+
+
+_TRAIN_MODE_COMPILED = "COMPILED"
+_TRAIN_MODE_EAGER = "EAGER"
+
+
+def resolve_epoch_train_mode(
+    *,
+    compiled_step_base_enabled: bool,
+    gan_enabled: bool,
+    gan_active: bool,
+    previous_mode: Literal["COMPILED", "EAGER"] | None,
+    experimental_compiled_gan: bool = False,
+) -> tuple[Literal["COMPILED", "EAGER"], bool]:
+    """Resolve training mode for an epoch with one-way COMPILED->EAGER semantics.
+
+    Rules:
+    - If compiled mode is globally blocked (debug, nan-skip, grad accumulation), use EAGER.
+    - If GAN is active for this epoch, use EAGER — unless experimental_compiled_gan is True.
+    - Once EAGER is entered, do not switch back to COMPILED in later epochs
+      (unless experimental_compiled_gan keeps compiled mode through GAN activation).
+    """
+    if not experimental_compiled_gan and previous_mode == _TRAIN_MODE_EAGER:
+        return _TRAIN_MODE_EAGER, False
+    if not compiled_step_base_enabled:
+        return _TRAIN_MODE_EAGER, False
+    if gan_enabled and gan_active and not experimental_compiled_gan:
+        return _TRAIN_MODE_EAGER, False
+    return _TRAIN_MODE_COMPILED, True
+
+
 def validate_checkpoint_dir(
     checkpoint_dir: Path,
     strict: bool = True,
@@ -931,7 +2167,11 @@ def validate_checkpoint_dir(
         report["invalid"].append((tmp, "temporary checkpoint residue"))
 
     ckpt_files = sorted(
-        [p for p in checkpoint_dir.glob(f"*{manifest.weights_ext}") if not manifest.is_temporary(p)],
+        [
+            p
+            for p in checkpoint_dir.glob(f"*{manifest.weights_ext}")
+            if not manifest.is_temporary(p) and not _is_disc_weights(p, manifest)
+        ],
         key=lambda p: p.stat().st_mtime,
     )
 
@@ -970,8 +2210,8 @@ def validate_checkpoint_dir(
         kind = state.get("kind")
         epoch = state.get("epoch")
         last_completed = state.get("last_completed_epoch")
-        batch_idx = state.get("batch_idx")
-        global_step = state.get("global_step")
+        batch_idx = state.get("micro_batches_completed", state.get("batch_idx"))
+        global_step = state.get("optimizer_steps_completed", state.get("global_step"))
 
         if kind not in _CHECKPOINT_KINDS:
             record.errors.append("missing/invalid kind")
@@ -1075,10 +2315,10 @@ def validate_checkpoint_dir(
         report["latest_state"] = latest.state
         if latest.state:
             report["resume_epoch"] = compute_resume_epoch(latest.state)
-            resume_batch = latest.state.get("batch_idx")
-            if latest.kind in _IN_PROGRESS_KINDS and isinstance(resume_batch, int):
-                report["resume_batch"] = resume_batch
-            report["resume_global_step"] = latest.state.get("global_step")
+            report["resume_batch"] = resolve_resume_batch_count(latest.state)
+            report["resume_global_step"] = latest.state.get(
+                "optimizer_steps_completed", latest.state.get("global_step")
+            )
 
     # Detect monotonicity issues across valid checkpoints (by modification time).
     valid_by_time = sorted(valid_records, key=lambda rec: rec.mtime)
@@ -1161,6 +2401,8 @@ def save_checkpoint(
     best_valid_loss: float,
     config: dict,
     optimizer: optim.Optimizer | None = None,
+    discriminator: nn.Module | None = None,
+    disc_optimizer: optim.Optimizer | None = None,
     last_completed_epoch: int = -1,
     kind: str = "epoch_end",
     raise_on_error: bool = False,
@@ -1171,8 +2413,8 @@ def save_checkpoint(
         model: Model to save
         path: Path to checkpoint file (.safetensors)
         epoch: Current epoch index (0-based)
-        batch_idx: Batch index within epoch (for in-progress checkpoints)
-        global_step: Global training step
+        batch_idx: Number of micro-batches completed within the current epoch
+        global_step: Number of optimizer updates completed globally
         loss: Current training loss
         best_valid_loss: Best validation loss so far
         config: Training configuration dict
@@ -1219,6 +2461,18 @@ def save_checkpoint(
             except Exception as e:
                 print(f"⚠️  Failed to serialize optimizer state: {e}")
 
+        disc_optimizer_state_dict = {}
+        if disc_optimizer is not None and hasattr(disc_optimizer, "state") and disc_optimizer.state:
+            try:
+                flat_state = tree_flatten(disc_optimizer.state)
+                for k, v in flat_state:
+                    if isinstance(v, mx.array):
+                        disc_optimizer_state_dict[k] = v.tolist()
+                    else:
+                        disc_optimizer_state_dict[k] = v
+            except Exception as e:
+                print(f"⚠️  Failed to serialize discriminator optimizer state: {e}")
+
         checkpoint_kind = "end_of_epoch" if kind in _COMPLETED_KINDS else "in_progress"
 
         # Save training state and metadata
@@ -1227,14 +2481,20 @@ def save_checkpoint(
         state = {
             "epoch": epoch,
             "batch_idx": batch_idx,
+            "micro_batches_completed": batch_idx,
             "global_step": global_step,
+            "optimizer_steps_completed": global_step,
             "loss": loss,
             "best_valid_loss": best_valid_loss,
             "config": config,
             "optimizer_state": optimizer_state_dict,
+            "disc_optimizer_state": disc_optimizer_state_dict,
             "last_completed_epoch": last_completed_epoch,
             "kind": kind,
             "checkpoint_kind": checkpoint_kind,
+            "counter_semantics_version": _COUNTER_SEMANTICS_VERSION,
+            "batch_unit": "microbatch_count",
+            "step_unit": "optimizer_step",
             "current_epoch": epoch,
             "last_saved_global_step": global_step,
             "last_saved_batch_idx": batch_idx,
@@ -1247,6 +2507,20 @@ def save_checkpoint(
         # Atomic rename
         tmp_weights.replace(path)
         tmp_state_path.replace(state_path)
+
+        # Save discriminator weights after main checkpoint is safely written
+        if discriminator is not None:
+            disc_path = _disc_weights_path(path)
+            tmp_disc = disc_path.with_name(f"{disc_path.stem}.tmp{disc_path.suffix}")
+            disc_params = discriminator.parameters()
+            flat_disc = tree_flatten(disc_params)
+            disc_weights = {k: v for k, v in flat_disc}
+            if disc_weights:
+                mx.eval(*disc_weights.values())
+            mx.save_safetensors(str(tmp_disc), disc_weights)
+            if not tmp_disc.exists():
+                mx.save_safetensors(str(tmp_disc), disc_weights)
+            tmp_disc.replace(disc_path)
 
         if not _validate_checkpoint_pair(path, manifest=manifest):
             msg = f"Checkpoint validation failed after save: {path.name}"
@@ -1269,6 +2543,8 @@ def load_checkpoint(
     model: nn.Module,
     path: str | Path,
     optimizer: optim.Optimizer | None = None,
+    discriminator: nn.Module | None = None,
+    disc_optimizer: optim.Optimizer | None = None,
 ) -> dict:
     """Load a training checkpoint and restore model weights and optimizer state.
 
@@ -1336,6 +2612,41 @@ def load_checkpoint(
             except Exception as e:
                 print(f"⚠️  Failed to restore optimizer state: {e}")
 
+        # Restore discriminator weights/optimizer if provided
+        if discriminator is not None:
+            disc_path = _disc_weights_path(ckpt_path)
+            if disc_path.exists():
+                try:
+                    disc_weights = mx.load(str(disc_path))
+                    flat_disc = tree_flatten(discriminator.parameters())
+                    disc_pairs = []
+                    missing_disc = []
+                    for name, param in flat_disc:
+                        if isinstance(disc_weights, dict) and name in disc_weights:
+                            disc_pairs.append((name, disc_weights[name]))
+                        else:
+                            disc_pairs.append((name, param))
+                            missing_disc.append(name)
+                    discriminator.update(tree_unflatten(disc_pairs))
+                    if missing_disc:
+                        print(f"⚠️  {len(missing_disc)} discriminator parameters missing in checkpoint")
+                except Exception as e:
+                    print(f"⚠️  Failed to load discriminator weights: {e}")
+            else:
+                print(f"⚠️  Discriminator checkpoint missing: {disc_path.name}")
+
+        if disc_optimizer is not None and "disc_optimizer_state" in state:
+            try:
+                disc_state_dict = state.get("disc_optimizer_state", {})
+                if disc_state_dict:
+                    restored = {k: mx.array(v) for k, v in disc_state_dict.items()}
+                    disc_pairs = list(restored.items())
+                    disc_nested = tree_unflatten(disc_pairs)
+                    disc_optimizer.state = disc_nested
+                    print("✅ Restored discriminator optimizer state from checkpoint")
+            except Exception as e:
+                print(f"⚠️  Failed to restore discriminator optimizer state: {e}")
+
         epoch = state.get("epoch", 0)
         kind = state.get("kind", "epoch_end")
         completed_kinds = {"epoch_end", "best", "best_final", "final"}
@@ -1368,7 +2679,7 @@ def cleanup_checkpoints(
     # Find all checkpoint files (epoch_*.safetensors and step_*.safetensors)
     ckpt_files = []
     for pattern in ["epoch_*.safetensors", "step_*.safetensors"]:
-        ckpt_files.extend(checkpoint_dir.glob(pattern))
+        ckpt_files.extend([p for p in checkpoint_dir.glob(pattern) if not _is_disc_weights(p, manifest)])
 
     # Sort by modification time (oldest first)
     ckpt_files.sort(key=lambda p: p.stat().st_mtime)
@@ -1383,6 +2694,8 @@ def cleanup_checkpoints(
     for ckpt_path in ckpt_files[:num_to_remove]:
         # Remove the safetensors file
         ckpt_path.unlink(missing_ok=True)
+        # Remove discriminator weights if present
+        _disc_weights_path(ckpt_path).unlink(missing_ok=True)
 
         # Also remove the accompanying state.json
         state_path = manifest.state_path(ckpt_path)
@@ -1409,11 +2722,27 @@ def find_latest_checkpoint(checkpoint_dir: Path) -> Path | None:
     if not checkpoint_dir.exists():
         return None
 
-    report = validate_checkpoint_dir(checkpoint_dir, strict=False, validate_load=False)
-    latest = report.get("latest_path")
-    if isinstance(latest, Path):
-        return latest
-    return None
+    manifest = CheckpointManifest()
+    candidates = [
+        p
+        for p in checkpoint_dir.glob(f"*{manifest.weights_ext}")
+        if not manifest.is_temporary(p) and not _is_disc_weights(p, manifest)
+    ]
+
+    valid_pairs: list[Path] = []
+    for ckpt in candidates:
+        state_path = manifest.state_path(ckpt)
+        if not ckpt.exists() or ckpt.stat().st_size == 0:
+            continue
+        if not state_path.exists() or state_path.stat().st_size == 0:
+            continue
+        valid_pairs.append(ckpt)
+
+    if not valid_pairs:
+        return None
+
+    # Fast path: use latest mtime without loading large state JSON files.
+    return max(valid_pairs, key=lambda p: p.stat().st_mtime)
 
 
 def train(
@@ -1425,6 +2754,8 @@ def train(
     epochs: int = 100,
     batch_size: int = 8,
     learning_rate: float = 1e-4,
+    learning_rate_min: float | None = None,
+    weight_decay: float = 0.0,
     checkpoint_dir: str = "checkpoints",
     resume_from: str | None = None,
     resume_data_from: str | None = None,
@@ -1445,16 +2776,38 @@ def train(
     grad_accumulation_steps: int = 1,
     eval_frequency: int = 10,
     backbone_type: Literal["mamba", "gru", "attention"] = "mamba",
+    model_variant: Literal["full", "lite"] = "full",
     verbose: bool = False,
     snr_range: Tuple[float, float] | None = None,
     snr_range_extreme: Tuple[float, float] | None = None,
+    snr_range_very_low: Tuple[float, float] | None = None,
     p_extreme_snr: float | None = None,
+    p_very_low_snr: float | None = None,
+    p_interfer_speech: float | None = None,
+    curriculum_warmup_epochs: int = 0,
     speech_gain_range: Tuple[float, float] | None = None,
     noise_gain_range: Tuple[float, float] | None = None,
-    dynamic_loss: Literal["baseline", "awesome"] = "baseline",
+    dynamic_loss: Literal["baseline", "awesome", "pipeline_awesome"] = "baseline",
+    pipeline_stages: list[dict[str, Any]] | None = None,
     awesome_loss_weight: float = 0.4,
     awesome_mask_sharpness: float = 6.0,
     awesome_warmup_steps: int = 0,
+    gan_enabled: bool = False,
+    gan_start_epoch: int = 0,
+    gan_ramp_epochs: int = 0,
+    gan_adv_weight: float = 0.0,
+    gan_fm_weight: float = 0.0,
+    gan_disc_type: Literal["combined", "mpd", "msd"] = "combined",
+    gan_mpd_periods: Tuple[int, ...] | None = None,
+    gan_msd_scales: int = 3,
+    gan_disc_lr: float = 1e-4,
+    gan_disc_weight_decay: float = 0.0,
+    gan_disc_grad_clip: float = 1.0,
+    gan_disc_update_freq: int = 1,
+    gan_disc_max_samples: int = 48000,
+    gan_mpd_channels: int = 32,
+    gan_msd_channels: int = 128,
+    experimental_compiled_gan: bool = False,
     vad_proxy_enabled: bool = True,
     vad_loss_weight: float = 0.05,
     vad_threshold: float = 0.6,
@@ -1479,6 +2832,19 @@ def train(
     max_train_batches: int | None = None,
     max_valid_batches: int | None = None,
     check_chkpts: bool = False,
+    seed: int | None = None,
+    debug_numerics: bool = False,
+    debug_numerics_fail_fast: bool = True,
+    debug_numerics_every: int = 1,
+    debug_numerics_dump_dir: str | None = None,
+    debug_numerics_dump_arrays: bool = False,
+    debug_numerics_max_dumps: int = 5,
+    nan_skip_batch: bool = False,
+    sync_mode: str = "normal",
+    model_config: ModelParams4 | None = None,
+    dataset_overrides: dict[str, Any] | None = None,
+    mrstft_config: MultiResSpecLossConfig | None = None,
+    train_config_path: str | None = None,
 ) -> None:
     """Train DfNet4 model with dynamic on-the-fly mixing.
 
@@ -1491,6 +2857,8 @@ def train(
         epochs: Number of training epochs
         batch_size: Batch size
         learning_rate: Initial learning rate
+        learning_rate_min: Minimum learning rate for cosine schedule
+        weight_decay: Weight decay for AdamW optimizer
         checkpoint_dir: Directory for checkpoints
         resume_from: Optional model checkpoint to resume from
         resume_data_from: Optional data checkpoint for resuming interrupted epoch
@@ -1510,13 +2878,22 @@ def train(
         use_fp16: Use FP16 (half-precision) training. None=auto-detect from hardware
         grad_accumulation_steps: Number of steps to accumulate gradients (effective batch = batch_size * grad_accumulation_steps)
         eval_frequency: Evaluate loss every N batches (reduces synchronization overhead)
+        model_variant: Model size variant ("full" or "lite")
         verbose: Enable detailed timing and diagnostic output
         snr_range: Optional override for base SNR range (dB)
         snr_range_extreme: Optional override for extreme SNR range (dB)
+        snr_range_very_low: Optional override for very-low SNR range (dB), for whisper/distant mic
         p_extreme_snr: Optional override for extreme SNR sampling probability
+        p_very_low_snr: Optional override for very-low SNR sampling probability
+        p_interfer_speech: Optional override for interfering speaker probability (simulates vocals/competing talker)
+        curriculum_warmup_epochs: Number of warmup epochs for curriculum learning (0=disabled).
+            During warmup, SNR/interferer probabilities ramp from 0 to target values.
         speech_gain_range: Optional override for speech gain range (dB)
         noise_gain_range: Optional override for noise gain range (dB)
-        dynamic_loss: Which dynamic loss to use ("baseline" or "awesome")
+        dynamic_loss: Which dynamic loss to use ("baseline", "awesome", or "pipeline_awesome")
+        pipeline_stages: Optional staged loss schedule with entries containing
+            start_epoch and optional overrides for awesome_loss_weight,
+            vad_loss_weight, and vad_speech_loss_weight.
         awesome_loss_weight: Weight for awesome loss term (only if enabled)
         awesome_mask_sharpness: Sharpness for speech/noise dominance mask
         awesome_warmup_steps: Warmup steps for awesome loss weight ramp
@@ -1544,6 +2921,19 @@ def train(
         max_train_batches: Limit number of train batches per epoch (None = full epoch)
         max_valid_batches: Limit number of validation batches (None = full validation)
         check_chkpts: Validate checkpoints before starting/resuming
+        seed: Optional RNG seed override (sets Python/NumPy/MLX RNGs)
+        debug_numerics: Enable numeric debug mode with finite checks and fail-fast behavior
+        debug_numerics_fail_fast: Raise on first non-finite when debug_numerics enabled
+        debug_numerics_every: Check every N steps in debug mode
+        debug_numerics_dump_dir: Directory for numeric debug dumps (default: checkpoint_dir/debug_numerics)
+        debug_numerics_dump_arrays: Save small tensor slices alongside JSON dumps
+        debug_numerics_max_dumps: Maximum number of non-finite dumps to write
+        nan_skip_batch: Skip optimizer update when loss/grads are non-finite (debug-friendly)
+        sync_mode: Sync barrier budget (fast | normal | debug | profile)
+        model_config: Optional MLX model config overrides (ModelParams4)
+        dataset_overrides: Optional dataset config overrides (applied before CLI overrides)
+        mrstft_config: Optional multi-res STFT loss config
+        train_config_path: Optional path to INI train config (stored in metadata)
     """
     from df_mlx.config import get_default_config
     from df_mlx.dynamic_dataset import (
@@ -1556,7 +2946,7 @@ def train(
     )
     from df_mlx.hardware import HardwareConfig
     from df_mlx.model import count_parameters, init_model
-    from df_mlx.train import WarmupCosineSchedule, spectral_loss
+    from df_mlx.train import MultiResolutionSTFTLoss, WarmupCosineSchedule, spectral_loss
 
     print("=" * 60)
     print("MLX DeepFilterNet4 Training - Dynamic On-the-Fly Mixing")
@@ -1605,25 +2995,173 @@ def train(
             num_workers=num_workers,
         )
 
+    # Apply train-config dataset overrides before CLI/runtime overrides
+    if dataset_overrides:
+        for key, value in dataset_overrides.items():
+            if hasattr(config, key):
+                setattr(config, key, value)
+            else:
+                print(f"Warning: train-config dataset override ignored: {key}")
+
     if snr_range is not None:
         config.snr_range = snr_range
     if snr_range_extreme is not None:
         config.snr_range_extreme = snr_range_extreme
+    if snr_range_very_low is not None:
+        config.snr_range_very_low = snr_range_very_low
     if p_extreme_snr is not None:
         config.p_extreme_snr = p_extreme_snr
+    if p_very_low_snr is not None:
+        config.p_very_low_snr = p_very_low_snr
+    if p_interfer_speech is not None:
+        config.p_interfer_speech = p_interfer_speech
     if speech_gain_range is not None:
         config.speech_gain_range = speech_gain_range
     if noise_gain_range is not None:
         config.noise_gain_range = noise_gain_range
+
+    # Numeric debug mode overrides (deterministic, short runs)
+    if debug_numerics:
+        # NOTE: do NOT override epochs here.  The max_train_batches cap
+        # already limits per-epoch work, and forcing epochs=1 breaks
+        # checkpoint resume when start_epoch > 0.
+        if max_train_batches is None:
+            max_train_batches = 50
+        if max_valid_batches is None:
+            max_valid_batches = 10
+        if eval_frequency != 1:
+            print(f"  Debug numerics: overriding eval_frequency {eval_frequency} -> 1")
+            eval_frequency = 1
+        if num_workers != 0:
+            print(f"  Debug numerics: overriding num_workers {num_workers} -> 0")
+            num_workers = 0
+        if prefetch_size != 1:
+            print(f"  Debug numerics: overriding prefetch_size {prefetch_size} -> 1")
+            prefetch_size = 1
+        if use_mlx_data:
+            print("  Debug numerics: disabling mlx-data for deterministic loading")
+            use_mlx_data = False
+
+    # RNG seeding (optional, default only in debug mode)
+    if seed is None and debug_numerics:
+        seed = getattr(config, "seed", 42)
+    if seed is not None:
+        config.seed = seed
+        random.seed(seed)
+        np.random.seed(seed)
+        mx.random.seed(seed)
+        print(f"  RNG seed set to {seed}")
+
+    # Keep dataset config aligned with CLI worker setting
+    config.num_workers = num_workers
 
     # Create dataset (this populates config.*_files from cache index if using cache)
     print("\nInitializing dynamic dataset...")
     dataset = DynamicDataset(config)
 
     use_awesome_loss = dynamic_loss == "awesome"
+    use_pipeline_awesome_loss = dynamic_loss == "pipeline_awesome"
+    pipeline_stage_defs = sorted((pipeline_stages or []), key=lambda s: int(s.get("start_epoch", 0)))
+    base_awesome_loss_weight = awesome_loss_weight
+    base_vad_loss_weight = vad_loss_weight
+    base_vad_speech_loss_weight = vad_speech_loss_weight
+    stage_max_vad_weight = max(
+        [
+            base_vad_loss_weight,
+            *[
+                float(s.get("vad_loss_weight", 0.0))
+                for s in pipeline_stage_defs
+                if s.get("vad_loss_weight") is not None
+            ],
+        ]
+    )
+    stage_max_vad_speech_weight = max(
+        [
+            base_vad_speech_loss_weight,
+            *[
+                float(s.get("vad_speech_loss_weight", 0.0))
+                for s in pipeline_stage_defs
+                if s.get("vad_speech_loss_weight") is not None
+            ],
+        ]
+    )
+    mrstft_cfg = mrstft_config
+    use_mrstft_loss = mrstft_cfg is not None and mrstft_cfg.factor > 0
+    mrstft_loss_fn = None
+    mrstft_hop_sizes = None
+    mrstft_istft = None
+    mrstft_target_len = None
+    if use_mrstft_loss:
+        if not mrstft_cfg or not mrstft_cfg.fft_sizes:
+            print("Warning: mrstft enabled but fft_sizes is empty; disabling MRSTFT loss.")
+            use_mrstft_loss = False
+        else:
+            from functools import partial
+
+            from df_mlx.ops import istft
+
+            mrstft_istft = partial(istft)
+            mrstft_hop_sizes = tuple(mrstft_cfg.hop_sizes) if mrstft_cfg.hop_sizes is not None else None
+            mrstft_loss_fn = MultiResolutionSTFTLoss(
+                fft_sizes=tuple(mrstft_cfg.fft_sizes),
+                hop_sizes=mrstft_hop_sizes,
+                gamma=mrstft_cfg.gamma,
+                factor=mrstft_cfg.factor,
+                f_complex=mrstft_cfg.f_complex,
+            )
+            mrstft_target_len = int(round(config.segment_length * config.sample_rate))
+
+    # GAN configuration (adversarial + feature matching)
+    gan_enabled = bool(gan_enabled or gan_adv_weight > 0 or gan_fm_weight > 0)
+    gan_disc_type = gan_disc_type.lower()
+    if gan_disc_type not in {"combined", "mpd", "msd"}:
+        print(f"Warning: unsupported gan_disc_type={gan_disc_type}; using combined.")
+        gan_disc_type = "combined"
+    gan_disc_update_freq = max(int(gan_disc_update_freq), 1)
+    gan_target_len = int(round(config.segment_length * config.sample_rate))
+    gan_istft = mrstft_istft
+
+    discriminator = None
+    disc_optimizer = None
+    feature_match_loss = None
+    gan_loss_fns = None
+
+    if gan_enabled:
+        from functools import partial
+
+        from df_mlx.discriminator import (
+            CombinedDiscriminator,
+            MultiPeriodDiscriminator,
+            MultiScaleDiscriminator,
+        )
+        from df_mlx.loss import FeatureMatchingLoss, discriminator_loss, generator_loss
+        from df_mlx.ops import istft
+
+        if gan_istft is None:
+            gan_istft = partial(istft)
+
+        mpd_periods = tuple(gan_mpd_periods) if gan_mpd_periods else (2, 3, 5, 7, 11)
+        if gan_disc_type == "mpd":
+            discriminator = MultiPeriodDiscriminator(periods=mpd_periods, channels=gan_mpd_channels)
+        elif gan_disc_type == "msd":
+            discriminator = MultiScaleDiscriminator(num_scales=gan_msd_scales, channels=gan_msd_channels)
+        else:
+            discriminator = CombinedDiscriminator(
+                mpd_periods=mpd_periods,
+                mpd_channels=gan_mpd_channels,
+                msd_scales=gan_msd_scales,
+                msd_channels=gan_msd_channels,
+            )
+
+        disc_optimizer = optim.AdamW(
+            learning_rate=gan_disc_lr,
+            weight_decay=gan_disc_weight_decay,
+        )
+        feature_match_loss = FeatureMatchingLoss(factor=1.0)
+        gan_loss_fns = (generator_loss, discriminator_loss)
 
     if vad_eval_mode == "auto":
-        vad_eval_mode = "proxy" if use_awesome_loss else "off"
+        vad_eval_mode = "proxy" if (use_awesome_loss or use_pipeline_awesome_loss) else "off"
     vad_eval_enabled = vad_eval_mode != "off"
     silero_vad = None
     if vad_eval_mode == "silero":
@@ -1638,10 +3176,12 @@ def train(
             )
         )
 
-    use_vad_loss = vad_loss_weight > 0 or vad_speech_loss_weight > 0
+    use_vad_loss = stage_max_vad_weight > 0 or stage_max_vad_speech_weight > 0
     use_vad_train_reg = (vad_train_prob > 0 or vad_train_every_steps > 0) and vad_loss_weight > 0
 
-    need_band_mask = use_vad_loss or use_awesome_loss or vad_eval_enabled or use_vad_train_reg
+    need_band_mask = (
+        use_vad_loss or use_awesome_loss or use_pipeline_awesome_loss or vad_eval_enabled or use_vad_train_reg
+    )
     if need_band_mask:
         n_freqs = config.fft_size // 2 + 1
         vad_band_mask, vad_band_bins = _build_speech_band_mask(
@@ -1654,13 +3194,16 @@ def train(
         vad_band_mask = mx.array(0.0)
         vad_band_bins = 1.0
 
+    min_lr = learning_rate_min if learning_rate_min is not None else learning_rate * 0.01
+
     # Print file counts after dataset init (so cache files are included)
     print(f"Speech files:   {len(config.speech_files):,}")
     print(f"Noise files:    {len(config.noise_files):,}")
     print(f"RIR files:      {len(config.rir_files):,}")
     print(f"Epochs:         {epochs}")
     print(f"Batch size:     {batch_size}")
-    print(f"Learning rate:  {learning_rate}")
+    print(f"Learning rate:  {learning_rate} (min {min_lr})")
+    print(f"Weight decay:   {weight_decay}")
     print(f"Checkpoint dir: {checkpoint_dir}")
     print(f"P(reverb):      {config.p_reverb}")
     print(f"P(clipping):    {config.p_clipping}")
@@ -1669,10 +3212,33 @@ def train(
     print(f"Speech gain:    {config.speech_gain_range} dB")
     print(f"Noise gain:     {config.noise_gain_range} dB")
     print(f"Dynamic loss:   {dynamic_loss}")
-    if use_awesome_loss:
+    if use_mrstft_loss and mrstft_cfg is not None:
+        hop_sizes_display = mrstft_cfg.hop_sizes if mrstft_cfg.hop_sizes is not None else "auto"
+        print(
+            "MRSTFT loss:   "
+            f"factor={mrstft_cfg.factor}, gamma={mrstft_cfg.gamma}, "
+            f"f_complex={mrstft_cfg.f_complex}, fft_sizes={mrstft_cfg.fft_sizes}, "
+            f"hop_sizes={hop_sizes_display}"
+        )
+    if use_awesome_loss or use_pipeline_awesome_loss:
         print(
             f"  Awesome loss: weight={awesome_loss_weight}, mask_sharpness={awesome_mask_sharpness}, "
             f"warmup_steps={awesome_warmup_steps}, proxy={'on' if vad_proxy_enabled else 'off'}"
+        )
+    if gan_enabled:
+        print(
+            "GAN loss:       on "
+            f"(adv={gan_adv_weight}, fm={gan_fm_weight}, start={gan_start_epoch}, ramp={gan_ramp_epochs})"
+        )
+        print(
+            "  Discriminator: "
+            f"type={gan_disc_type}, mpd_periods={gan_mpd_periods or [2, 3, 5, 7, 11]}, "
+            f"msd_scales={gan_msd_scales}, update_freq={gan_disc_update_freq}"
+        )
+        print(
+            "  Disc memory:  "
+            f"max_samples={gan_disc_max_samples or 'full'}, "
+            f"mpd_ch={gan_mpd_channels}, msd_ch={gan_msd_channels}"
         )
     vad_enabled = vad_loss_weight > 0 or vad_speech_loss_weight > 0
     print(
@@ -1697,15 +3263,47 @@ def train(
         print(
             "  VAD train:     " f"prob={vad_train_prob} every_steps={vad_train_every_steps} (weight={vad_loss_weight})"
         )
+    if pipeline_stage_defs:
+        print("  Pipeline stages:")
+        for idx, stage in enumerate(pipeline_stage_defs):
+            stage_name = stage.get("name", f"stage_{idx}")
+            stage_parts = [f"start={stage['start_epoch']}", f"name={stage_name}"]
+            if stage.get("awesome_loss_weight") is not None:
+                stage_parts.append(f"awesome_w={stage['awesome_loss_weight']}")
+            if stage.get("vad_loss_weight") is not None:
+                stage_parts.append(f"vad_w={stage['vad_loss_weight']}")
+            if stage.get("vad_speech_loss_weight") is not None:
+                stage_parts.append(f"speech_w={stage['vad_speech_loss_weight']}")
+            print("    - " + ", ".join(stage_parts))
     print("=" * 60)
 
     train_config = {
         **config.__dict__,
+        "train_config_path": train_config_path,
         "dynamic_loss": dynamic_loss,
+        "pipeline_stages": pipeline_stage_defs,
         "awesome_loss_weight": awesome_loss_weight,
         "awesome_mask_sharpness": awesome_mask_sharpness,
         "awesome_warmup_steps": awesome_warmup_steps,
         "vad_proxy_enabled": vad_proxy_enabled,
+        "mrstft_factor": mrstft_cfg.factor if mrstft_cfg is not None else 0.0,
+        "mrstft_gamma": mrstft_cfg.gamma if mrstft_cfg is not None else 1.0,
+        "mrstft_f_complex": mrstft_cfg.f_complex if mrstft_cfg is not None else None,
+        "mrstft_fft_sizes": list(mrstft_cfg.fft_sizes) if mrstft_cfg is not None else None,
+        "mrstft_hop_sizes": (list(mrstft_cfg.hop_sizes) if (mrstft_cfg and mrstft_cfg.hop_sizes) else None),
+        "gan_enabled": gan_enabled,
+        "gan_start_epoch": gan_start_epoch,
+        "gan_ramp_epochs": gan_ramp_epochs,
+        "gan_adv_weight": gan_adv_weight,
+        "gan_fm_weight": gan_fm_weight,
+        "gan_disc_type": gan_disc_type,
+        "gan_mpd_periods": list(gan_mpd_periods) if gan_mpd_periods else [2, 3, 5, 7, 11],
+        "gan_msd_scales": gan_msd_scales,
+        "gan_disc_lr": gan_disc_lr,
+        "gan_disc_weight_decay": gan_disc_weight_decay,
+        "gan_disc_grad_clip": gan_disc_grad_clip,
+        "gan_disc_update_freq": gan_disc_update_freq,
+        "experimental_compiled_gan": experimental_compiled_gan,
         "vad_loss_weight": vad_loss_weight,
         "vad_threshold": vad_threshold,
         "vad_margin": vad_margin,
@@ -1728,6 +3326,14 @@ def train(
         "eval_sisdr": eval_sisdr,
         "max_train_batches": max_train_batches,
         "max_valid_batches": max_valid_batches,
+        "seed": seed,
+        "learning_rate_min": learning_rate_min,
+        "weight_decay": weight_decay,
+        "model_variant": model_variant,
+        "debug_numerics": debug_numerics,
+        "debug_numerics_fail_fast": debug_numerics_fail_fast,
+        "debug_numerics_every": debug_numerics_every,
+        "nan_skip_batch": nan_skip_batch,
     }
 
     dataset.set_split("train")
@@ -1745,6 +3351,28 @@ def train(
     # Create checkpoint directory early (needed for data checkpoint path)
     ckpt_dir = Path(checkpoint_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    debug_dump_dir = None
+    if debug_numerics:
+        debug_dump_dir = Path(debug_numerics_dump_dir) if debug_numerics_dump_dir else ckpt_dir / "debug_numerics"
+        debug_cfg = NumericDebugConfig(
+            enabled=True,
+            fail_fast=debug_numerics_fail_fast and not nan_skip_batch,
+            skip_batch=nan_skip_batch,
+            every=max(debug_numerics_every, 1),
+            dump_dir=debug_dump_dir,
+            dump_arrays=debug_numerics_dump_arrays,
+            max_dumps=debug_numerics_max_dumps,
+            check_grads=True,
+        )
+        debugger = NumericDebugger(debug_cfg)
+        print(
+            "  Debug numerics: enabled "
+            f"(fail_fast={'on' if debug_cfg.fail_fast else 'off'}, "
+            f"every={debug_cfg.every}, dump_dir={debug_dump_dir})"
+        )
+    else:
+        debugger = None
 
     validation_report = None
     if check_chkpts:
@@ -1828,32 +3456,52 @@ def train(
 
     # Initialize model with config
     print("\nInitializing model...")
-    model_config = get_default_config()
+    if model_config is None:
+        model_config = get_default_config()
+    _sync_model_config_with_dataset(model_config, config)
     model_config.backbone.backbone_type = backbone_type  # type: ignore[assignment]
-    print(f"  Backbone type: {backbone_type}")
-    model = init_model(config=model_config)
+    print(f"  Backbone type: {backbone_type} | Variant: {model_variant}")
+    model = init_model(config=model_config, variant=model_variant)
     num_params = count_parameters(model)
     print(f"  Parameters: {num_params:,}")
 
-    # Estimate steps per epoch (approximate since samples may be skipped)
+    # Counter semantics:
+    # - micro_batches_per_epoch: number of dataloader micro-batches consumed per epoch
+    # - optimizer_steps_per_epoch: number of optimizer updates per epoch
+    #   (with accumulation this is floor(micro_batches / grad_accumulation_steps))
     approx_samples_per_epoch = len(dataset)
-    steps_per_epoch = approx_samples_per_epoch // batch_size
-    total_steps = epochs * steps_per_epoch
-    warmup_steps = warmup_epochs * steps_per_epoch
-    vad_warmup_steps = vad_warmup_epochs * steps_per_epoch if use_vad_loss else 0
-    awesome_warmup_steps = max(int(awesome_warmup_steps), 0) if use_awesome_loss else 0
+    micro_batches_per_epoch = approx_samples_per_epoch // batch_size
+    if micro_batches_per_epoch < 1:
+        raise ValueError(
+            f"Dataset too small for batch_size={batch_size}: "
+            f"{approx_samples_per_epoch} samples -> 0 micro-batches/epoch"
+        )
+
+    optimizer_steps_per_epoch = micro_batches_per_epoch // grad_accumulation_steps
+    if optimizer_steps_per_epoch < 1:
+        optimizer_steps_per_epoch = 1
+        print(
+            "Warning: "
+            f"grad_accumulation_steps={grad_accumulation_steps} >= "
+            f"micro_batches_per_epoch={micro_batches_per_epoch}; "
+            "using 1 optimizer step/epoch for scheduler bookkeeping"
+        )
+    total_steps = epochs * optimizer_steps_per_epoch
+    warmup_steps = warmup_epochs * optimizer_steps_per_epoch
+    vad_warmup_steps = vad_warmup_epochs * optimizer_steps_per_epoch if use_vad_loss else 0
+    awesome_warmup_steps = max(int(awesome_warmup_steps), 0) if (use_awesome_loss or use_pipeline_awesome_loss) else 0
 
     schedule = WarmupCosineSchedule(
         base_lr=learning_rate,
         warmup_steps=warmup_steps,
         total_steps=total_steps,
-        min_lr=learning_rate * 0.01,
+        min_lr=min_lr,
     )
 
     # Optimizer - create before loading checkpoint to allow optimizer state restoration
     # Use fixed learning rate (schedule applied manually before each step)
     # This is required because schedule callbacks can't run inside mx.compile()
-    optimizer = optim.AdamW(learning_rate=learning_rate)
+    optimizer = optim.AdamW(learning_rate=learning_rate, weight_decay=weight_decay)
 
     # Resume from checkpoint if provided (AFTER optimizer creation)
     start_epoch = 0
@@ -1862,13 +3510,24 @@ def train(
     last_completed_epoch = -1
     resume_global_step = 0
     resume_batch_idx = 0
+    resume_checkpoint_kind = "epoch_end"
 
     if resume_from:
-        state = load_checkpoint(model, resume_from, optimizer=optimizer)
+        state = load_checkpoint(
+            model,
+            resume_from,
+            optimizer=optimizer,
+            discriminator=discriminator,
+            disc_optimizer=disc_optimizer,
+        )
         if state:
             ckpt_epoch = int(state.get("epoch", 0))
             ckpt_kind = state.get("kind", "epoch_end")
-            resume_global_step = state.get("global_step", ckpt_epoch * steps_per_epoch)
+            resume_checkpoint_kind = ckpt_kind if isinstance(ckpt_kind, str) else "epoch_end"
+            resume_global_step = state.get(
+                "optimizer_steps_completed",
+                state.get("global_step", ckpt_epoch * optimizer_steps_per_epoch),
+            )
             start_epoch = compute_resume_epoch(state)
             completed_kinds = {"epoch_end", "best", "best_final", "final"}
             if ckpt_kind in completed_kinds:
@@ -1876,9 +3535,7 @@ def train(
             else:
                 last_completed_epoch = state.get("last_completed_epoch", ckpt_epoch - 1)
             if ckpt_kind in _IN_PROGRESS_KINDS:
-                batch_val = state.get("batch_idx")
-                if isinstance(batch_val, int) and batch_val >= 0:
-                    resume_batch_idx = batch_val
+                resume_batch_idx = resolve_resume_batch_count(state)
             best_valid_loss = state.get("best_valid_loss", float("inf"))
             print(
                 "  Resumed from: "
@@ -1888,7 +3545,7 @@ def train(
             print(
                 "  Resume target: "
                 f"epoch {start_epoch + 1} (idx {start_epoch}), "
-                f"batch {resume_batch_idx}, global_step {resume_global_step}"
+                f"micro_batch {resume_batch_idx}, global_step {resume_global_step}"
             )
             if start_epoch >= epochs:
                 print(f"✅ Training already complete (checkpoint epoch {ckpt_epoch}/{epochs}).")
@@ -1899,22 +3556,41 @@ def train(
 
     if train_stream is not None and data_resume_progress is not None:
         data_epoch = data_resume_progress.get("epoch")
-        if isinstance(data_epoch, int) and data_epoch != start_epoch:
-            print(
-                "⚠️  Data checkpoint epoch does not match resume epoch "
-                f"(data={data_epoch}, resume={start_epoch}). "
-                f"Ignoring data checkpoint: {data_resume_source}"
+        data_batch = data_resume_progress.get("batch")
+        if not isinstance(data_epoch, int) or not isinstance(data_batch, int):
+            raise RuntimeError(
+                "Data checkpoint progress is malformed. "
+                f"source={data_resume_source}, progress={data_resume_progress}"
             )
-            train_stream.set_epoch(start_epoch)
-            data_resume_progress = None
-        elif data_resume_progress.get("batch", 0) in (0, None):
-            data_resume_progress = None
+
+        resume_requires_mid_epoch = resume_from is not None and resume_checkpoint_kind in _IN_PROGRESS_KINDS
+        if resume_requires_mid_epoch:
+            if data_epoch != start_epoch or data_batch != resume_batch_idx:
+                raise RuntimeError(
+                    "Model checkpoint and data checkpoint disagree on resume position. "
+                    f"model=(epoch={start_epoch}, micro_batch={resume_batch_idx}, kind={resume_checkpoint_kind}), "
+                    f"data=(epoch={data_epoch}, micro_batch={data_batch}) from {data_resume_source}. "
+                    "Remediation: remove stale data_checkpoint.json or choose matching resume artifacts."
+                )
+        else:
+            # Resuming from an epoch-boundary checkpoint should always restart at batch 0.
+            if data_epoch != start_epoch or data_batch > 0:
+                print(
+                    "ℹ️  Ignoring mid-epoch data checkpoint for epoch-boundary resume: "
+                    f"data=(epoch={data_epoch}, micro_batch={data_batch}), resume_epoch={start_epoch}."
+                )
+                train_stream.set_epoch(start_epoch)
+                data_resume_progress = None
+            elif data_batch == 0:
+                data_resume_progress = None
 
     if resume_from:
         lc_display = f"{last_completed_epoch + 1} (idx {last_completed_epoch})" if last_completed_epoch >= 0 else "none"
         print(f"  last_completed_epoch: {lc_display}")
 
     _interrupt_state["last_completed_epoch"] = last_completed_epoch
+
+    gan_active = False
 
     # Loss function - define as a pure function for compilation
     # Loss formula:
@@ -1940,6 +3616,8 @@ def train(
         speech_weight,
         awesome_weight,
         vad_reg_weight,
+        gan_weight,
+        fm_weight,
     ):
         """Compute training loss."""
         # Model expects spec as tuple (real, imag)
@@ -1949,6 +3627,37 @@ def train(
         out = model(noisy_spec, feat_erb, feat_spec)
         spec_loss = spectral_loss(out, target_spec)
         total_loss = spec_loss
+
+        out_wav = None
+        clean_wav = None
+        if (use_mrstft_loss or gan_active) and gan_istft is not None:
+            out_wav, clean_wav = specs_to_wavs(
+                out,
+                target_spec,
+                istft_fn=gan_istft,
+                n_fft=config.fft_size,
+                hop_length=config.hop_size,
+                target_len=gan_target_len,
+                force_fp32=use_mrstft_loss,
+            )
+
+        if use_mrstft_loss and mrstft_loss_fn is not None and out_wav is not None and clean_wav is not None:
+            mrstft_loss = mrstft_loss_fn(out_wav, clean_wav)
+            total_loss = total_loss + mrstft_loss
+
+        if gan_active and gan_loss_fns is not None and discriminator is not None and out_wav is not None:
+            gen_loss_fn, _ = gan_loss_fns
+            gan_out_wav = _gan_waveform_view(out_wav, use_fp16=bool(use_fp16))
+            gan_clean_wav = _gan_waveform_view(clean_wav, use_fp16=bool(use_fp16))
+            gan_out_wav, crop_start = _disc_crop_waveform(gan_out_wav, gan_disc_max_samples)
+            gan_clean_wav, _ = _disc_crop_waveform(gan_clean_wav, gan_disc_max_samples, crop_start)
+            disc_fake, fake_feats = discriminator(gan_out_wav)
+            disc_real, real_feats = discriminator(mx.stop_gradient(gan_clean_wav))
+            gan_g_loss = gen_loss_fn(disc_fake)
+            total_loss = total_loss + gan_weight * gan_g_loss
+            if feature_match_loss is not None and gan_fm_weight > 0:
+                fm_loss = feature_match_loss(real_feats, fake_feats)
+                total_loss = total_loss + fm_weight * fm_loss
 
         if use_awesome_loss:
             awesome_loss, _, _, _, _, _, _, _, _, _, _, _ = _compute_awesome_losses(
@@ -1969,6 +3678,26 @@ def train(
                 vad_proxy_enabled,
             )
             total_loss = total_loss + awesome_weight * awesome_loss
+
+        if use_pipeline_awesome_loss:
+            pipeline_loss, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _ = _compute_pipeline_awesome_losses(
+                noisy_real,
+                noisy_imag,
+                clean_real,
+                clean_imag,
+                out[0],
+                out[1],
+                snr,
+                vad_band_mask,
+                vad_band_bins,
+                awesome_mask_sharpness,
+                vad_z_threshold,
+                vad_z_slope,
+                vad_snr_gate_db,
+                vad_snr_gate_width,
+                vad_proxy_enabled,
+            )
+            total_loss = total_loss + awesome_weight * pipeline_loss
 
         if use_vad_loss:
             vad_loss, _, _, gate = _compute_vad_loss(
@@ -2019,9 +3748,353 @@ def train(
             )
             total_loss = total_loss + vad_reg_weight * vad_reg_loss
 
-        return total_loss
+        # Return model output as auxiliary data so callers can reuse it for
+        # logging/discriminator updates without triggering a second forward.
+        return total_loss, out
 
     loss_and_grad = nn.value_and_grad(model, loss_fn)
+
+    # -- Experimental compiled-GAN support ----------------------------------
+    # When experimental_compiled_gan is True, create a separate loss function
+    # with GAN paths always active (hardcoded True instead of the `gan_active`
+    # closure variable). mx.compile traces Python booleans at trace time, so
+    # `if gan_active` in the original loss_fn would be captured as False during
+    # pre-GAN tracing and never re-traced when it flips to True. A separate
+    # function ensures the compiled graph always includes generator adversarial
+    # loss paths.
+    loss_and_grad_gan = None
+    _compiled_gan_correctness_verified = False
+
+    if experimental_compiled_gan and gan_enabled:
+        print("  [EXPERIMENTAL] Compiled-GAN experiment enabled (gen-only, Variant B)")
+
+        def loss_fn_gan(
+            model,
+            noisy_real,
+            noisy_imag,
+            feat_erb,
+            feat_spec,
+            clean_real,
+            clean_imag,
+            snr,
+            vad_weight,
+            speech_weight,
+            awesome_weight,
+            vad_reg_weight,
+            gan_weight,
+            fm_weight,
+        ):
+            """Loss function with GAN generator paths always active (compiled-GAN experiment)."""
+            noisy_spec = (noisy_real, noisy_imag)
+            target_spec = (clean_real, clean_imag)
+
+            out = model(noisy_spec, feat_erb, feat_spec)
+            spec_loss = spectral_loss(out, target_spec)
+            total_loss = spec_loss
+
+            out_wav = None
+            clean_wav = None
+            # GAN always active: always compute waveforms
+            if gan_istft is not None:
+                out_wav, clean_wav = specs_to_wavs(
+                    out,
+                    target_spec,
+                    istft_fn=gan_istft,
+                    n_fft=config.fft_size,
+                    hop_length=config.hop_size,
+                    target_len=gan_target_len,
+                    force_fp32=use_mrstft_loss,
+                )
+
+            if use_mrstft_loss and mrstft_loss_fn is not None and out_wav is not None and clean_wav is not None:
+                mrstft_loss = mrstft_loss_fn(out_wav, clean_wav)
+                total_loss = total_loss + mrstft_loss
+
+            # GAN generator loss — always active (hardcoded)
+            if gan_loss_fns is not None and discriminator is not None and out_wav is not None:
+                gen_loss_fn, _ = gan_loss_fns
+                gan_out_wav = _gan_waveform_view(out_wav, use_fp16=bool(use_fp16))
+                gan_clean_wav = _gan_waveform_view(clean_wav, use_fp16=bool(use_fp16))
+                gan_out_wav, crop_start = _disc_crop_waveform(gan_out_wav, gan_disc_max_samples)
+                gan_clean_wav, _ = _disc_crop_waveform(gan_clean_wav, gan_disc_max_samples, crop_start)
+                disc_fake, fake_feats = discriminator(gan_out_wav)
+                disc_real, real_feats = discriminator(mx.stop_gradient(gan_clean_wav))
+                gan_g_loss = gen_loss_fn(disc_fake)
+                total_loss = total_loss + gan_weight * gan_g_loss
+                if feature_match_loss is not None and gan_fm_weight > 0:
+                    fm_loss = feature_match_loss(real_feats, fake_feats)
+                    total_loss = total_loss + fm_weight * fm_loss
+
+            if use_awesome_loss:
+                awesome_loss, _, _, _, _, _, _, _, _, _, _, _ = _compute_awesome_losses(
+                    noisy_real,
+                    noisy_imag,
+                    clean_real,
+                    clean_imag,
+                    out[0],
+                    out[1],
+                    snr,
+                    vad_band_mask,
+                    vad_band_bins,
+                    awesome_mask_sharpness,
+                    vad_z_threshold,
+                    vad_z_slope,
+                    vad_snr_gate_db,
+                    vad_snr_gate_width,
+                    vad_proxy_enabled,
+                )
+                total_loss = total_loss + awesome_weight * awesome_loss
+
+            if use_pipeline_awesome_loss:
+                pipeline_loss, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _ = _compute_pipeline_awesome_losses(
+                    noisy_real,
+                    noisy_imag,
+                    clean_real,
+                    clean_imag,
+                    out[0],
+                    out[1],
+                    snr,
+                    vad_band_mask,
+                    vad_band_bins,
+                    awesome_mask_sharpness,
+                    vad_z_threshold,
+                    vad_z_slope,
+                    vad_snr_gate_db,
+                    vad_snr_gate_width,
+                    vad_proxy_enabled,
+                )
+                total_loss = total_loss + awesome_weight * pipeline_loss
+
+            if use_vad_loss:
+                vad_loss, _, _, gate = _compute_vad_loss(
+                    clean_real,
+                    clean_imag,
+                    out[0],
+                    out[1],
+                    snr,
+                    vad_band_mask,
+                    vad_band_bins,
+                    vad_threshold,
+                    vad_margin,
+                    vad_snr_gate_db,
+                    vad_snr_gate_width,
+                    vad_z_threshold,
+                    vad_z_slope,
+                )
+                speech_loss = mx.array(0.0)
+                if vad_speech_loss_weight > 0:
+                    speech_loss = _compute_speech_band_logmag_loss(
+                        clean_real,
+                        clean_imag,
+                        out[0],
+                        out[1],
+                        vad_band_mask,
+                        vad_band_bins,
+                        gate,
+                    )
+                total_loss = total_loss + vad_weight * vad_loss + speech_weight * speech_loss
+
+            if use_vad_train_reg:
+                vad_reg_loss, _, _, _, _, _, _ = _compute_vad_reg_loss(
+                    clean_real,
+                    clean_imag,
+                    noisy_real,
+                    noisy_imag,
+                    out[0],
+                    out[1],
+                    snr,
+                    vad_band_mask,
+                    vad_band_bins,
+                    vad_threshold,
+                    vad_margin,
+                    vad_z_threshold,
+                    vad_z_slope,
+                    vad_snr_gate_db,
+                    vad_snr_gate_width,
+                )
+                total_loss = total_loss + vad_reg_weight * vad_reg_loss
+
+            return total_loss, out
+
+        loss_and_grad_gan = nn.value_and_grad(model, loss_fn_gan)
+
+    def _diagnose_nonfinite(
+        noisy_real: mx.array,
+        noisy_imag: mx.array,
+        feat_erb: mx.array,
+        feat_spec: mx.array,
+        clean_real: mx.array,
+        clean_imag: mx.array,
+        snr: mx.array,
+        debug_ctx: dict[str, Any],
+    ) -> None:
+        """Run a diagnostic forward pass with detailed finite checks."""
+        if debugger is None:
+            return
+        out = model((noisy_real, noisy_imag), feat_erb, feat_spec)
+        debugger.check("model.out_real", out[0], debug_ctx)
+        debugger.check("model.out_imag", out[1], debug_ctx)
+        spec_loss = spectral_loss(out, (clean_real, clean_imag))
+        debugger.check("spec_loss", spec_loss, debug_ctx)
+        if use_mrstft_loss and mrstft_loss_fn is not None and mrstft_istft is not None:
+            mrstft_loss = compute_mrstft_loss(
+                out,
+                (clean_real, clean_imag),
+                istft_fn=mrstft_istft,
+                loss_fn=mrstft_loss_fn,
+                n_fft=config.fft_size,
+                hop_length=config.hop_size,
+                target_len=mrstft_target_len,
+                force_fp32=True,
+            )
+            debugger.check("mrstft_loss", mrstft_loss, debug_ctx)
+        if gan_active and gan_loss_fns is not None and discriminator is not None and gan_istft is not None:
+            out_wav, clean_wav = specs_to_wavs(
+                out,
+                (clean_real, clean_imag),
+                istft_fn=gan_istft,
+                n_fft=config.fft_size,
+                hop_length=config.hop_size,
+                target_len=gan_target_len,
+                force_fp32=True,
+            )
+            gen_loss_fn, _ = gan_loss_fns
+            disc_fake, fake_feats = discriminator(out_wav)
+            disc_real, real_feats = discriminator(clean_wav)
+            gan_g_loss = gen_loss_fn(disc_fake)
+            debugger.check("gan_g_loss", gan_g_loss, debug_ctx)
+            if feature_match_loss is not None and gan_fm_weight > 0:
+                fm_loss = feature_match_loss(real_feats, fake_feats)
+                debugger.check("gan_fm_loss", fm_loss, debug_ctx)
+        if use_awesome_loss:
+            _compute_awesome_losses(
+                noisy_real,
+                noisy_imag,
+                clean_real,
+                clean_imag,
+                out[0],
+                out[1],
+                snr,
+                vad_band_mask,
+                vad_band_bins,
+                awesome_mask_sharpness,
+                vad_z_threshold,
+                vad_z_slope,
+                vad_snr_gate_db,
+                vad_snr_gate_width,
+                vad_proxy_enabled,
+                debug=debugger,
+                debug_ctx=debug_ctx,
+            )
+        if use_pipeline_awesome_loss:
+            _compute_pipeline_awesome_losses(
+                noisy_real,
+                noisy_imag,
+                clean_real,
+                clean_imag,
+                out[0],
+                out[1],
+                snr,
+                vad_band_mask,
+                vad_band_bins,
+                awesome_mask_sharpness,
+                vad_z_threshold,
+                vad_z_slope,
+                vad_snr_gate_db,
+                vad_snr_gate_width,
+                vad_proxy_enabled,
+                debug=debugger,
+                debug_ctx=debug_ctx,
+            )
+        if use_vad_loss:
+            _compute_vad_loss(
+                clean_real,
+                clean_imag,
+                out[0],
+                out[1],
+                snr,
+                vad_band_mask,
+                vad_band_bins,
+                vad_threshold,
+                vad_margin,
+                vad_snr_gate_db,
+                vad_snr_gate_width,
+                vad_z_threshold,
+                vad_z_slope,
+                debug=debugger,
+                debug_ctx=debug_ctx,
+            )
+            if vad_speech_loss_weight > 0:
+                gate = mx.ones((clean_real.shape[0], clean_real.shape[1]))
+                _compute_speech_band_logmag_loss(
+                    clean_real,
+                    clean_imag,
+                    out[0],
+                    out[1],
+                    vad_band_mask,
+                    vad_band_bins,
+                    gate,
+                    debug=debugger,
+                    debug_ctx=debug_ctx,
+                )
+        if use_vad_train_reg:
+            _compute_vad_reg_loss(
+                clean_real,
+                clean_imag,
+                noisy_real,
+                noisy_imag,
+                out[0],
+                out[1],
+                snr,
+                vad_band_mask,
+                vad_band_bins,
+                vad_threshold,
+                vad_margin,
+                vad_z_threshold,
+                vad_z_slope,
+                vad_snr_gate_db,
+                vad_snr_gate_width,
+                debug=debugger,
+                debug_ctx=debug_ctx,
+            )
+
+    # -- Compile-boundary shape guardrails ----------------------------------
+    def _assert_compile_boundary_shapes(
+        noisy: mx.array,
+        clean: mx.array,
+        expected_batch_size: int,
+        *,
+        check_dtype: bool = True,
+        expected_dtype: mx.Dtype = mx.float32,
+    ) -> None:
+        """Validate shape invariants at compile boundary to prevent retracing.
+
+        Must be called *before* entering a compiled function so that any
+        violation surfaces as a clear Python error rather than an opaque
+        retrace or silent correctness issue.
+        """
+        if noisy.shape[0] != expected_batch_size:
+            raise ValueError(
+                f"Compile boundary shape violation: batch_size={noisy.shape[0]}, "
+                f"expected={expected_batch_size}. This would trigger an expensive retrace."
+            )
+        if noisy.shape != clean.shape:
+            raise ValueError(f"Compile boundary shape mismatch: noisy={noisy.shape}, clean={clean.shape}")
+        if check_dtype and noisy.dtype != expected_dtype:
+            raise ValueError(f"Compile boundary dtype mismatch: got {noisy.dtype}, " f"expected {expected_dtype}")
+
+    _compile_retrace_count: int = 0
+
+    def _log_compile_retrace_warning(context: str = "") -> None:
+        """Log a warning when a compiled function retrace is detected.
+
+        Call this when a shape/dtype change is observed that would force MLX
+        to re-trace the compiled graph.
+        """
+        nonlocal _compile_retrace_count
+        _compile_retrace_count += 1
+        msg = f"[RETRACE WARNING #{_compile_retrace_count}] " f"Compiled function retrace detected. {context}"
+        tqdm.write(msg)
 
     # Compiled training step for performance optimization
     # Captures model and optimizer state for graph tracing
@@ -2042,6 +4115,8 @@ def train(
         speech_weight,
         awesome_weight,
         vad_reg_weight,
+        gan_weight,
+        fm_weight,
         max_grad_norm_val,
     ):
         """JIT-compiled training step for faster training.
@@ -2049,7 +4124,7 @@ def train(
         This compiles the forward pass, backward pass, and optimizer update
         into a single optimized computation graph.
         """
-        loss, grads = loss_and_grad(
+        (loss, out), grads = loss_and_grad(
             model,
             noisy_real,
             noisy_imag,
@@ -2062,12 +4137,138 @@ def train(
             speech_weight,
             awesome_weight,
             vad_reg_weight,
+            gan_weight,
+            fm_weight,
         )
         # Gradient clipping inline
         if max_grad_norm_val > 0:
             grads, _ = clip_grad_norm(grads, max_grad_norm_val)
         optimizer.update(model, grads)
-        return loss
+        return loss, out
+
+    # Compiled forward/backward step (no optimizer update).
+    # Used when gradient accumulation is enabled so updates remain aligned to
+    # optimizer-step semantics while still compiling the expensive fwd+bwd path.
+    @partial(mx.compile, inputs=[model.state], outputs=[model.state])
+    def compiled_loss_and_grad_step(
+        noisy_real,
+        noisy_imag,
+        feat_erb,
+        feat_spec,
+        clean_real,
+        clean_imag,
+        snr,
+        vad_weight,
+        speech_weight,
+        awesome_weight,
+        vad_reg_weight,
+        gan_weight,
+        fm_weight,
+    ):
+        (loss, out), grads = loss_and_grad(
+            model,
+            noisy_real,
+            noisy_imag,
+            feat_erb,
+            feat_spec,
+            clean_real,
+            clean_imag,
+            snr,
+            vad_weight,
+            speech_weight,
+            awesome_weight,
+            vad_reg_weight,
+            gan_weight,
+            fm_weight,
+        )
+        return loss, out, grads
+
+    # -- Compiled GAN training steps (experimental) -------------------------
+    # Mirror of compiled_step / compiled_loss_and_grad_step but using
+    # loss_and_grad_gan so the generator adversarial path is always traced.
+    compiled_gan_step = None
+    compiled_gan_loss_and_grad_step = None
+
+    if experimental_compiled_gan and loss_and_grad_gan is not None:
+        gan_state = [model.state, optimizer.state]
+        _lag_gan = loss_and_grad_gan  # capture non-None ref for Pyright
+
+        @partial(mx.compile, inputs=gan_state, outputs=gan_state)
+        def _compiled_gan_step(
+            noisy_real,
+            noisy_imag,
+            feat_erb,
+            feat_spec,
+            clean_real,
+            clean_imag,
+            snr,
+            vad_weight,
+            speech_weight,
+            awesome_weight,
+            vad_reg_weight,
+            gan_weight,
+            fm_weight,
+            max_grad_norm_val,
+        ):
+            """Compiled gen step with GAN paths always active (experimental)."""
+            (loss, out), grads = _lag_gan(
+                model,
+                noisy_real,
+                noisy_imag,
+                feat_erb,
+                feat_spec,
+                clean_real,
+                clean_imag,
+                snr,
+                vad_weight,
+                speech_weight,
+                awesome_weight,
+                vad_reg_weight,
+                gan_weight,
+                fm_weight,
+            )
+            if max_grad_norm_val > 0:
+                grads, _ = clip_grad_norm(grads, max_grad_norm_val)
+            optimizer.update(model, grads)
+            return loss, out
+
+        @partial(mx.compile, inputs=[model.state], outputs=[model.state])
+        def _compiled_gan_loss_and_grad_step(
+            noisy_real,
+            noisy_imag,
+            feat_erb,
+            feat_spec,
+            clean_real,
+            clean_imag,
+            snr,
+            vad_weight,
+            speech_weight,
+            awesome_weight,
+            vad_reg_weight,
+            gan_weight,
+            fm_weight,
+        ):
+            """Compiled gen fwd+bwd with GAN paths always active (experimental)."""
+            (loss, out), grads = _lag_gan(
+                model,
+                noisy_real,
+                noisy_imag,
+                feat_erb,
+                feat_spec,
+                clean_real,
+                clean_imag,
+                snr,
+                vad_weight,
+                speech_weight,
+                awesome_weight,
+                vad_reg_weight,
+                gan_weight,
+                fm_weight,
+            )
+            return loss, out, grads
+
+        compiled_gan_step = _compiled_gan_step
+        compiled_gan_loss_and_grad_step = _compiled_gan_loss_and_grad_step
 
     def run_validation(label: str = "  Validating", *, do_vad_eval: bool = False) -> float:
         """Run validation on the fixed validation split and return average loss."""
@@ -2081,12 +4282,15 @@ def train(
 
         valid_loss = 0.0
         valid_spec_loss = 0.0
+        valid_mrstft_loss = 0.0
         valid_vad_loss = 0.0
         valid_speech_loss = 0.0
         valid_awesome_loss = 0.0
         valid_awesome_speech = 0.0
         valid_awesome_noise = 0.0
         valid_awesome_smooth = 0.0
+        valid_music_supp_loss = 0.0
+        valid_mask_sat_loss = 0.0
         valid_mask_mean = 0.0
         valid_mask_high = 0.0
         valid_mask_low = 0.0
@@ -2103,6 +4307,7 @@ def train(
         valid_gate_pct = 0.0
         valid_residual = 0.0
         valid_sisdr = 0.0
+        bucket_metrics: dict[str, dict[str, float]] = {}
         vad_eval_p_ref = 0.0
         vad_eval_p_out = 0.0
         vad_eval_delta = 0.0
@@ -2114,12 +4319,22 @@ def train(
         if max_valid_batches is not None:
             valid_steps = min(valid_steps, max_valid_batches)
 
-        valid_loader = PrefetchDataLoader(
-            dataset,
-            batch_size=batch_size,
-            num_workers=2,
-            prefetch_factor=1,
-        )
+        if use_mlx_stream:
+            valid_loader = MLXDataStream(
+                dataset=dataset,
+                batch_size=batch_size,
+                prefetch_size=max(1, prefetch_size // 2),
+                num_workers=max(1, min(num_workers, 4)),
+            )
+            valid_loader.set_split("valid")
+            valid_loader.set_epoch(0)
+        else:
+            valid_loader = PrefetchDataLoader(
+                dataset,
+                batch_size=batch_size,
+                num_workers=max(1, num_workers),
+                prefetch_factor=2,
+            )
 
         valid_pbar = tqdm(
             valid_loader,
@@ -2151,18 +4366,49 @@ def train(
             feat_erb = batch["feat_erb"]
             feat_spec = batch["feat_spec"]
             snr = batch["snr"]
+            debug_ctx = {
+                "phase": "valid",
+                "epoch": epoch,
+                "batch": batch_idx,
+                "global_step": global_step,
+            }
+            if debugger is not None:
+                debugger.check("batch.noisy_real", noisy_real, debug_ctx)
+                debugger.check("batch.noisy_imag", noisy_imag, debug_ctx)
+                debugger.check("batch.clean_real", clean_real, debug_ctx)
+                debugger.check("batch.clean_imag", clean_imag, debug_ctx)
+                debugger.check("batch.feat_erb", feat_erb, debug_ctx)
+                debugger.check("batch.feat_spec", feat_spec, debug_ctx)
+                debugger.check("batch.snr", snr, debug_ctx)
 
             # Model expects spec as tuple (real, imag)
             noisy_spec = (noisy_real, noisy_imag)
             target_spec = (clean_real, clean_imag)
 
             out = model(noisy_spec, feat_erb, feat_spec)
+            if debugger is not None:
+                debugger.check("model.out_real", out[0], debug_ctx)
+                debugger.check("model.out_imag", out[1], debug_ctx)
             spec_loss = spectral_loss(out, target_spec)
+            mrstft_loss = mx.array(0.0)
+            if use_mrstft_loss and mrstft_loss_fn is not None and mrstft_istft is not None:
+                mrstft_loss = compute_mrstft_loss(
+                    out,
+                    target_spec,
+                    istft_fn=mrstft_istft,
+                    loss_fn=mrstft_loss_fn,
+                    n_fft=config.fft_size,
+                    hop_length=config.hop_size,
+                    target_len=mrstft_target_len,
+                    force_fp32=True,
+                )
 
             awesome_loss = mx.array(0.0)
             awesome_speech = mx.array(0.0)
             awesome_noise = mx.array(0.0)
             awesome_smooth = mx.array(0.0)
+            music_suppression_loss = mx.array(0.0)
+            mask_saturation_loss = mx.array(0.0)
             mask = mx.array(0.0)
             proxy_frame = mx.array(0.0)
             speech_ratio = mx.array(0.0)
@@ -2202,6 +4448,46 @@ def train(
                     vad_snr_gate_db,
                     vad_snr_gate_width,
                     vad_proxy_enabled,
+                    debug=debugger,
+                    debug_ctx=debug_ctx,
+                )
+
+            if use_pipeline_awesome_loss:
+                (
+                    awesome_loss,
+                    awesome_speech,
+                    awesome_noise,
+                    awesome_smooth,
+                    music_suppression_loss,
+                    mask_saturation_loss,
+                    mask,
+                    proxy_frame,
+                    speech_ratio,
+                    music_gate,
+                    musicness,
+                    _,  # vocal_gate
+                    _,  # instrument_gate
+                    mod_energy,
+                    energy_boost,
+                    snr_boost,
+                ) = _compute_pipeline_awesome_losses(
+                    noisy_real,
+                    noisy_imag,
+                    clean_real,
+                    clean_imag,
+                    out[0],
+                    out[1],
+                    snr,
+                    vad_band_mask,
+                    vad_band_bins,
+                    awesome_mask_sharpness,
+                    vad_z_threshold,
+                    vad_z_slope,
+                    vad_snr_gate_db,
+                    vad_snr_gate_width,
+                    vad_proxy_enabled,
+                    debug=debugger,
+                    debug_ctx=debug_ctx,
                 )
 
             if use_vad_loss:
@@ -2219,6 +4505,8 @@ def train(
                     vad_snr_gate_width,
                     vad_z_threshold,
                     vad_z_slope,
+                    debug=debugger,
+                    debug_ctx=debug_ctx,
                 )
                 speech_loss = mx.array(0.0)
                 if vad_speech_loss_weight > 0:
@@ -2230,6 +4518,8 @@ def train(
                         vad_band_mask,
                         vad_band_bins,
                         gate,
+                        debug=debugger,
+                        debug_ctx=debug_ctx,
                     )
             else:
                 vad_loss = mx.array(0.0)
@@ -2256,59 +4546,151 @@ def train(
                     vad_z_slope,
                     vad_snr_gate_db,
                     vad_snr_gate_width,
+                    debug=debugger,
+                    debug_ctx=debug_ctx,
                 )
 
-            awesome_weight_val = awesome_loss_weight
-            if use_awesome_loss and awesome_warmup_steps > 0:
-                awesome_weight_val = awesome_loss_weight * min(1.0, global_step / max(awesome_warmup_steps, 1))
+            awesome_weight_val = epoch_awesome_loss_weight
+            if (use_awesome_loss or use_pipeline_awesome_loss) and awesome_warmup_steps > 0:
+                awesome_weight_val = epoch_awesome_loss_weight * min(1.0, global_step / max(awesome_warmup_steps, 1))
 
             loss = spec_loss
-            if use_awesome_loss:
+            if use_mrstft_loss:
+                loss = loss + mrstft_loss
+            if use_awesome_loss or use_pipeline_awesome_loss:
                 loss = loss + awesome_weight_val * awesome_loss
             if use_vad_loss:
-                loss = loss + vad_loss_weight * vad_loss + vad_speech_loss_weight * speech_loss
+                loss = loss + epoch_vad_loss_weight * vad_loss + epoch_vad_speech_loss_weight * speech_loss
 
             residual = mx.mean((out[0] - clean_real) ** 2 + (out[1] - clean_imag) ** 2)
+            residual_by_sample = mx.mean((out[0] - clean_real) ** 2 + (out[1] - clean_imag) ** 2, axis=(1, 2))
 
-            loss_val = float(loss)
-            spec_loss_val = float(spec_loss)
-            vad_loss_val = float(vad_loss)
-            speech_loss_val = float(speech_loss)
-            awesome_loss_val = float(awesome_loss)
-            awesome_speech_val = float(awesome_speech)
-            awesome_noise_val = float(awesome_noise)
-            awesome_smooth_val = float(awesome_smooth)
-            vad_reg_loss_val = float(vad_reg_loss)
-            residual_val = float(residual)
+            (
+                loss_val,
+                spec_loss_val,
+                mrstft_loss_val,
+                vad_loss_val,
+                speech_loss_val,
+                awesome_loss_val,
+                awesome_speech_val,
+                awesome_noise_val,
+                awesome_smooth_val,
+                music_suppression_loss_val,
+                mask_saturation_loss_val,
+                vad_reg_loss_val,
+                residual_val,
+            ) = _batch_to_float(
+                loss,
+                spec_loss,
+                mrstft_loss,
+                vad_loss,
+                speech_loss,
+                awesome_loss,
+                awesome_speech,
+                awesome_noise,
+                awesome_smooth,
+                music_suppression_loss,
+                mask_saturation_loss,
+                vad_reg_loss,
+                residual,
+            )
 
             valid_loss += loss_val
             valid_spec_loss += spec_loss_val
+            valid_mrstft_loss += mrstft_loss_val
             valid_vad_loss += vad_loss_val
             valid_speech_loss += speech_loss_val
             valid_awesome_loss += awesome_loss_val
             valid_awesome_speech += awesome_speech_val
             valid_awesome_noise += awesome_noise_val
             valid_awesome_smooth += awesome_smooth_val
+            valid_music_supp_loss += music_suppression_loss_val
+            valid_mask_sat_loss += mask_saturation_loss_val
             valid_vad_reg_loss += vad_reg_loss_val
             valid_residual += residual_val
             num_valid_batches += 1
 
             if use_vad_loss:
-                valid_p_ref += float(mx.mean(p_ref))
-                valid_p_out += float(mx.mean(p_out))
-                valid_gate_pct += 100.0 * float(mx.mean(mx.where(gate > 0.0, 1.0, 0.0)))
+                _p_ref_m = mx.mean(p_ref)
+                _p_out_m = mx.mean(p_out)
+                _gate_m = mx.mean(mx.where(gate > 0.0, 1.0, 0.0))
+                _p_ref_f, _p_out_f, _gate_f = _batch_to_float(_p_ref_m, _p_out_m, _gate_m)
+                valid_p_ref += _p_ref_f
+                valid_p_out += _p_out_f
+                valid_gate_pct += 100.0 * _gate_f
 
-            if use_awesome_loss:
-                mask_mean = float(mx.mean(mask))
-                mask_high = 100.0 * float(mx.mean(mx.where(mask > 0.8, 1.0, 0.0)))
-                mask_low = 100.0 * float(mx.mean(mx.where(mask < 0.2, 1.0, 0.0)))
-                proxy_mean = float(mx.mean(proxy_frame))
-                speech_ratio_mean = float(mx.mean(speech_ratio))
-                music_gate_mean = float(mx.mean(music_gate))
-                musicness_mean = float(mx.mean(musicness))
-                mod_energy_mean = float(mx.mean(mod_energy))
-                energy_boost_mean = float(mx.mean(energy_boost))
-                snr_boost_mean = float(mx.mean(snr_boost))
+            if emit_detailed_metrics:
+                snr_np = np.asarray(snr, dtype=np.float32).reshape(-1)
+                residual_np = np.asarray(residual_by_sample, dtype=np.float32).reshape(-1)
+                if use_vad_loss:
+                    vad_delta_np = np.asarray(
+                        mx.mean(mx.maximum(p_ref - p_out - vad_margin, 0.0), axis=1),
+                        dtype=np.float32,
+                    )
+                else:
+                    vad_delta_np = np.zeros_like(snr_np, dtype=np.float32)
+                if use_awesome_loss or use_pipeline_awesome_loss:
+                    if isinstance(musicness, mx.array):
+                        musicness_np = np.asarray(musicness, dtype=np.float32).reshape(-1)
+                    else:
+                        musicness_np = np.zeros_like(snr_np, dtype=np.float32)
+                    if musicness_np.shape[0] != snr_np.shape[0]:
+                        musicness_np = np.full_like(snr_np, float(np.mean(musicness_np)), dtype=np.float32)
+                else:
+                    musicness_np = np.zeros_like(snr_np, dtype=np.float32)
+
+                for i, snr_val in enumerate(snr_np):
+                    bucket = _snr_bucket_name(float(snr_val))
+                    metric = bucket_metrics.setdefault(
+                        bucket,
+                        {
+                            "count": 0.0,
+                            "residual_sum": 0.0,
+                            "vad_delta_sum": 0.0,
+                            "musicness_sum": 0.0,
+                        },
+                    )
+                    metric["count"] += 1.0
+                    metric["residual_sum"] += float(residual_np[i])
+                    metric["vad_delta_sum"] += float(vad_delta_np[i])
+                    metric["musicness_sum"] += float(musicness_np[i])
+
+            if use_awesome_loss and emit_detailed_metrics:
+                _mask_m = mx.mean(mask)
+                _mask_hi = mx.mean(mx.where(mask > 0.8, 1.0, 0.0))
+                _mask_lo = mx.mean(mx.where(mask < 0.2, 1.0, 0.0))
+                _proxy_m = mx.mean(proxy_frame)
+                _sr_m = mx.mean(speech_ratio)
+                _mg_m = mx.mean(music_gate)
+                _mu_m = mx.mean(musicness)
+                _me_m = mx.mean(mod_energy)
+                _eb_m = mx.mean(energy_boost)
+                _sb_m = mx.mean(snr_boost)
+                (
+                    mask_mean,
+                    mask_high,
+                    mask_low,
+                    proxy_mean,
+                    speech_ratio_mean,
+                    music_gate_mean,
+                    musicness_mean,
+                    mod_energy_mean,
+                    energy_boost_mean,
+                    snr_boost_mean,
+                ) = _batch_to_float(
+                    _mask_m,
+                    _mask_hi,
+                    _mask_lo,
+                    _proxy_m,
+                    _sr_m,
+                    _mg_m,
+                    _mu_m,
+                    _me_m,
+                    _eb_m,
+                    _sb_m,
+                )
+                mask_high *= 100.0
+                mask_low *= 100.0
 
                 valid_mask_mean += mask_mean
                 valid_mask_high += mask_high
@@ -2345,7 +4727,7 @@ def train(
                 elif vad_eval_mode == "silero":
                     if silero_vad is None or silero_istft is None:
                         raise RuntimeError("Silero VAD requested but not initialized")
-                    vad_start = time.time()
+                    vad_start = time.perf_counter()
                     clean_wav = silero_istft(target_spec, n_fft=config.fft_size, hop_length=config.hop_size)
                     out_wav = silero_istft(out, n_fft=config.fft_size, hop_length=config.hop_size)
                     mx.eval(clean_wav, out_wav)
@@ -2358,14 +4740,17 @@ def train(
                     vad_eval_delta += float(np.mean(np.maximum(p_ref_batch - p_out_batch - vad_margin, 0.0)))
                     vad_eval_batches_done += 1
                     vad_eval_clips += int(len(p_ref_batch))
-                    vad_eval_seconds += time.time() - vad_start
+                    vad_eval_seconds += time.perf_counter() - vad_start
 
             if sisdr_fn is not None:
                 si_sdr_fn, istft_fn = sisdr_fn
                 clean_wav = istft_fn(target_spec, n_fft=config.fft_size, hop_length=config.hop_size)
                 out_wav = istft_fn(out, n_fft=config.fft_size, hop_length=config.hop_size)
                 sisdr_val = float(si_sdr_fn(out_wav, clean_wav))
-                valid_sisdr += sisdr_val
+                if math.isfinite(sisdr_val):
+                    valid_sisdr += sisdr_val
+                else:
+                    print("⚠️  SI-SDR non-finite; skipping metric for this batch")
 
             valid_pbar.set_postfix(
                 loss=f"{loss_val:.4f}",
@@ -2379,28 +4764,32 @@ def train(
 
         if num_valid_batches > 0:
             avg_spec = valid_spec_loss / num_valid_batches
+            avg_mrstft = valid_mrstft_loss / num_valid_batches
             avg_vad = valid_vad_loss / num_valid_batches
             avg_speech = valid_speech_loss / num_valid_batches
             avg_awesome = valid_awesome_loss / num_valid_batches
             avg_awesome_speech = valid_awesome_speech / num_valid_batches
             avg_awesome_noise = valid_awesome_noise / num_valid_batches
             avg_awesome_smooth = valid_awesome_smooth / num_valid_batches
+            avg_music_supp = valid_music_supp_loss / num_valid_batches
+            avg_mask_sat = valid_mask_sat_loss / num_valid_batches
             avg_vad_reg = valid_vad_reg_loss / num_valid_batches
             avg_residual = valid_residual / num_valid_batches
             avg_p_ref = valid_p_ref / num_valid_batches if use_vad_loss else 0.0
             avg_p_out = valid_p_out / num_valid_batches if use_vad_loss else 0.0
             avg_gate = valid_gate_pct / num_valid_batches if use_vad_loss else 0.0
             avg_sisdr = valid_sisdr / num_valid_batches if eval_sisdr else None
-            avg_mask_mean = valid_mask_mean / num_valid_batches if use_awesome_loss else 0.0
-            avg_mask_high = valid_mask_high / num_valid_batches if use_awesome_loss else 0.0
-            avg_mask_low = valid_mask_low / num_valid_batches if use_awesome_loss else 0.0
-            avg_proxy = valid_proxy_mean / num_valid_batches if use_awesome_loss else 0.0
-            avg_speech_ratio = valid_speech_ratio / num_valid_batches if use_awesome_loss else 0.0
-            avg_music_gate = valid_music_gate / num_valid_batches if use_awesome_loss else 0.0
-            avg_musicness = valid_musicness / num_valid_batches if use_awesome_loss else 0.0
-            avg_mod = valid_mod_energy / num_valid_batches if use_awesome_loss else 0.0
-            avg_energy_boost = valid_energy_boost / num_valid_batches if use_awesome_loss else 0.0
-            avg_snr_boost = valid_snr_boost / num_valid_batches if use_awesome_loss else 0.0
+            use_awesome_metrics = use_awesome_loss or use_pipeline_awesome_loss
+            avg_mask_mean = valid_mask_mean / num_valid_batches if use_awesome_metrics else 0.0
+            avg_mask_high = valid_mask_high / num_valid_batches if use_awesome_metrics else 0.0
+            avg_mask_low = valid_mask_low / num_valid_batches if use_awesome_metrics else 0.0
+            avg_proxy = valid_proxy_mean / num_valid_batches if use_awesome_metrics else 0.0
+            avg_speech_ratio = valid_speech_ratio / num_valid_batches if use_awesome_metrics else 0.0
+            avg_music_gate = valid_music_gate / num_valid_batches if use_awesome_metrics else 0.0
+            avg_musicness = valid_musicness / num_valid_batches if use_awesome_metrics else 0.0
+            avg_mod = valid_mod_energy / num_valid_batches if use_awesome_metrics else 0.0
+            avg_energy_boost = valid_energy_boost / num_valid_batches if use_awesome_metrics else 0.0
+            avg_snr_boost = valid_snr_boost / num_valid_batches if use_awesome_metrics else 0.0
             avg_vad_eval_p_ref = (
                 vad_eval_p_ref / vad_eval_batches_done if do_vad_eval and vad_eval_batches_done > 0 else 0.0
             )
@@ -2413,11 +4802,21 @@ def train(
             vad_eval_time = vad_eval_seconds
             vad_eval_clips_total = vad_eval_clips
 
-            if use_vad_loss or eval_sisdr or use_awesome_loss or use_vad_train_reg or do_vad_eval:
+            if (
+                use_vad_loss
+                or eval_sisdr
+                or use_awesome_loss
+                or use_pipeline_awesome_loss
+                or use_vad_train_reg
+                or do_vad_eval
+                or use_mrstft_loss
+            ):
                 extras = [f"spec={avg_spec:.4f}", f"resid={avg_residual:.4f}"]
+                if use_mrstft_loss:
+                    extras.append(f"mrstft={avg_mrstft:.4f}")
                 if use_vad_loss:
                     extras.extend([f"vad={avg_vad:.4f}", f"speech={avg_speech:.4f}"])
-                if use_awesome_loss:
+                if use_awesome_metrics:
                     extras.extend(
                         [
                             f"awesome={avg_awesome:.4f}",
@@ -2426,13 +4825,20 @@ def train(
                             f"aw_sm={avg_awesome_smooth:.4f}",
                         ]
                     )
+                if use_pipeline_awesome_loss:
+                    extras.extend(
+                        [
+                            f"mus_sup={avg_music_supp:.4f}",
+                            f"mask_sat={avg_mask_sat:.4f}",
+                        ]
+                    )
                 if use_vad_train_reg:
                     extras.append(f"vad_reg={avg_vad_reg:.4f}")
                 if use_vad_loss:
                     extras.append(f"p_ref={avg_p_ref:.2f}")
                     extras.append(f"p_out={avg_p_out:.2f}")
                     extras.append(f"gate={avg_gate:.0f}%")
-                if use_awesome_loss:
+                if use_awesome_metrics:
                     extras.extend(
                         [
                             f"mask={avg_mask_mean:.2f}",
@@ -2458,28 +4864,123 @@ def train(
                     extras.append(f"si-sdr={avg_sisdr:.2f}dB")
                 print(f"{label} metrics: " + " | ".join(extras))
 
+            if bucket_metrics:
+                bucket_parts = []
+                bucket_summary: dict[str, dict[str, float]] = {}
+                for bucket_name in sorted(bucket_metrics.keys()):
+                    bm = bucket_metrics[bucket_name]
+                    count = max(bm["count"], 1.0)
+                    residual_mean = bm["residual_sum"] / count
+                    vad_delta_mean = bm["vad_delta_sum"] / count
+                    musicness_mean = bm["musicness_sum"] / count
+                    bucket_summary[bucket_name] = {
+                        "count": float(count),
+                        "residual": float(residual_mean),
+                        "vad_delta": float(vad_delta_mean),
+                        "musicness": float(musicness_mean),
+                    }
+                    bucket_parts.append(
+                        f"{bucket_name}:n={int(count)} resid={residual_mean:.4f} vadΔ={vad_delta_mean:.4f} mus={musicness_mean:.3f}"
+                    )
+                print(f"{label} buckets: " + " | ".join(bucket_parts))
+
+                ablation_row = {
+                    "epoch": int(epoch + 1),
+                    "stage_index": int(active_stage_index),
+                    "stage_name": active_stage_name,
+                    "dynamic_loss": dynamic_loss,
+                    "train_mode": train_mode,
+                    "valid_loss": float(valid_loss / max(num_valid_batches, 1)),
+                    "awesome": {
+                        "music_suppression": float(avg_music_supp),
+                        "mask_saturation": float(avg_mask_sat),
+                    },
+                    "buckets": bucket_summary,
+                }
+                ablation_path = ckpt_dir / "ablation_metrics.jsonl"
+                with open(ablation_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(ablation_row) + "\n")
+
         return valid_loss / max(num_valid_batches, 1)
 
-    # Flag to use compiled step (can be disabled for debugging)
-    use_compiled_step = True
-    print(f"  Using compiled training step: {use_compiled_step}")
+    # Base compiled-step eligibility (epoch-level mode selection may still choose eager).
+    # Gradient accumulation is supported via compiled fwd+bwd with eager optimizer updates.
+    base_compiled_step_enabled = not (debug_numerics or nan_skip_batch)
+    compiled_disable_reasons: list[str] = []
+    if debug_numerics:
+        compiled_disable_reasons.append("debug_numerics")
+    if nan_skip_batch:
+        compiled_disable_reasons.append("nan_skip_batch")
+
+    print(f"  Compiled-step base eligibility: {base_compiled_step_enabled}")
+    if base_compiled_step_enabled:
+        if gan_enabled and gan_start_epoch <= 0 and not experimental_compiled_gan:
+            print("  GAN starts at epoch 1: training will run eager from the first epoch")
+        elif gan_enabled and gan_start_epoch <= 0 and experimental_compiled_gan:
+            print("  [EXPERIMENTAL] GAN starts at epoch 1: compiled-GAN experiment keeps compiled mode")
+        elif gan_enabled and not experimental_compiled_gan:
+            print(
+                "  GAN delayed start: training will use compiled mode until GAN activation "
+                f"(gan_start_epoch={gan_start_epoch + 1})"
+            )
+        elif gan_enabled and experimental_compiled_gan:
+            print(
+                "  [EXPERIMENTAL] GAN delayed start: compiled-GAN experiment will keep compiled "
+                f"mode through GAN activation (gan_start_epoch={gan_start_epoch + 1})"
+            )
+    else:
+        joined = ", ".join(compiled_disable_reasons) if compiled_disable_reasons else "unknown"
+        print(f"  Compiled-step disabled by: {joined}")
+        if experimental_compiled_gan:
+            print(
+                "  [EXPERIMENTAL] WARNING: compiled-GAN experiment requested but compiled mode "
+                f"is globally disabled ({joined}). Experiment will not activate."
+            )
+    if grad_accumulation_steps > 1:
+        print(
+            f"  Gradient accumulation: {grad_accumulation_steps} steps (effective batch = {batch_size * grad_accumulation_steps})"
+        )
+        if base_compiled_step_enabled:
+            print("  Gradient accumulation: compiled forward/backward enabled; optimizer updates remain accumulated")
+        else:
+            print("  Gradient accumulation: compiled training step disabled")
+    if nan_skip_batch:
+        print("  nan-skip-batch: enabled (will skip updates on non-finite loss/grads)")
 
     # Register SIGINT handler for graceful shutdown
-    _register_sigint_handler(model, optimizer, ckpt_dir, train_config, last_completed_epoch=last_completed_epoch)
+    _register_sigint_handler(
+        model,
+        optimizer,
+        ckpt_dir,
+        train_config,
+        discriminator=discriminator,
+        disc_optimizer=disc_optimizer,
+        last_completed_epoch=last_completed_epoch,
+    )
     print("  SIGINT handler registered (CTRL+C will save checkpoint before exit)")
 
     # Training loop
+    # Sync cadence derived from sync_mode (see docs/SYNC_BARRIER_POLICY.md)
+    mode = SyncMode(sync_mode)
+    emit_detailed_metrics = mode.emit_detailed_metrics
     print(f"\nStarting training (epoch {start_epoch + 1} to {epochs})...")
+    print(f"  Sync mode: {sync_mode} (eval_frequency={eval_frequency})")
     print(f"  Warmup steps: {warmup_steps:,}")
     print(f"  Est. total steps: {total_steps:,}")
     print()
 
-    global_step = resume_global_step if resume_from else start_epoch * steps_per_epoch
+    global_step = resume_global_step if resume_from else start_epoch * optimizer_steps_per_epoch
     final_epoch = start_epoch
     last_completed_epoch = max(last_completed_epoch, start_epoch - 1)
     avg_train_loss = float("nan")
     last_valid_loss: float | None = None
     last_valid_epoch: int | None = None
+    train_mode: Literal["COMPILED", "EAGER"] | None = None
+    active_stage_name = "default"
+    active_stage_index = 0
+    epoch_awesome_loss_weight = base_awesome_loss_weight
+    epoch_vad_loss_weight = base_vad_loss_weight
+    epoch_vad_speech_loss_weight = base_vad_speech_loss_weight
 
     max_train_batches = train_config.get("max_train_batches")
     max_valid_batches = train_config.get("max_valid_batches")
@@ -2489,23 +4990,150 @@ def train(
     print(f"Starting training at epoch {start_display} | last_completed_epoch={lc_display}")
 
     for epoch in range(start_epoch, epochs):
-        epoch_start = time.time()
+        epoch_start = time.perf_counter()
         final_epoch = epoch
+
+        active_stage = _resolve_pipeline_stage(epoch, pipeline_stage_defs)
+        active_stage_index = int(active_stage["index"])
+        active_stage_name = str(active_stage["name"])
+        epoch_awesome_loss_weight = float(
+            active_stage["awesome_loss_weight"]
+            if active_stage["awesome_loss_weight"] is not None
+            else base_awesome_loss_weight
+        )
+        epoch_vad_loss_weight = float(
+            active_stage["vad_loss_weight"] if active_stage["vad_loss_weight"] is not None else base_vad_loss_weight
+        )
+        epoch_vad_speech_loss_weight = float(
+            active_stage["vad_speech_loss_weight"]
+            if active_stage["vad_speech_loss_weight"] is not None
+            else base_vad_speech_loss_weight
+        )
+        train_config["pipeline_stage_active"] = {
+            "index": active_stage_index,
+            "name": active_stage_name,
+            "start_epoch": int(active_stage["start_epoch"]),
+            "awesome_loss_weight": epoch_awesome_loss_weight,
+            "vad_loss_weight": epoch_vad_loss_weight,
+            "vad_speech_loss_weight": epoch_vad_speech_loss_weight,
+        }
+        print(
+            "  Stage "
+            f"{active_stage_index} ({active_stage_name}) | "
+            f"awesome_w={epoch_awesome_loss_weight:.4f} "
+            f"vad_w={epoch_vad_loss_weight:.4f} speech_w={epoch_vad_speech_loss_weight:.4f}"
+        )
 
         # Set epoch for reproducible shuffling
         dataset.set_split("train")
         dataset.set_epoch(epoch)
 
+        # ====== Curriculum Learning Schedule ======
+        if curriculum_warmup_epochs > 0:
+            target_p_extreme = p_extreme_snr if p_extreme_snr is not None else config.p_extreme_snr
+            target_p_very_low = p_very_low_snr if p_very_low_snr is not None else config.p_very_low_snr
+            target_p_interfer = p_interfer_speech if p_interfer_speech is not None else config.p_interfer_speech
+            cur_p_extreme, cur_p_very_low, cur_p_interfer = curriculum_schedule(
+                epoch=epoch,
+                total_epochs=epochs,
+                warmup_epochs=curriculum_warmup_epochs,
+                target_p_extreme=target_p_extreme,
+                target_p_very_low=target_p_very_low,
+                target_p_interfer=target_p_interfer,
+            )
+            # Update dataset config with scheduled probabilities
+            dataset.config.p_extreme_snr = cur_p_extreme
+            dataset.config.p_very_low_snr = cur_p_very_low
+            dataset.config.p_interfer_speech = cur_p_interfer
+            if epoch < curriculum_warmup_epochs or (epoch == curriculum_warmup_epochs and verbose):
+                print(
+                    f"  Curriculum (epoch {epoch + 1}/{curriculum_warmup_epochs}): "
+                    f"p_extreme={cur_p_extreme:.3f}, p_very_low={cur_p_very_low:.3f}, p_interfer={cur_p_interfer:.3f}"
+                )
+
+        gan_scale = 0.0
+        if gan_enabled and epoch >= gan_start_epoch:
+            if gan_ramp_epochs > 0:
+                gan_scale = min(1.0, (epoch - gan_start_epoch + 1) / gan_ramp_epochs)
+            else:
+                gan_scale = 1.0
+        gan_weight = gan_adv_weight * gan_scale
+        fm_weight = gan_fm_weight * gan_scale
+        gan_active = gan_enabled and gan_scale > 0.0
+
+        # GAN epochs MUST sync every step to prevent lazy-graph accumulation.
+        # With eval_frequency > 1 the discriminator forward/backward graphs
+        # pile up across batches, easily exceeding unified-memory limits.
+        epoch_eval_frequency = eval_frequency
+        if gan_active and eval_frequency > 1:
+            epoch_eval_frequency = 1
+            if epoch == gan_start_epoch:
+                print(
+                    f"  GAN active: overriding eval_frequency {eval_frequency} → 1 "
+                    "(mandatory per-step sync to prevent OOM from graph accumulation)"
+                )
+
+        prev_train_mode = train_mode
+        train_mode, epoch_use_compiled_step = resolve_epoch_train_mode(
+            compiled_step_base_enabled=base_compiled_step_enabled,
+            gan_enabled=gan_enabled,
+            gan_active=gan_active,
+            previous_mode=train_mode,
+            experimental_compiled_gan=experimental_compiled_gan,
+        )
+        if not experimental_compiled_gan:
+            if prev_train_mode == _TRAIN_MODE_EAGER and train_mode != _TRAIN_MODE_EAGER:
+                raise RuntimeError(
+                    "Invariant violation: training mode switched from EAGER back to COMPILED. "
+                    "Mode switches must be one-way to preserve deterministic behavior after GAN activation."
+                )
+        if gan_active and epoch_use_compiled_step and not experimental_compiled_gan:
+            raise RuntimeError(
+                "Invariant violation: GAN active epoch cannot run compiled step. "
+                f"epoch={epoch}, gan_start_epoch={gan_start_epoch}"
+            )
+
+        # Determine whether we're using the GAN-specific compiled step for this epoch
+        use_compiled_gan_step = (
+            experimental_compiled_gan and gan_active and epoch_use_compiled_step and compiled_gan_step is not None
+        )
+
+        if train_mode != prev_train_mode:
+            if not base_compiled_step_enabled:
+                mode_reason = "compiled_blocked"
+            elif gan_enabled and gan_active and not experimental_compiled_gan:
+                mode_reason = "gan_active"
+            elif gan_enabled and gan_active and experimental_compiled_gan:
+                mode_reason = "experimental_compiled_gan"
+            else:
+                mode_reason = "gan_inactive"
+            print(f"  TRAIN_MODE={train_mode} (epoch {epoch + 1}/{epochs}, reason={mode_reason})")
+            if use_compiled_gan_step:
+                print(f"  [EXPERIMENTAL] Using compiled-GAN step (gen compiled, disc eager) " f"epoch={epoch + 1}")
+
+        if gan_enabled and verbose:
+            print(
+                f"  GAN schedule (epoch {epoch + 1}/{epochs}): "
+                f"scale={gan_scale:.3f}, adv={gan_weight:.4f}, fm={fm_weight:.4f}"
+            )
+
         # ====== Training ======
         model.train()
         train_loss = 0.0
         train_spec_loss = 0.0
+        train_mrstft_loss = 0.0
+        train_gan_g_loss = 0.0
+        train_gan_d_loss = 0.0
+        train_gan_fm_loss = 0.0
+        train_gan_d_updates = 0
         train_vad_loss = 0.0
         train_speech_loss = 0.0
         train_awesome_loss = 0.0
         train_awesome_speech = 0.0
         train_awesome_noise = 0.0
         train_awesome_smooth = 0.0
+        train_music_supp_loss = 0.0
+        train_mask_sat_loss = 0.0
         train_vad_reg_loss = 0.0
         train_mask_mean = 0.0
         train_mask_high = 0.0
@@ -2520,8 +5148,18 @@ def train(
         train_p_ref = 0.0
         train_p_out = 0.0
         train_gate_pct = 0.0
+        train_mask_logit_min = float("inf")
+        train_mask_logit_max = float("-inf")
+        train_mask_clip_rate = 0.0
+        train_eps_clean_rate = 0.0
+        train_eps_noise_rate = 0.0
+        train_vad_clip_ref = 0.0
+        train_vad_clip_out = 0.0
+        num_debug_logs = 0
         num_vad_logs = 0
         num_awesome_logs = 0
+        partial_batch_fallbacks = 0
+        partial_batch_warning_emitted = False
         num_train_batches = 0
         samples_processed = 0
         grad_norm = 0.0
@@ -2541,21 +5179,47 @@ def train(
         total_data_time = 0.0
         total_forward_time = 0.0  # Used for compiled step timing
 
+        # Gradient accumulation tracking (only used when grad_accumulation_steps > 1)
+        accumulated_grads: dict | None = None
+        accumulated_loss = mx.array(0.0)
+        micro_batches_in_accum = 0
+
         # Create data iterator (MLXDataStream or PrefetchDataLoader)
+        resume_batches_for_epoch = 0
+        if resume_from and resume_checkpoint_kind in _IN_PROGRESS_KINDS and epoch == start_epoch:
+            resume_batches_for_epoch = resume_batch_idx
+
+        epoch_target_micro_batches = micro_batches_per_epoch
+        if max_train_batches is not None:
+            epoch_target_micro_batches = min(epoch_target_micro_batches, max_train_batches)
+        if resume_batches_for_epoch > epoch_target_micro_batches:
+            raise RuntimeError(
+                "Resume micro-batch position exceeds epoch boundary. "
+                f"resume_micro_batch={resume_batches_for_epoch}, "
+                f"epoch_target_micro_batches={epoch_target_micro_batches}."
+            )
+        train_total = max(epoch_target_micro_batches - resume_batches_for_epoch, 0)
+
         if use_mlx_stream and train_stream is not None:
             if data_resume_progress is not None and epoch == data_resume_progress.get("epoch"):
                 # Continue from saved data checkpoint without resetting epoch state.
                 data_iterator = train_stream
                 progress = train_stream.get_progress()
-                print(f"  Resuming epoch {epoch + 1} from batch {progress['batch']}")
+                if progress["batch"] != resume_batches_for_epoch:
+                    raise RuntimeError(
+                        "Data stream resume position does not match model resume position: "
+                        f"data={progress['batch']}, model={resume_batches_for_epoch}."
+                    )
+                if resume_batches_for_epoch > 0:
+                    print(f"  Resuming epoch {epoch + 1} from micro-batch {progress['batch']}")
                 data_resume_progress = None
+            elif resume_batches_for_epoch > 0:
+                train_stream.set_resume_position(epoch=epoch, batch_idx=resume_batches_for_epoch, split="train")
+                data_iterator = train_stream
+                print(f"  Resuming epoch {epoch + 1} from micro-batch {resume_batches_for_epoch}")
             else:
                 train_stream.set_epoch(epoch)
                 data_iterator = train_stream
-                # Check if resuming mid-epoch
-                progress = train_stream.get_progress()
-                if progress["batch"] > 0 and epoch == progress["epoch"]:
-                    print(f"  Resuming epoch {epoch + 1} from batch {progress['batch']}")
         else:
             data_iterator = PrefetchDataLoader(
                 dataset,
@@ -2563,14 +5227,18 @@ def train(
                 num_workers=config.num_workers,
                 prefetch_factor=2,
             )
-
-        # Training progress bar
-        train_total = steps_per_epoch
-        if max_train_batches is not None:
-            train_total = min(train_total, max_train_batches)
+            data_iterator, did_skip = maybe_skip_resume_batches(
+                data_iterator,
+                resume_from=resume_from,
+                epoch=epoch,
+                start_epoch=start_epoch,
+                resume_batch_idx=resume_batches_for_epoch,
+            )
+            if did_skip:
+                print(f"  Resuming epoch {epoch + 1} from micro-batch {resume_batches_for_epoch}")
 
         train_pbar = tqdm(
-            enumerate(data_iterator),
+            enumerate(islice(data_iterator, train_total)),
             total=train_total,
             desc=f"Epoch {epoch + 1}/{epochs}",
             unit="batch",
@@ -2578,11 +5246,14 @@ def train(
             **_TQDM_KWARGS,
         )
 
-        data_start = time.time()
+        # Throughput tracking: accumulate samples and wall-clock time over sync windows
+        window_samples = 0
+        window_start = time.perf_counter()
+
+        data_start = time.perf_counter()
         for batch_idx, batch in train_pbar:
-            data_time = time.time() - data_start
+            data_time = time.perf_counter() - data_start
             total_data_time += data_time
-            step_start = time.time()
 
             # Unpack batch
             noisy_real = batch["noisy_real"]
@@ -2592,6 +5263,21 @@ def train(
             feat_erb = batch["feat_erb"]
             feat_spec = batch["feat_spec"]
             snr = batch["snr"]
+
+            debug_ctx = {
+                "phase": "train",
+                "epoch": epoch,
+                "batch": batch_idx,
+                "global_step": global_step,
+            }
+            if debugger is not None:
+                debugger.check("batch.noisy_real", noisy_real, debug_ctx)
+                debugger.check("batch.noisy_imag", noisy_imag, debug_ctx)
+                debugger.check("batch.clean_real", clean_real, debug_ctx)
+                debugger.check("batch.clean_imag", clean_imag, debug_ctx)
+                debugger.check("batch.feat_erb", feat_erb, debug_ctx)
+                debugger.check("batch.feat_spec", feat_spec, debug_ctx)
+                debugger.check("batch.snr", snr, debug_ctx)
 
             # Convert to FP16 if enabled (mixed precision training)
             if use_fp16:
@@ -2612,14 +5298,14 @@ def train(
             if use_vad_loss and vad_warmup_steps > 0:
                 warmup_frac = min(1.0, global_step / max(vad_warmup_steps, 1))
 
-            vad_weight = vad_loss_weight * warmup_frac
-            speech_weight = vad_speech_loss_weight * warmup_frac
+            vad_weight = epoch_vad_loss_weight * warmup_frac
+            speech_weight = epoch_vad_speech_loss_weight * warmup_frac
             vad_weight_mx = mx.array(vad_weight, dtype=mx.float32)
             speech_weight_mx = mx.array(speech_weight, dtype=mx.float32)
             awesome_frac = 1.0
-            if use_awesome_loss and awesome_warmup_steps > 0:
+            if (use_awesome_loss or use_pipeline_awesome_loss) and awesome_warmup_steps > 0:
                 awesome_frac = min(1.0, global_step / max(awesome_warmup_steps, 1))
-            awesome_weight = awesome_loss_weight * awesome_frac
+            awesome_weight = epoch_awesome_loss_weight * awesome_frac
             awesome_weight_mx = mx.array(awesome_weight, dtype=mx.float32)
 
             apply_vad_reg = False
@@ -2630,35 +5316,162 @@ def train(
                     apply_vad_reg = random.random() < vad_train_prob
             vad_reg_weight = vad_weight if apply_vad_reg else 0.0
             vad_reg_weight_mx = mx.array(vad_reg_weight, dtype=mx.float32)
+            gan_weight_mx = mx.array(gan_weight, dtype=mx.float32)
+            fm_weight_mx = mx.array(fm_weight, dtype=mx.float32)
+
+            # Track whether optimizer was updated this iteration (for gradient accumulation)
+            did_optimizer_update = False
 
             # Forward, backward, and update (either compiled or standard)
-            fwd_start = time.time()
+            fwd_start = time.perf_counter()
 
-            if use_compiled_step:
-                # Use compiled training step for better performance
-                loss = compiled_step(
+            model_out = None
+            use_compiled_step_for_batch = epoch_use_compiled_step and current_batch_size == batch_size
+            if epoch_use_compiled_step:
+                if not use_compiled_step_for_batch:
+                    partial_batch_fallbacks += 1
+                    if not partial_batch_warning_emitted:
+                        _log_compile_retrace_warning(
+                            context=(
+                                "Detected non-canonical batch shape at compile boundary "
+                                f"(got {current_batch_size}, expected {batch_size}); "
+                                "falling back to eager for this batch to avoid retrace."
+                            )
+                        )
+                        partial_batch_warning_emitted = True
+
+            if use_compiled_step_for_batch:
+                _assert_compile_boundary_shapes(
                     noisy_real,
-                    noisy_imag,
-                    feat_erb,
-                    feat_spec,
                     clean_real,
-                    clean_imag,
-                    snr,
-                    vad_weight_mx,
-                    speech_weight_mx,
-                    awesome_weight_mx,
-                    vad_reg_weight_mx,
-                    max_grad_norm,
+                    batch_size,
+                    check_dtype=use_fp16,
+                    expected_dtype=mx.float16 if use_fp16 else mx.float32,
                 )
-                # OPTIMIZATION: Only sync periodically to reduce GPU stalls
-                # This allows MLX to batch operations for better throughput
-                should_sync = (batch_idx + 1) % eval_frequency == 0
-                if should_sync:
-                    mx.eval(state)
-                grad_norm = 0.0  # Not tracked in compiled step
+                should_sync = (batch_idx + 1) % epoch_eval_frequency == 0
+
+                # Select the appropriate compiled functions. When the
+                # experimental compiled-GAN flag is active AND GAN is active,
+                # use the GAN-specific compiled functions whose computation
+                # graph always includes generator adversarial loss paths.
+                active_compiled_step = compiled_gan_step if use_compiled_gan_step else compiled_step
+                active_compiled_lag = (
+                    compiled_gan_loss_and_grad_step if use_compiled_gan_step else compiled_loss_and_grad_step
+                )
+
+                if grad_accumulation_steps > 1:
+                    # Compiled fwd+bwd with eager accumulated optimizer updates.
+                    loss, model_out, grads = active_compiled_lag(
+                        noisy_real,
+                        noisy_imag,
+                        feat_erb,
+                        feat_spec,
+                        clean_real,
+                        clean_imag,
+                        snr,
+                        vad_weight_mx,
+                        speech_weight_mx,
+                        awesome_weight_mx,
+                        vad_reg_weight_mx,
+                        gan_weight_mx,
+                        fm_weight_mx,
+                    )
+                    accumulated_grads = accumulate_grads(accumulated_grads, grads)
+                    accumulated_loss = accumulated_loss + loss
+                    micro_batches_in_accum += 1
+
+                    is_accum_complete = micro_batches_in_accum >= grad_accumulation_steps
+                    if is_accum_complete:
+                        did_optimizer_update = True
+                        final_grads = scale_grads(accumulated_grads, 1.0 / grad_accumulation_steps)
+                        if max_grad_norm > 0:
+                            final_grads, grad_norm_arr = clip_grad_norm(final_grads, max_grad_norm)
+                            if should_sync:
+                                grad_norm = float(grad_norm_arr)
+                        if _tree_all_finite(final_grads):
+                            optimizer.update(model, final_grads)
+                        else:
+                            did_optimizer_update = False
+                            tqdm.write(
+                                "⚠️  Non-finite grads after clipping; skipping optimizer update "
+                                f"(step={global_step})"
+                            )
+                        accumulated_grads = None
+                        accumulated_loss = mx.array(0.0)
+                        micro_batches_in_accum = 0
+
+                    if should_sync:
+                        if did_optimizer_update:
+                            mx.eval(loss, model.parameters(), optimizer.state)
+                        else:
+                            mx.eval(loss)
+                else:
+                    # Fully compiled training step (fwd+bwd+update) for best throughput.
+                    did_optimizer_update = True
+                    loss, model_out = active_compiled_step(
+                        noisy_real,
+                        noisy_imag,
+                        feat_erb,
+                        feat_spec,
+                        clean_real,
+                        clean_imag,
+                        snr,
+                        vad_weight_mx,
+                        speech_weight_mx,
+                        awesome_weight_mx,
+                        vad_reg_weight_mx,
+                        gan_weight_mx,
+                        fm_weight_mx,
+                        max_grad_norm,
+                    )
+
+                    # One-time correctness verification for compiled-GAN step
+                    if (
+                        use_compiled_gan_step
+                        and not _compiled_gan_correctness_verified
+                        and loss_and_grad_gan is not None
+                    ):
+                        _compiled_gan_correctness_verified = True
+                        # Run an eager forward pass for comparison
+                        (eager_loss, _), _ = loss_and_grad_gan(
+                            model,
+                            noisy_real,
+                            noisy_imag,
+                            feat_erb,
+                            feat_spec,
+                            clean_real,
+                            clean_imag,
+                            snr,
+                            vad_weight_mx,
+                            speech_weight_mx,
+                            awesome_weight_mx,
+                            vad_reg_weight_mx,
+                            gan_weight_mx,
+                            fm_weight_mx,
+                        )
+                        mx.eval(loss, eager_loss)
+                        compiled_val = float(loss)
+                        eager_val = float(eager_loss)
+                        if abs(compiled_val - eager_val) > 1e-5 + 1e-4 * abs(eager_val):
+                            tqdm.write(
+                                f"  [EXPERIMENTAL] WARNING: compiled-GAN correctness check FAILED. "
+                                f"compiled_loss={compiled_val:.6f}, eager_loss={eager_val:.6f}, "
+                                f"diff={abs(compiled_val - eager_val):.2e}"
+                            )
+                        else:
+                            tqdm.write(
+                                f"  [EXPERIMENTAL] Compiled-GAN correctness check PASSED. "
+                                f"compiled_loss={compiled_val:.6f}, eager_loss={eager_val:.6f}"
+                            )
+
+                    # OPTIMIZATION: Only sync periodically to reduce GPU stalls
+                    # This allows MLX to batch operations for better throughput
+                    if should_sync:
+                        mx.eval(state)
+                grad_norm = float("nan")  # Not tracked in compiled path
             else:
                 # Standard training step
-                loss, grads = loss_and_grad(
+                (loss, model_out), grads = loss_and_grad(
                     model,
                     noisy_real,
                     noisy_imag,
@@ -2671,44 +5484,181 @@ def train(
                     speech_weight_mx,
                     awesome_weight_mx,
                     vad_reg_weight_mx,
+                    gan_weight_mx,
+                    fm_weight_mx,
                 )
+                loss_finite = bool(mx.all(mx.isfinite(loss)))
+                if debugger is not None and not loss_finite:
+                    _diagnose_nonfinite(
+                        noisy_real,
+                        noisy_imag,
+                        feat_erb,
+                        feat_spec,
+                        clean_real,
+                        clean_imag,
+                        snr,
+                        debug_ctx,
+                    )
+                    debugger.check("train.loss", loss, debug_ctx)
+
+                # Grad finiteness is checked AFTER clipping (below).
+                # Non-finite raw grads are expected during early GAN epochs;
+                # clip_grad_norm_tree zeros them, and we skip the update.
+                skip_update = False
+                if not loss_finite:
+                    skip_update = True
+                    tqdm.write("⚠️  Non-finite loss detected; skipping optimizer update")
                 # Only sync periodically
-                should_sync = (batch_idx + 1) % eval_frequency == 0
+                should_sync = (batch_idx + 1) % epoch_eval_frequency == 0
                 if should_sync:
                     mx.eval(loss)
 
-                # Gradient clipping (returns clipped grads and norm as MLX array)
-                if max_grad_norm > 0:
-                    grads, grad_norm_arr = clip_grad_norm(grads, max_grad_norm)
-                    if should_sync:
-                        grad_norm = float(grad_norm_arr)
+                if not skip_update:
+                    # Accumulate gradients (for grad_accumulation_steps > 1)
+                    accumulated_grads = accumulate_grads(accumulated_grads, grads)
+                    accumulated_loss = accumulated_loss + loss
+                    micro_batches_in_accum += 1
 
-                # Update parameters
-                optimizer.update(model, grads)
+                    # Check if accumulation window is complete
+                    is_accum_complete = micro_batches_in_accum >= grad_accumulation_steps
+                    if is_accum_complete:
+                        did_optimizer_update = True
+
+                        # Scale by 1/grad_accumulation_steps for proper averaging
+                        final_grads = scale_grads(accumulated_grads, 1.0 / grad_accumulation_steps)
+
+                        # Gradient clipping (returns clipped grads and norm as MLX array)
+                        # clip_grad_norm zeros grads when norm is non-finite.
+                        if max_grad_norm > 0:
+                            final_grads, grad_norm_arr = clip_grad_norm(final_grads, max_grad_norm)
+                            if should_sync:
+                                grad_norm = float(grad_norm_arr)
+
+                        # Post-clip finite check: skip update if grads are
+                        # still non-finite after clipping (shouldn't happen
+                        # with the zeroing logic, but guard defensively).
+                        grads_finite = _tree_all_finite(final_grads)
+                        if not grads_finite:
+                            if debugger is not None:
+                                debugger.check_tree("train.grads_clipped", final_grads, debug_ctx)
+                            tqdm.write(
+                                "⚠️  Non-finite grads after clipping; skipping optimizer update "
+                                f"(step={global_step})"
+                            )
+                            did_optimizer_update = False
+                        else:
+                            # Update parameters
+                            optimizer.update(model, final_grads)
+
+                        # Reset accumulator for next window
+                        accumulated_grads = None
+                        accumulated_loss = mx.array(0.0)
+                        micro_batches_in_accum = 0
 
                 # Only sync periodically for better throughput
                 if should_sync:
-                    mx.eval(model.parameters(), optimizer.state)
+                    mx.eval(loss, model.parameters(), optimizer.state)
 
-            fwd_time = time.time() - fwd_start
+            pred_spec_for_logging = None
+            if model_out is not None:
+                pred_spec_for_logging = (
+                    mx.stop_gradient(model_out[0]),
+                    mx.stop_gradient(model_out[1]),
+                )
+
+            gan_d_loss_val = 0.0
+            if gan_active and discriminator is not None and disc_optimizer is not None and gan_loss_fns is not None:
+                do_disc_update = did_optimizer_update and ((global_step % gan_disc_update_freq) == 0)
+                if do_disc_update:
+                    _, disc_loss_fn = gan_loss_fns
+
+                    if pred_spec_for_logging is None:
+                        pred_spec = model((noisy_real, noisy_imag), feat_erb, feat_spec)
+                        pred_spec = (
+                            mx.stop_gradient(pred_spec[0]),
+                            mx.stop_gradient(pred_spec[1]),
+                        )
+                    else:
+                        pred_spec = pred_spec_for_logging
+                    pred_spec_for_logging = pred_spec
+                    if gan_istft is not None:
+                        pred_wav, clean_wav = specs_to_wavs(
+                            pred_spec,
+                            (clean_real, clean_imag),
+                            istft_fn=gan_istft,
+                            n_fft=config.fft_size,
+                            hop_length=config.hop_size,
+                            target_len=gan_target_len,
+                            force_fp32=use_mrstft_loss,
+                        )
+                        pred_wav = _gan_waveform_view(pred_wav, use_fp16=bool(use_fp16))
+                        clean_wav = _gan_waveform_view(clean_wav, use_fp16=bool(use_fp16))
+                        pred_wav = mx.stop_gradient(pred_wav)
+
+                        # Crop to disc_max_samples (same offset for real/fake alignment)
+                        clean_wav_d, d_crop = _disc_crop_waveform(clean_wav, gan_disc_max_samples)
+                        pred_wav_d, _ = _disc_crop_waveform(pred_wav, gan_disc_max_samples, crop_start=d_crop)
+
+                        def disc_loss_wrapper(disc):
+                            real_out, _ = disc(clean_wav_d)
+                            fake_out, _ = disc(pred_wav_d)
+                            total_loss, _, _ = disc_loss_fn(real_out, fake_out)
+                            return total_loss
+
+                        disc_loss, disc_grads = nn.value_and_grad(discriminator, disc_loss_wrapper)(discriminator)
+
+                        if gan_disc_grad_clip > 0:
+                            disc_grads, _ = clip_grad_norm(disc_grads, gan_disc_grad_clip)
+
+                        disc_optimizer.update(discriminator, disc_grads)
+
+                        if should_sync:
+                            mx.eval(disc_loss, discriminator.parameters(), disc_optimizer.state)
+                            gan_d_loss_val = float(disc_loss)
+                            train_gan_d_updates += 1
+
+            fwd_time = time.perf_counter() - fwd_start
             total_forward_time += fwd_time
-
-            step_time = time.time() - step_start
 
             # Only convert loss to float when synced (avoids blocking)
             if should_sync:
                 loss_val = float(loss)
+                if not math.isfinite(loss_val):
+                    raise FloatingPointError(
+                        "Non-finite loss detected "
+                        f"(epoch={epoch}, batch={batch_idx}, step={global_step}). "
+                        "Re-run with --debug-numerics for detailed diagnostics."
+                    )
                 train_loss += loss_val * eval_frequency  # Approximate accumulated loss
+                if gan_active and gan_d_loss_val:
+                    train_gan_d_loss += gan_d_loss_val * eval_frequency
+
+                # Debug mode: log per-step gradient norm for full observability
+                if sync_mode == "debug" and math.isfinite(grad_norm):
+                    tqdm.write(f"  [debug] step={global_step} grad_norm={grad_norm:.4f} " f"loss={loss_val:.6f}")
+
+                # Profile mode: log step-level timing breakdown
+                if sync_mode == "profile":
+                    tqdm.write(
+                        f"  [profile] step={global_step} "
+                        f"data={data_time * 1000:.1f}ms "
+                        f"fwd={fwd_time * 1000:.1f}ms "
+                        f"total={(data_time + fwd_time) * 1000:.1f}ms"
+                    )
             num_train_batches += 1
             samples_processed += current_batch_size
-            global_step += 1
+            window_samples += current_batch_size
+            # Only increment global_step when optimizer actually updates
+            # (for gradient accumulation > 1, updates happen every N batches)
+            if did_optimizer_update:
+                global_step += 1
 
             # Track progress for interruption-safe resume metadata
             _update_interrupt_state(
                 epoch,
                 loss_val,
                 best_valid_loss,
-                batch_idx=batch_idx,
+                batch_idx=num_train_batches,
                 global_step=global_step,
                 last_completed_epoch=last_completed_epoch,
             )
@@ -2720,12 +5670,17 @@ def train(
             # Update progress bar with real-time metrics (only on sync)
             if should_sync:
                 lr = float(schedule(global_step))
-                samples_per_sec = (
-                    (current_batch_size * eval_frequency) / (step_time * eval_frequency) if step_time > 0 else 0
-                )
+                # Throughput: samples processed in this sync window / wall-clock time
+                window_elapsed = time.perf_counter() - window_start
+                samples_per_sec = window_samples / max(window_elapsed, 1e-6)
+                window_samples = 0
+                window_start = time.perf_counter()
 
                 # Defaults for logging
                 spec_loss_val = loss_val
+                mrstft_loss_val = 0.0
+                gan_g_loss_val = 0.0
+                gan_fm_loss_val = 0.0
                 vad_loss_val = 0.0
                 speech_loss_val = 0.0
                 p_ref_mean = 0.0
@@ -2747,12 +5702,67 @@ def train(
                 snr_boost_mean = 0.0
                 vad_reg_loss_val = 0.0
 
-                if use_vad_loss or use_awesome_loss or use_vad_train_reg:
-                    # Extra forward pass for component logging (only on sync steps)
-                    out = model((noisy_real, noisy_imag), feat_erb, feat_spec)
+                # Compute model output for any metric block that needs it.
+                # This must be outside the emit_detailed_metrics guard because
+                # use_vad_loss / use_awesome_loss / use_pipeline_awesome_loss
+                # reference out[0]/out[1] regardless of sync mode.
+                needs_model_out = (
+                    use_vad_loss
+                    or use_awesome_loss
+                    or use_pipeline_awesome_loss
+                    or use_vad_train_reg
+                    or (emit_detailed_metrics and (use_mrstft_loss or gan_active))
+                )
+                if needs_model_out:
+                    out = pred_spec_for_logging
+                    if out is None:
+                        out = model((noisy_real, noisy_imag), feat_erb, feat_spec)
+                        out = (
+                            mx.stop_gradient(out[0]),
+                            mx.stop_gradient(out[1]),
+                        )
+                    if debugger is not None:
+                        debugger.check("model.out_real", out[0], debug_ctx)
+                        debugger.check("model.out_imag", out[1], debug_ctx)
+
+                if emit_detailed_metrics and needs_model_out:
                     spec_loss = spectral_loss(out, (clean_real, clean_imag))
                     spec_loss_val = float(spec_loss)
                     train_spec_loss += spec_loss_val * eval_frequency
+                    if use_mrstft_loss and mrstft_loss_fn is not None and mrstft_istft is not None:
+                        mrstft_loss_val = float(
+                            compute_mrstft_loss(
+                                out,
+                                (clean_real, clean_imag),
+                                istft_fn=mrstft_istft,
+                                loss_fn=mrstft_loss_fn,
+                                n_fft=config.fft_size,
+                                hop_length=config.hop_size,
+                                target_len=mrstft_target_len,
+                                force_fp32=True,
+                            )
+                        )
+                        train_mrstft_loss += mrstft_loss_val * eval_frequency
+                    if gan_active and gan_loss_fns is not None and discriminator is not None and gan_istft is not None:
+                        out_wav, clean_wav = specs_to_wavs(
+                            out,
+                            (clean_real, clean_imag),
+                            istft_fn=gan_istft,
+                            n_fft=config.fft_size,
+                            hop_length=config.hop_size,
+                            target_len=gan_target_len,
+                            force_fp32=use_mrstft_loss,
+                        )
+                        out_wav = _gan_waveform_view(out_wav, use_fp16=bool(use_fp16))
+                        clean_wav = _gan_waveform_view(clean_wav, use_fp16=bool(use_fp16))
+                        gen_loss_fn, _ = gan_loss_fns
+                        disc_fake, fake_feats = discriminator(out_wav)
+                        disc_real, real_feats = discriminator(clean_wav)
+                        gan_g_loss_val = float(gen_loss_fn(disc_fake))
+                        train_gan_g_loss += gan_g_loss_val * eval_frequency
+                        if feature_match_loss is not None and gan_fm_weight > 0:
+                            gan_fm_loss_val = float(feature_match_loss(real_feats, fake_feats))
+                            train_gan_fm_loss += gan_fm_loss_val * eval_frequency
 
                 if use_vad_loss:
                     vad_loss, p_ref, p_out, gate = _compute_vad_loss(
@@ -2769,6 +5779,8 @@ def train(
                         vad_snr_gate_width,
                         vad_z_threshold,
                         vad_z_slope,
+                        debug=debugger,
+                        debug_ctx=debug_ctx,
                     )
                     speech_loss = mx.array(0.0)
                     if vad_speech_loss_weight > 0:
@@ -2780,12 +5792,20 @@ def train(
                             vad_band_mask,
                             vad_band_bins,
                             gate,
+                            debug=debugger,
+                            debug_ctx=debug_ctx,
                         )
-                    vad_loss_val = float(vad_loss)
-                    speech_loss_val = float(speech_loss)
-                    p_ref_mean = float(mx.mean(p_ref))
-                    p_out_mean = float(mx.mean(p_out))
-                    gate_pct = 100.0 * float(mx.mean(mx.where(gate > 0.0, 1.0, 0.0)))
+                    _p_ref_m = mx.mean(p_ref)
+                    _p_out_m = mx.mean(p_out)
+                    _gate_m = mx.mean(mx.where(gate > 0.0, 1.0, 0.0))
+                    (
+                        vad_loss_val,
+                        speech_loss_val,
+                        p_ref_mean,
+                        p_out_mean,
+                        _gate_f,
+                    ) = _batch_to_float(vad_loss, speech_loss, _p_ref_m, _p_out_m, _gate_m)
+                    gate_pct = 100.0 * _gate_f
 
                     train_vad_loss += vad_loss_val * eval_frequency
                     train_speech_loss += speech_loss_val * eval_frequency
@@ -2793,6 +5813,21 @@ def train(
                     train_p_out += p_out_mean
                     train_gate_pct += gate_pct
                     num_vad_logs += 1
+
+                    if debug_numerics:
+                        clean_power_dbg = clean_real.astype(mx.float32) ** 2 + clean_imag.astype(mx.float32) ** 2
+                        out_power_dbg = out[0].astype(mx.float32) ** 2 + out[1].astype(mx.float32) ** 2
+                        clean_band_dbg = mx.sum(clean_power_dbg * vad_band_mask, axis=-1) / (vad_band_bins + _EPS)
+                        out_band_dbg = mx.sum(out_power_dbg * vad_band_mask, axis=-1) / (vad_band_bins + _EPS)
+                        log_clean_dbg = mx.log10(clean_band_dbg + _EPS)
+                        mu_dbg = mx.mean(log_clean_dbg, axis=1, keepdims=True)
+                        sigma_dbg = mx.sqrt(mx.mean((log_clean_dbg - mu_dbg) ** 2, axis=1, keepdims=True) + _EPS)
+                        z_ref_dbg = (log_clean_dbg - mu_dbg) / (sigma_dbg + _EPS)
+                        z_out_dbg = (mx.log10(out_band_dbg + _EPS) - mu_dbg) / (sigma_dbg + _EPS)
+                        clip_ref = 100.0 * float(mx.mean(mx.where(mx.abs(z_ref_dbg) > _VAD_LOGIT_CLAMP, 1.0, 0.0)))
+                        clip_out = 100.0 * float(mx.mean(mx.where(mx.abs(z_out_dbg) > _VAD_LOGIT_CLAMP, 1.0, 0.0)))
+                        train_vad_clip_ref += clip_ref
+                        train_vad_clip_out += clip_out
 
                 if use_awesome_loss:
                     (
@@ -2824,27 +5859,184 @@ def train(
                         vad_snr_gate_db,
                         vad_snr_gate_width,
                         vad_proxy_enabled,
+                        debug=debugger,
+                        debug_ctx=debug_ctx,
                     )
-                    awesome_loss_val = float(awesome_loss)
-                    awesome_speech_val = float(awesome_speech)
-                    awesome_noise_val = float(awesome_noise)
-                    awesome_smooth_val = float(awesome_smooth)
-
-                    mask_mean = float(mx.mean(mask))
-                    mask_high = 100.0 * float(mx.mean(mx.where(mask > 0.8, 1.0, 0.0)))
-                    mask_low = 100.0 * float(mx.mean(mx.where(mask < 0.2, 1.0, 0.0)))
-                    proxy_mean = float(mx.mean(proxy_frame))
-                    speech_ratio_mean = float(mx.mean(speech_ratio))
-                    music_gate_mean = float(mx.mean(music_gate))
-                    musicness_mean = float(mx.mean(musicness))
-                    mod_energy_mean = float(mx.mean(mod_energy))
-                    energy_boost_mean = float(mx.mean(energy_boost))
-                    snr_boost_mean = float(mx.mean(snr_boost))
+                    _mask_m = mx.mean(mask)
+                    _mask_hi = mx.mean(mx.where(mask > 0.8, 1.0, 0.0))
+                    _mask_lo = mx.mean(mx.where(mask < 0.2, 1.0, 0.0))
+                    _proxy_m = mx.mean(proxy_frame)
+                    _sr_m = mx.mean(speech_ratio)
+                    _mg_m = mx.mean(music_gate)
+                    _mu_m = mx.mean(musicness)
+                    _me_m = mx.mean(mod_energy)
+                    _eb_m = mx.mean(energy_boost)
+                    _sb_m = mx.mean(snr_boost)
+                    (
+                        awesome_loss_val,
+                        awesome_speech_val,
+                        awesome_noise_val,
+                        awesome_smooth_val,
+                        mask_mean,
+                        mask_high,
+                        mask_low,
+                        proxy_mean,
+                        speech_ratio_mean,
+                        music_gate_mean,
+                        musicness_mean,
+                        mod_energy_mean,
+                        energy_boost_mean,
+                        snr_boost_mean,
+                    ) = _batch_to_float(
+                        awesome_loss,
+                        awesome_speech,
+                        awesome_noise,
+                        awesome_smooth,
+                        _mask_m,
+                        _mask_hi,
+                        _mask_lo,
+                        _proxy_m,
+                        _sr_m,
+                        _mg_m,
+                        _mu_m,
+                        _me_m,
+                        _eb_m,
+                        _sb_m,
+                    )
+                    mask_high *= 100.0
+                    mask_low *= 100.0
 
                     train_awesome_loss += awesome_loss_val * eval_frequency
                     train_awesome_speech += awesome_speech_val * eval_frequency
                     train_awesome_noise += awesome_noise_val * eval_frequency
                     train_awesome_smooth += awesome_smooth_val * eval_frequency
+                    train_mask_mean += mask_mean
+                    train_mask_high += mask_high
+                    train_mask_low += mask_low
+                    train_proxy_mean += proxy_mean
+                    train_speech_ratio += speech_ratio_mean
+                    train_music_gate += music_gate_mean
+                    train_musicness += musicness_mean
+                    train_mod_energy += mod_energy_mean
+                    train_energy_boost += energy_boost_mean
+                    train_snr_boost += snr_boost_mean
+                    num_awesome_logs += 1
+
+                    if debug_numerics:
+                        clean_power_dbg = clean_real.astype(mx.float32) ** 2 + clean_imag.astype(mx.float32) ** 2
+                        noise_real_dbg = noisy_real.astype(mx.float32) - clean_real.astype(mx.float32)
+                        noise_imag_dbg = noisy_imag.astype(mx.float32) - clean_imag.astype(mx.float32)
+                        noise_power_dbg = noise_real_dbg**2 + noise_imag_dbg**2
+                        clean_band_dbg = mx.sum(clean_power_dbg * vad_band_mask, axis=-1) / (vad_band_bins + _EPS)
+                        noise_band_dbg = mx.sum(noise_power_dbg * vad_band_mask, axis=-1) / (vad_band_bins + _EPS)
+                        mask_logits_raw = awesome_mask_sharpness * (
+                            _log1p_mag(clean_real, clean_imag) - _log1p_mag(noise_real_dbg, noise_imag_dbg)
+                        )
+                        mask_logit_min = float(mx.min(mask_logits_raw))
+                        mask_logit_max = float(mx.max(mask_logits_raw))
+                        mask_clip_rate = 100.0 * float(
+                            mx.mean(mx.where(mx.abs(mask_logits_raw) > _AWESOME_MASK_LOGIT_CLAMP, 1.0, 0.0))
+                        )
+                        clean_eps_rate = 100.0 * float(mx.mean(mx.where(clean_band_dbg <= _EPS, 1.0, 0.0)))
+                        noise_eps_rate = 100.0 * float(mx.mean(mx.where(noise_band_dbg <= _EPS, 1.0, 0.0)))
+                        train_mask_logit_min = min(train_mask_logit_min, mask_logit_min)
+                        train_mask_logit_max = max(train_mask_logit_max, mask_logit_max)
+                        train_mask_clip_rate += mask_clip_rate
+                        train_eps_clean_rate += clean_eps_rate
+                        train_eps_noise_rate += noise_eps_rate
+                        num_debug_logs += 1
+
+                if use_pipeline_awesome_loss:
+                    (
+                        awesome_loss,
+                        awesome_speech,
+                        awesome_noise,
+                        awesome_smooth,
+                        music_supp_loss,
+                        mask_sat_loss,
+                        mask,
+                        proxy_frame,
+                        speech_ratio,
+                        music_gate,
+                        musicness,
+                        vocal_gate,
+                        instrument_gate,
+                        mod_energy,
+                        energy_boost,
+                        snr_boost,
+                    ) = _compute_pipeline_awesome_losses(
+                        noisy_real,
+                        noisy_imag,
+                        clean_real,
+                        clean_imag,
+                        out[0],
+                        out[1],
+                        snr,
+                        vad_band_mask,
+                        vad_band_bins,
+                        awesome_mask_sharpness,
+                        vad_z_threshold,
+                        vad_z_slope,
+                        vad_snr_gate_db,
+                        vad_snr_gate_width,
+                        vad_proxy_enabled,
+                        debug=debugger,
+                        debug_ctx=debug_ctx,
+                    )
+                    _mask_m = mx.mean(mask)
+                    _mask_hi = mx.mean(mx.where(mask > 0.8, 1.0, 0.0))
+                    _mask_lo = mx.mean(mx.where(mask < 0.2, 1.0, 0.0))
+                    _proxy_m = mx.mean(proxy_frame)
+                    _sr_m = mx.mean(speech_ratio)
+                    _mg_m = mx.mean(music_gate)
+                    _mu_m = mx.mean(musicness)
+                    _me_m = mx.mean(mod_energy)
+                    _eb_m = mx.mean(energy_boost)
+                    _sb_m = mx.mean(snr_boost)
+                    (
+                        awesome_loss_val,
+                        awesome_speech_val,
+                        awesome_noise_val,
+                        awesome_smooth_val,
+                        music_supp_loss_val,
+                        mask_sat_loss_val,
+                        mask_mean,
+                        mask_high,
+                        mask_low,
+                        proxy_mean,
+                        speech_ratio_mean,
+                        music_gate_mean,
+                        musicness_mean,
+                        mod_energy_mean,
+                        energy_boost_mean,
+                        snr_boost_mean,
+                    ) = _batch_to_float(
+                        awesome_loss,
+                        awesome_speech,
+                        awesome_noise,
+                        awesome_smooth,
+                        music_supp_loss,
+                        mask_sat_loss,
+                        _mask_m,
+                        _mask_hi,
+                        _mask_lo,
+                        _proxy_m,
+                        _sr_m,
+                        _mg_m,
+                        _mu_m,
+                        _me_m,
+                        _eb_m,
+                        _sb_m,
+                    )
+                    mask_high *= 100.0
+                    mask_low *= 100.0
+
+                    train_awesome_loss += awesome_loss_val * eval_frequency
+                    train_awesome_speech += awesome_speech_val * eval_frequency
+                    train_awesome_noise += awesome_noise_val * eval_frequency
+                    train_awesome_smooth += awesome_smooth_val * eval_frequency
+                    train_music_supp_loss += music_supp_loss_val * eval_frequency
+                    train_mask_sat_loss += mask_sat_loss_val * eval_frequency
                     train_mask_mean += mask_mean
                     train_mask_high += mask_high
                     train_mask_low += mask_low
@@ -2874,6 +6066,8 @@ def train(
                         vad_z_slope,
                         vad_snr_gate_db,
                         vad_snr_gate_width,
+                        debug=debugger,
+                        debug_ctx=debug_ctx,
                     )
                     vad_reg_loss_val = float(vad_reg_loss)
                     train_vad_reg_loss += vad_reg_loss_val * eval_frequency
@@ -2883,34 +6077,47 @@ def train(
                         loss=f"{loss_val:.4f}",
                         spec=(
                             f"{spec_loss_val:.4f}"
-                            if (use_vad_loss or use_awesome_loss or use_vad_train_reg)
+                            if (use_vad_loss or use_awesome_loss or use_pipeline_awesome_loss or use_vad_train_reg)
                             else f"{loss_val:.4f}"
                         ),
+                        mrstft=f"{mrstft_loss_val:.4f}" if use_mrstft_loss else "0.0000",
+                        gan_g=f"{gan_g_loss_val:.4f}" if gan_active else "0.0000",
+                        gan_d=f"{gan_d_loss_val:.4f}" if gan_active else "0.0000",
+                        fm=f"{gan_fm_loss_val:.4f}" if gan_active else "0.0000",
                         vad=f"{vad_loss_val:.4f}" if use_vad_loss else "0.0000",
                         speech=f"{speech_loss_val:.4f}" if use_vad_loss else "0.0000",
-                        awesome=f"{awesome_loss_val:.4f}" if use_awesome_loss else "0.0000",
-                        mask=f"{mask_mean:.2f}" if use_awesome_loss else "0.00",
+                        awesome=(
+                            f"{awesome_loss_val:.4f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.0000"
+                        ),
+                        mask=(f"{mask_mean:.2f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.00"),
                         lr=f"{lr:.1e}",
                         data=f"{data_time * 1000:.0f}ms",
-                        step=f"{fwd_time * 1000:.0f}ms",
+                        fwd=f"{fwd_time * 1000:.0f}ms",
                         spd=f"{samples_per_sec:.0f}/s",
-                        sync=f"1/{eval_frequency}",
+                        gstep=global_step,
                     )
                 else:
+                    grad_display = f"{grad_norm:.2f}" if math.isfinite(grad_norm) else "n/a"
                     train_pbar.set_postfix(
                         loss=f"{loss_val:.4f}",
                         avg=f"{train_loss / num_train_batches:.4f}",
+                        gan_g=f"{gan_g_loss_val:.4f}" if gan_active else "0.0000",
+                        gan_d=f"{gan_d_loss_val:.4f}" if gan_active else "0.0000",
+                        fm=f"{gan_fm_loss_val:.4f}" if gan_active else "0.0000",
                         vad=f"{vad_loss_val:.4f}" if use_vad_loss else "0.0000",
                         speech=f"{speech_loss_val:.4f}" if use_vad_loss else "0.0000",
-                        awesome=f"{awesome_loss_val:.4f}" if use_awesome_loss else "0.0000",
-                        mask=f"{mask_mean:.2f}" if use_awesome_loss else "0.00",
+                        awesome=(
+                            f"{awesome_loss_val:.4f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.0000"
+                        ),
+                        mask=(f"{mask_mean:.2f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.00"),
                         p_ref=f"{p_ref_mean:.2f}" if use_vad_loss else "0.00",
                         p_out=f"{p_out_mean:.2f}" if use_vad_loss else "0.00",
                         gate=f"{gate_pct:.0f}%" if use_vad_loss else "0%",
                         vad_reg=f"{vad_reg_loss_val:.4f}" if use_vad_train_reg else "0.0000",
                         lr=f"{lr:.1e}",
-                        grad=f"{grad_norm:.2f}",
-                        speed=f"{samples_per_sec:.0f}s/s",
+                        grad=grad_display,
+                        spd=f"{samples_per_sec:.0f}/s",
+                        gstep=global_step,
                     )
 
             # Save data checkpoint periodically (for resume capability)
@@ -2929,26 +6136,28 @@ def train(
                     model,
                     ckpt_path,
                     epoch=epoch,
-                    batch_idx=batch_idx,
+                    batch_idx=num_train_batches,
                     global_step=global_step,
                     loss=train_loss / num_train_batches if num_train_batches > 0 else loss_val,
                     best_valid_loss=best_valid_loss,
                     config=train_config,
                     optimizer=optimizer,
+                    discriminator=discriminator,
+                    disc_optimizer=disc_optimizer,
                     last_completed_epoch=last_completed_epoch,
                     kind="step",
                 )
                 if step_saved:
-                    print(f"\n  📦 Checkpoint saved: {ckpt_path.name} (step {global_step})")
+                    tqdm.write(f"  📦 Checkpoint saved: {ckpt_path.name} (step {global_step})")
                 else:
-                    print(f"\n  ⚠️  Checkpoint save failed: {ckpt_path.name} (step {global_step})")
+                    tqdm.write(f"  ⚠️  Checkpoint save failed: {ckpt_path.name} (step {global_step})")
 
                 # Cleanup old checkpoints if limit is set
                 if save_total_limit is not None:
                     cleanup_checkpoints(ckpt_dir, save_total_limit)
 
             # Start timing for next data fetch
-            data_start = time.time()
+            data_start = time.perf_counter()
 
         train_pbar.close()
 
@@ -2961,12 +6170,18 @@ def train(
 
         avg_train_loss = train_loss / max(num_train_batches, 1)
         avg_train_spec_loss = train_spec_loss / max(num_train_batches, 1)
+        avg_train_mrstft_loss = train_mrstft_loss / max(num_train_batches, 1)
+        avg_train_gan_g_loss = train_gan_g_loss / max(num_train_batches, 1)
+        avg_train_gan_fm_loss = train_gan_fm_loss / max(num_train_batches, 1)
+        avg_train_gan_d_loss = train_gan_d_loss / max(train_gan_d_updates, 1)
         avg_train_vad_loss = train_vad_loss / max(num_train_batches, 1)
         avg_train_speech_loss = train_speech_loss / max(num_train_batches, 1)
         avg_train_awesome_loss = train_awesome_loss / max(num_train_batches, 1)
         avg_train_awesome_speech = train_awesome_speech / max(num_train_batches, 1)
         avg_train_awesome_noise = train_awesome_noise / max(num_train_batches, 1)
         avg_train_awesome_smooth = train_awesome_smooth / max(num_train_batches, 1)
+        avg_train_music_supp = train_music_supp_loss / max(num_train_batches, 1)
+        avg_train_mask_sat = train_mask_sat_loss / max(num_train_batches, 1)
         avg_train_vad_reg_loss = train_vad_reg_loss / max(num_train_batches, 1)
         avg_train_p_ref = train_p_ref / max(num_vad_logs, 1)
         avg_train_p_out = train_p_out / max(num_vad_logs, 1)
@@ -2991,9 +6206,15 @@ def train(
                 f"    Train step (fwd+bwd+upd): {total_forward_time:6.1f}s ({100 * total_forward_time / total_time:5.1f}%)"
             )
             print(f"    TOTAL:              {total_time:6.1f}s")
-            print(f"    Compiled training:  {'enabled' if use_compiled_step else 'disabled'}")
+            print(f"    Compiled training:  {'enabled' if epoch_use_compiled_step else 'disabled'}")
             if total_data_time > total_forward_time:
                 print("    ⚠️  DATA LOADING IS BOTTLENECK - consider more workers or faster storage")
+
+        if partial_batch_fallbacks > 0:
+            print(
+                "  Compile boundary fallback: "
+                f"{partial_batch_fallbacks} batch(es) ran eager due to non-canonical batch size"
+            )
 
         # ====== Validation ======
         avg_valid_loss = float("inf")
@@ -3021,6 +6242,8 @@ def train(
                     best_valid_loss=best_valid_loss,
                     config=train_config,
                     optimizer=optimizer,
+                    discriminator=discriminator,
+                    disc_optimizer=disc_optimizer,
                     last_completed_epoch=epoch,
                     kind="best",
                 )
@@ -3040,7 +6263,7 @@ def train(
                 epochs_without_improvement += 1
 
         # ====== Epoch Summary ======
-        epoch_time = time.time() - epoch_start
+        epoch_time = time.perf_counter() - epoch_start
         epoch_throughput = samples_processed / epoch_time if epoch_time > 0 else 0
 
         # Update interrupt state with final epoch metrics
@@ -3056,8 +6279,22 @@ def train(
         # Improved epoch summary with throughput
         improvement_marker = "★" if avg_valid_loss <= best_valid_loss else ""
         loss_summary = ""
-        if use_vad_loss or use_awesome_loss or use_vad_train_reg:
+        if (
+            use_vad_loss
+            or use_awesome_loss
+            or use_pipeline_awesome_loss
+            or use_vad_train_reg
+            or use_mrstft_loss
+            or gan_enabled
+        ):
             loss_parts = [f"Spec: {avg_train_spec_loss:.4f}"]
+            if use_mrstft_loss:
+                loss_parts.append(f"MRSTFT: {avg_train_mrstft_loss:.4f}")
+            if gan_enabled:
+                loss_parts.append(f"GAN_G: {avg_train_gan_g_loss:.4f}")
+                loss_parts.append(f"GAN_D: {avg_train_gan_d_loss:.4f}")
+                if gan_fm_weight > 0:
+                    loss_parts.append(f"FM: {avg_train_gan_fm_loss:.4f}")
             if use_vad_loss:
                 loss_parts.extend(
                     [
@@ -3065,13 +6302,20 @@ def train(
                         f"Speech: {avg_train_speech_loss:.4f}",
                     ]
                 )
-            if use_awesome_loss:
+            if use_awesome_loss or use_pipeline_awesome_loss:
                 loss_parts.extend(
                     [
                         f"Awesome: {avg_train_awesome_loss:.4f}",
                         f"AwS: {avg_train_awesome_speech:.4f}",
                         f"AwN: {avg_train_awesome_noise:.4f}",
                         f"AwSm: {avg_train_awesome_smooth:.4f}",
+                    ]
+                )
+            if use_pipeline_awesome_loss:
+                loss_parts.extend(
+                    [
+                        f"MusSup: {avg_train_music_supp:.4f}",
+                        f"MaskSat: {avg_train_mask_sat:.4f}",
                     ]
                 )
             if use_vad_train_reg:
@@ -3092,7 +6336,7 @@ def train(
                 f"  VAD stats: p_ref={avg_train_p_ref:.2f} | "
                 f"p_out={avg_train_p_out:.2f} | gate={avg_train_gate:.0f}%"
             )
-        if use_awesome_loss and verbose:
+        if (use_awesome_loss or use_pipeline_awesome_loss) and verbose:
             print(
                 "  Awesome stats: "
                 f"mask={avg_train_mask_mean:.2f} (hi {avg_train_mask_high:.0f}%, lo {avg_train_mask_low:.0f}%) | "
@@ -3100,6 +6344,22 @@ def train(
                 f"music_gate={avg_train_music_gate:.2f} music={avg_train_musicness:.2f} | "
                 f"mod={avg_train_mod:.2f} e_boost={avg_train_energy_boost:.2f} snr_boost={avg_train_snr_boost:.2f}"
             )
+        if debug_numerics:
+            parts = []
+            if (use_awesome_loss or use_pipeline_awesome_loss) and num_debug_logs > 0:
+                avg_mask_clip = train_mask_clip_rate / num_debug_logs
+                avg_eps_clean = train_eps_clean_rate / num_debug_logs
+                avg_eps_noise = train_eps_noise_rate / num_debug_logs
+                parts.append(
+                    f"mask_logit=[{train_mask_logit_min:.1f},{train_mask_logit_max:.1f}] "
+                    f"clip={avg_mask_clip:.1f}% eps_clean={avg_eps_clean:.1f}% eps_noise={avg_eps_noise:.1f}%"
+                )
+            if use_vad_loss and num_vad_logs > 0:
+                avg_vad_clip_ref = train_vad_clip_ref / num_vad_logs
+                avg_vad_clip_out = train_vad_clip_out / num_vad_logs
+                parts.append(f"vad_clip_ref={avg_vad_clip_ref:.1f}% vad_clip_out={avg_vad_clip_out:.1f}%")
+            if parts:
+                print("  Debug numerics: " + " | ".join(parts))
 
         # ====== End-of-Epoch Checkpointing (authoritative completion) ======
         ckpt_path = ckpt_dir / f"epoch_{epoch + 1:03d}.safetensors"
@@ -3113,6 +6373,8 @@ def train(
             best_valid_loss=best_valid_loss,
             config=train_config,
             optimizer=optimizer,
+            discriminator=discriminator,
+            disc_optimizer=disc_optimizer,
             last_completed_epoch=epoch,
             kind="epoch_end",
         )
@@ -3168,6 +6430,8 @@ def train(
             best_valid_loss=best_valid_loss,
             config=train_config,
             optimizer=optimizer,
+            discriminator=discriminator,
+            disc_optimizer=disc_optimizer,
             last_completed_epoch=max(last_completed_epoch, final_epoch),
             kind="best_final",
         )
@@ -3189,6 +6453,8 @@ def train(
         best_valid_loss=best_valid_loss,
         config=train_config,
         optimizer=optimizer,
+        discriminator=discriminator,
+        disc_optimizer=disc_optimizer,
         last_completed_epoch=max(last_completed_epoch, final_epoch),
         kind="final",
     )
@@ -3213,7 +6479,15 @@ def train(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train DfNet4 with dynamic on-the-fly mixing")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Train DfNet4 with dynamic on-the-fly mixing. "
+            "--config refers to the dataset/mixer JSON config, "
+            "--train-config is the train.py-style INI config, "
+            "and --run-config refers to CLI/runtime settings (TOML)."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
 
     # Data sources (priority: cache_dir > config > file lists)
     parser.add_argument(
@@ -3239,7 +6513,33 @@ def main():
     parser.add_argument(
         "--config",
         type=str,
-        help="Path to JSON config file (alternative to file lists)",
+        help="Path to dataset/mixer JSON config file (alternative to file lists)",
+    )
+    parser.add_argument(
+        "--run-config",
+        type=str,
+        help="Path to run-config TOML file (CLI/runtime settings)",
+    )
+    parser.add_argument(
+        "--train-config",
+        type=str,
+        help="Path to train.py-compatible INI config (model + training settings)",
+    )
+    parser.add_argument(
+        "--preset",
+        type=str,
+        choices=["entry", "pro", "max", "ultra", "debug"],
+        default=None,
+        help=(
+            "Load a named hardware preset as the base config. "
+            "Values from --run-config and explicit CLI flags override preset defaults. "
+            "See docs/RUN_CONFIG_PRESETS.md for details."
+        ),
+    )
+    parser.add_argument(
+        "--print-run-config",
+        action="store_true",
+        help="Print a commented run-config TOML example and exit",
     )
 
     # Training parameters
@@ -3260,6 +6560,18 @@ def main():
         type=float,
         default=1e-4,
         help="Initial learning rate",
+    )
+    parser.add_argument(
+        "--learning-rate-min",
+        type=float,
+        default=None,
+        help="Minimum learning rate for cosine schedule (defaults to 1%% of base)",
+    )
+    parser.add_argument(
+        "--weight-decay",
+        type=float,
+        default=0.0,
+        help="Weight decay for AdamW",
     )
     parser.add_argument(
         "--checkpoint-dir",
@@ -3392,11 +6704,20 @@ def main():
         help="Sync with GPU every N batches (higher = faster but less responsive logging)",
     )
     parser.add_argument(
+        "--backbone",
         "--backbone-type",
+        dest="backbone_type",
         type=str,
         choices=["mamba", "gru", "attention"],
         default="mamba",
         help="Backbone type: 'mamba' (parallel scan SSM), 'gru' (recurrent), or 'attention' (fastest backward)",
+    )
+    parser.add_argument(
+        "--model-variant",
+        type=str,
+        choices=["full", "lite"],
+        default="full",
+        help="Model variant: 'full' or 'lite'",
     )
     parser.add_argument(
         "--snr-range",
@@ -3413,9 +6734,33 @@ def main():
         help="Override extreme SNR range in dB (e.g., --snr-range-extreme -20 -5)",
     )
     parser.add_argument(
+        "--snr-range-very-low",
+        type=float,
+        nargs=2,
+        metavar=("MIN", "MAX"),
+        help="Override very-low SNR range in dB (e.g., --snr-range-very-low -30 -20)",
+    )
+    parser.add_argument(
         "--p-extreme-snr",
         type=float,
         help="Probability of sampling from extreme SNR range (0-1)",
+    )
+    parser.add_argument(
+        "--p-very-low-snr",
+        type=float,
+        help="Probability of sampling from very-low SNR range (0-1)",
+    )
+    parser.add_argument(
+        "--p-interfer-speech",
+        type=float,
+        help="Probability of adding interfering speaker (0-1, simulates vocals/competing talker)",
+    )
+    parser.add_argument(
+        "--curriculum-warmup-epochs",
+        type=int,
+        default=0,
+        help="Number of warmup epochs for curriculum learning (0=disabled). "
+        "SNR/interferer probabilities ramp linearly from 0 to target values.",
     )
     parser.add_argument(
         "--speech-gain-range",
@@ -3434,9 +6779,19 @@ def main():
     parser.add_argument(
         "--dynamic-loss",
         type=str,
-        choices=["baseline", "awesome"],
+        choices=["baseline", "awesome", "pipeline_awesome"],
         default="baseline",
-        help="Dynamic loss to use: 'baseline' (spectral + legacy VAD) or 'awesome'",
+        help="Dynamic loss: 'baseline' (spectral + legacy VAD), 'awesome' (speech-preserving contrastive), or 'pipeline_awesome' (improved speech preservation + music suppression)",
+    )
+    parser.add_argument(
+        "--pipeline-stages",
+        type=str,
+        default=None,
+        help=(
+            "JSON array of stage configs with start_epoch and optional overrides. "
+            'Example: \'[{"start_epoch":0,"name":"bootstrap","awesome_loss_weight":0.2},'
+            '{"start_epoch":5,"name":"refine","awesome_loss_weight":0.4}]\''
+        ),
     )
     parser.add_argument(
         "--awesome-loss-weight",
@@ -3455,6 +6810,111 @@ def main():
         type=int,
         default=0,
         help="Warmup steps for ramping awesome loss weight",
+    )
+    parser.add_argument(
+        "--mrstft-factor",
+        type=float,
+        default=None,
+        help="Multi-res STFT loss weight (0 disables)",
+    )
+    parser.add_argument(
+        "--mrstft-gamma",
+        type=float,
+        default=None,
+        help="Multi-res STFT magnitude compression exponent",
+    )
+    parser.add_argument(
+        "--mrstft-f-complex",
+        type=float,
+        default=None,
+        help="Multi-res STFT complex loss weight (None disables)",
+    )
+    parser.add_argument(
+        "--mrstft-fft-sizes",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Multi-res STFT FFT sizes (e.g., --mrstft-fft-sizes 512 1024 2048)",
+    )
+    parser.add_argument(
+        "--mrstft-hop-sizes",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Multi-res STFT hop sizes (defaults to fft_size//4)",
+    )
+    parser.add_argument(
+        "--gan-enabled",
+        action="store_true",
+        help="Enable GAN adversarial training",
+    )
+    parser.add_argument(
+        "--gan-start-epoch",
+        type=int,
+        default=0,
+        help="Epoch to start GAN training (0-based)",
+    )
+    parser.add_argument(
+        "--gan-ramp-epochs",
+        type=int,
+        default=0,
+        help="Linearly ramp GAN weights over N epochs (0 disables ramp)",
+    )
+    parser.add_argument(
+        "--gan-adv-weight",
+        type=float,
+        default=0.0,
+        help="GAN adversarial loss weight",
+    )
+    parser.add_argument(
+        "--gan-fm-weight",
+        type=float,
+        default=0.0,
+        help="GAN feature matching loss weight",
+    )
+    parser.add_argument(
+        "--gan-discriminator",
+        type=str,
+        default="combined",
+        choices=["combined", "mpd", "msd"],
+        help="Discriminator type for GAN training",
+    )
+    parser.add_argument(
+        "--gan-mpd-periods",
+        type=int,
+        nargs="+",
+        default=None,
+        help="MPD periods for GAN discriminator (e.g., --gan-mpd-periods 2 3 5 7 11)",
+    )
+    parser.add_argument(
+        "--gan-msd-scales",
+        type=int,
+        default=3,
+        help="MSD scales for GAN discriminator",
+    )
+    parser.add_argument(
+        "--gan-disc-lr",
+        type=float,
+        default=1e-4,
+        help="GAN discriminator learning rate",
+    )
+    parser.add_argument(
+        "--gan-disc-weight-decay",
+        type=float,
+        default=0.0,
+        help="GAN discriminator weight decay",
+    )
+    parser.add_argument(
+        "--gan-disc-grad-clip",
+        type=float,
+        default=1.0,
+        help="GAN discriminator gradient clipping",
+    )
+    parser.add_argument(
+        "--gan-disc-update-freq",
+        type=int,
+        default=1,
+        help="Update discriminator every N steps",
     )
     parser.add_argument(
         "--no-vad-proxy",
@@ -3599,114 +7059,329 @@ def main():
         help="Validate checkpoints and metadata before starting/resuming",
     )
     parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Optional RNG seed override (enables deterministic sampling)",
+    )
+    parser.add_argument(
+        "--debug-numerics",
+        action="store_true",
+        help="Enable numeric debug mode (fail-fast finite checks, short run, deterministic)",
+    )
+    parser.add_argument(
+        "--debug-numerics-no-fail-fast",
+        action="store_true",
+        help="Disable fail-fast behavior in debug-numerics mode",
+    )
+    parser.add_argument(
+        "--debug-numerics-every",
+        type=int,
+        default=1,
+        help="Check tensors every N steps in debug-numerics mode",
+    )
+    parser.add_argument(
+        "--debug-numerics-dump-dir",
+        type=str,
+        default=None,
+        help="Directory for numeric debug dumps (default: checkpoint_dir/debug_numerics)",
+    )
+    parser.add_argument(
+        "--debug-numerics-dump-arrays",
+        action="store_true",
+        help="Save small tensor slices alongside numeric debug JSON dumps",
+    )
+    parser.add_argument(
+        "--debug-numerics-max-dumps",
+        type=int,
+        default=5,
+        help="Maximum number of non-finite dumps to write in debug mode",
+    )
+    parser.add_argument(
+        "--nan-skip-batch",
+        action="store_true",
+        help="Skip optimizer update when loss/grads are non-finite (debug-friendly)",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
         help="Enable detailed timing diagnostics and hardware info",
     )
 
+    # Keep parser defaults aligned with RunConfig so --help always reports
+    # accurate effective defaults. CLI application still keys off explicit
+    # argv presence in _apply_cli_overrides(), so these defaults are display-
+    # oriented and do not change precedence semantics.
+    default_cfg = RunConfig()
+    parser.set_defaults(
+        cache_dir=default_cfg.dataset.cache_dir,
+        speech_list=default_cfg.dataset.speech_list,
+        noise_list=default_cfg.dataset.noise_list,
+        rir_list=default_cfg.dataset.rir_list,
+        config=default_cfg.dataset.config,
+        train_config=default_cfg.training.train_config,
+        epochs=default_cfg.training.epochs,
+        batch_size=default_cfg.training.batch_size,
+        learning_rate=default_cfg.training.learning_rate,
+        learning_rate_min=default_cfg.training.learning_rate_min,
+        weight_decay=default_cfg.training.weight_decay,
+        checkpoint_dir=default_cfg.checkpoint.checkpoint_dir,
+        resume=default_cfg.checkpoint.resume,
+        resume_data=default_cfg.checkpoint.resume_data,
+        validate_every=default_cfg.checkpoint.validate_every,
+        save_strategy=default_cfg.checkpoint.save_strategy,
+        save_steps=default_cfg.checkpoint.save_steps,
+        save_total_limit=default_cfg.checkpoint.save_total_limit,
+        checkpoint_batches=default_cfg.checkpoint.checkpoint_batches,
+        p_reverb=default_cfg.augmentation.p_reverb,
+        p_clipping=default_cfg.augmentation.p_clipping,
+        num_workers=default_cfg.dataloader.num_workers,
+        prefetch_size=default_cfg.dataloader.prefetch_size,
+        max_grad_norm=default_cfg.training.max_grad_norm,
+        warmup_epochs=default_cfg.training.warmup_epochs,
+        patience=default_cfg.training.patience,
+        fp16=default_cfg.training.fp16,
+        grad_accumulation_steps=default_cfg.training.grad_accumulation_steps,
+        eval_frequency=default_cfg.training.eval_frequency,
+        backbone_type=default_cfg.model.backbone_type,
+        model_variant=default_cfg.model.variant,
+        snr_range=default_cfg.dataset.snr_range,
+        snr_range_extreme=default_cfg.dataset.snr_range_extreme,
+        snr_range_very_low=default_cfg.dataset.snr_range_very_low,
+        p_extreme_snr=default_cfg.dataset.p_extreme_snr,
+        p_very_low_snr=default_cfg.dataset.p_very_low_snr,
+        p_interfer_speech=default_cfg.dataset.p_interfer_speech,
+        curriculum_warmup_epochs=default_cfg.training.curriculum_warmup_epochs,
+        speech_gain_range=default_cfg.dataset.speech_gain_range,
+        noise_gain_range=default_cfg.dataset.noise_gain_range,
+        dynamic_loss=default_cfg.loss.dynamic_loss,
+        pipeline_stages=list(default_cfg.loss.pipeline_stages),
+        awesome_loss_weight=default_cfg.loss.awesome.loss_weight,
+        awesome_mask_sharpness=default_cfg.loss.awesome.mask_sharpness,
+        awesome_warmup_steps=default_cfg.loss.awesome.warmup_steps,
+        mrstft_factor=default_cfg.loss.mrstft.factor,
+        mrstft_gamma=default_cfg.loss.mrstft.gamma,
+        mrstft_f_complex=default_cfg.loss.mrstft.f_complex,
+        mrstft_fft_sizes=list(default_cfg.loss.mrstft.fft_sizes),
+        mrstft_hop_sizes=default_cfg.loss.mrstft.hop_sizes,
+        gan_enabled=default_cfg.gan.enabled,
+        gan_start_epoch=default_cfg.gan.start_epoch,
+        gan_ramp_epochs=default_cfg.gan.ramp_epochs,
+        gan_adv_weight=default_cfg.gan.adv_weight,
+        gan_fm_weight=default_cfg.gan.fm_weight,
+        gan_discriminator=default_cfg.gan.discriminator,
+        gan_mpd_periods=list(default_cfg.gan.mpd_periods),
+        gan_msd_scales=default_cfg.gan.msd_scales,
+        gan_disc_lr=default_cfg.gan.disc_lr,
+        gan_disc_weight_decay=default_cfg.gan.disc_weight_decay,
+        gan_disc_grad_clip=default_cfg.gan.disc_grad_clip,
+        gan_disc_update_freq=default_cfg.gan.disc_update_freq,
+        experimental_compiled_gan=default_cfg.gan.experimental_compile,
+        vad_loss_weight=default_cfg.vad.loss_weight,
+        vad_threshold=default_cfg.vad.threshold,
+        vad_margin=default_cfg.vad.margin,
+        vad_speech_loss_weight=default_cfg.vad.speech_loss_weight,
+        vad_warmup_epochs=default_cfg.vad.warmup_epochs,
+        vad_snr_gate=default_cfg.vad.snr_gate_db,
+        vad_snr_gate_width=default_cfg.vad.snr_gate_width,
+        vad_band_low=default_cfg.vad.band_low_hz,
+        vad_band_high=default_cfg.vad.band_high_hz,
+        vad_z_threshold=default_cfg.vad.z_threshold,
+        vad_z_slope=default_cfg.vad.z_slope,
+        vad_eval_mode=default_cfg.vad.eval.mode,
+        vad_eval_every=default_cfg.vad.eval.every,
+        vad_eval_batches=default_cfg.vad.eval.batches,
+        vad_eval_max_seconds=default_cfg.vad.eval.max_seconds,
+        vad_silero_model_path=default_cfg.vad.eval.silero_model_path,
+        vad_silero_sample_rate=default_cfg.vad.eval.silero_sample_rate,
+        vad_train_prob=default_cfg.vad.train.prob,
+        vad_train_every_steps=default_cfg.vad.train.every_steps,
+        max_train_batches=default_cfg.dataloader.max_train_batches,
+        max_valid_batches=default_cfg.dataloader.max_valid_batches,
+        eval_sisdr=default_cfg.metrics.eval_sisdr,
+        check_chkpts=default_cfg.checkpoint.check_chkpts,
+        seed=default_cfg.training.seed,
+        verbose=default_cfg.debug.verbose,
+        debug_numerics=default_cfg.debug.debug_numerics,
+        debug_numerics_fail_fast=default_cfg.debug.debug_numerics_fail_fast,
+        debug_numerics_every=default_cfg.debug.debug_numerics_every,
+        debug_numerics_dump_dir=default_cfg.debug.debug_numerics_dump_dir,
+        debug_numerics_dump_arrays=default_cfg.debug.debug_numerics_dump_arrays,
+        debug_numerics_max_dumps=default_cfg.debug.debug_numerics_max_dumps,
+        nan_skip_batch=default_cfg.debug.nan_skip_batch,
+    )
+
     args = parser.parse_args()
 
-    # Determine FP16 setting from arguments
-    use_fp16: bool | None = None
-    if args.fp16:
-        use_fp16 = True
-    elif args.no_fp16:
-        use_fp16 = False
+    if args.print_run_config:
+        print(generate_run_config_example(), end="")
+        return
 
-    # Resolve resume paths
-    # --resume can be: False (not set), True (flag only), or str (explicit path)
-    resume_from: str | None = None
-    if args.resume:
-        if isinstance(args.resume, str):
-            resume_from = args.resume
-        else:
-            # Auto-find latest checkpoint in checkpoint_dir
-            ckpt_dir = Path(args.checkpoint_dir)
+    run_cfg = RunConfig()
+    if args.preset:
+        run_cfg = load_preset_config(args.preset, base=run_cfg)
+    if args.run_config:
+        run_cfg = load_run_config(args.run_config, base=run_cfg)
+    train_config_path = args.train_config or run_cfg.training.train_config
+    from df_mlx.config import get_default_config
+
+    model_cfg = get_default_config()
+    dataset_overrides: dict[str, Any] = {}
+    ini_warnings: list[str] = []
+    if train_config_path:
+        ini_overrides = apply_train_ini_config(train_config_path, run_cfg, model_cfg)
+        dataset_overrides.update(ini_overrides.dataset_overrides)
+        ini_warnings.extend(ini_overrides.warnings)
+    # Enforce documented precedence: defaults < train-config < run-config < CLI.
+    if args.run_config:
+        run_cfg = load_run_config(args.run_config, base=run_cfg)
+    # Single-file mode: apply INI-compatible sections in run-config.
+    # Then re-apply run-config so explicit top-level TOML values win over train_ini.* compatibility tables.
+    if run_cfg.train_ini:
+        toml_ini_overrides = apply_train_ini_tables(run_cfg.train_ini, run_cfg, model_cfg)
+        dataset_overrides.update(toml_ini_overrides.dataset_overrides)
+        ini_warnings.extend(toml_ini_overrides.warnings)
+        if args.run_config:
+            run_cfg = load_run_config(args.run_config, base=run_cfg)
+    _apply_cli_overrides(run_cfg, args, sys.argv[1:])
+    validate_run_config(run_cfg)
+    if ini_warnings:
+        print("Train-config compatibility warnings:")
+        for warning in ini_warnings:
+            print(f"  - {warning}")
+    # Ensure backbone override from CLI/run-config wins
+    model_cfg.backbone.backbone_type = run_cfg.model.backbone_type  # type: ignore[assignment]
+
+    def _resolve_resume(resume_setting: bool | str, checkpoint_dir: str, label: str) -> str | None:
+        if not resume_setting:
+            return None
+        if isinstance(resume_setting, str):
+            return resume_setting
+        ckpt_dir = Path(checkpoint_dir)
+        if label == "resume":
             latest = find_latest_checkpoint(ckpt_dir)
             if latest:
-                resume_from = str(latest)
-                print(f"Auto-resuming from: {resume_from}")
-            else:
-                print(f"Warning: --resume specified but no checkpoint found in {ckpt_dir}")
+                resume_path = str(latest)
+                print(f"Auto-resuming from: {resume_path}")
+                return resume_path
+            print(f"Warning: resume requested but no checkpoint found in {ckpt_dir}")
+            return None
+        data_ckpt = ckpt_dir / "data_checkpoint.json"
+        if data_ckpt.exists():
+            resume_path = str(data_ckpt)
+            print(f"Auto-resuming data from: {resume_path}")
+            return resume_path
+        print(f"Warning: resume-data requested but {data_ckpt} not found")
+        return None
 
-    # --resume-data can be: False (not set), True (flag only), or str (explicit path)
-    resume_data_from: str | None = None
-    if args.resume_data:
-        if isinstance(args.resume_data, str):
-            resume_data_from = args.resume_data
-        else:
-            # Auto-use data_checkpoint.json in checkpoint_dir
-            data_ckpt = Path(args.checkpoint_dir) / "data_checkpoint.json"
-            if data_ckpt.exists():
-                resume_data_from = str(data_ckpt)
-                print(f"Auto-resuming data from: {resume_data_from}")
-            else:
-                print(f"Warning: --resume-data specified but {data_ckpt} not found")
+    resume_from = _resolve_resume(run_cfg.checkpoint.resume, run_cfg.checkpoint.checkpoint_dir, "resume")
+    resume_data_from = _resolve_resume(
+        run_cfg.checkpoint.resume_data,
+        run_cfg.checkpoint.checkpoint_dir,
+        "resume_data",
+    )
 
     train(
-        cache_dir=args.cache_dir,
-        speech_list=args.speech_list,
-        noise_list=args.noise_list,
-        rir_list=args.rir_list,
-        config_path=args.config,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        learning_rate=args.learning_rate,
-        checkpoint_dir=args.checkpoint_dir,
+        cache_dir=run_cfg.dataset.cache_dir,
+        speech_list=run_cfg.dataset.speech_list,
+        noise_list=run_cfg.dataset.noise_list,
+        rir_list=run_cfg.dataset.rir_list,
+        config_path=run_cfg.dataset.config,
+        epochs=run_cfg.training.epochs,
+        batch_size=run_cfg.training.batch_size,
+        learning_rate=run_cfg.training.learning_rate,
+        learning_rate_min=run_cfg.training.learning_rate_min,
+        weight_decay=run_cfg.training.weight_decay,
+        checkpoint_dir=run_cfg.checkpoint.checkpoint_dir,
         resume_from=resume_from,
         resume_data_from=resume_data_from,
-        validate_every=args.validate_every,
-        save_strategy=cast(Literal["no", "epoch", "steps"], args.save_strategy),
-        save_steps=args.save_steps,
-        save_total_limit=args.save_total_limit,
-        checkpoint_batches=args.checkpoint_batches,
-        max_grad_norm=args.max_grad_norm,
-        warmup_epochs=args.warmup_epochs,
-        patience=args.patience,
-        num_workers=args.num_workers,
-        prefetch_size=args.prefetch_size,
-        p_reverb=args.p_reverb,
-        p_clipping=args.p_clipping,
-        use_mlx_data=not args.no_mlx_data,
-        use_fp16=use_fp16,
-        grad_accumulation_steps=args.grad_accumulation_steps,
-        eval_frequency=args.eval_frequency,
-        backbone_type=cast(Literal["mamba", "gru", "attention"], args.backbone_type),
-        verbose=args.verbose,
-        snr_range=tuple(args.snr_range) if args.snr_range else None,
-        snr_range_extreme=tuple(args.snr_range_extreme) if args.snr_range_extreme else None,
-        p_extreme_snr=args.p_extreme_snr,
-        speech_gain_range=tuple(args.speech_gain_range) if args.speech_gain_range else None,
-        noise_gain_range=tuple(args.noise_gain_range) if args.noise_gain_range else None,
-        dynamic_loss=cast(Literal["baseline", "awesome"], args.dynamic_loss),
-        awesome_loss_weight=args.awesome_loss_weight,
-        awesome_mask_sharpness=args.awesome_mask_sharpness,
-        awesome_warmup_steps=args.awesome_warmup_steps,
-        vad_proxy_enabled=not args.no_vad_proxy,
-        vad_loss_weight=args.vad_loss_weight,
-        vad_threshold=args.vad_threshold,
-        vad_margin=args.vad_margin,
-        vad_speech_loss_weight=args.vad_speech_loss_weight,
-        vad_warmup_epochs=args.vad_warmup_epochs,
-        vad_snr_gate_db=args.vad_snr_gate,
-        vad_snr_gate_width=args.vad_snr_gate_width,
-        vad_band_low_hz=args.vad_band_low,
-        vad_band_high_hz=args.vad_band_high,
-        vad_z_threshold=args.vad_z_threshold,
-        vad_z_slope=args.vad_z_slope,
-        vad_eval_mode=cast(Literal["auto", "proxy", "silero", "off"], args.vad_eval_mode),
-        vad_eval_every=args.vad_eval_every,
-        vad_eval_batches=args.vad_eval_batches,
-        vad_eval_max_seconds=args.vad_eval_max_seconds,
-        vad_silero_model_path=args.vad_silero_model_path,
-        vad_silero_sample_rate=args.vad_silero_sample_rate,
-        vad_train_prob=args.vad_train_prob,
-        vad_train_every_steps=args.vad_train_every_steps,
-        eval_sisdr=args.eval_sisdr,
-        check_chkpts=args.check_chkpts,
-        max_train_batches=args.max_train_batches,
-        max_valid_batches=args.max_valid_batches,
+        validate_every=run_cfg.checkpoint.validate_every,
+        save_strategy=cast(Literal["no", "epoch", "steps"], run_cfg.checkpoint.save_strategy),
+        save_steps=run_cfg.checkpoint.save_steps,
+        save_total_limit=run_cfg.checkpoint.save_total_limit,
+        checkpoint_batches=run_cfg.checkpoint.checkpoint_batches,
+        max_grad_norm=run_cfg.training.max_grad_norm,
+        warmup_epochs=run_cfg.training.warmup_epochs,
+        patience=run_cfg.training.patience,
+        num_workers=run_cfg.dataloader.num_workers,
+        prefetch_size=run_cfg.dataloader.prefetch_size,
+        p_reverb=run_cfg.augmentation.p_reverb,
+        p_clipping=run_cfg.augmentation.p_clipping,
+        use_mlx_data=run_cfg.dataloader.use_mlx_data,
+        use_fp16=run_cfg.training.fp16,
+        grad_accumulation_steps=run_cfg.training.grad_accumulation_steps,
+        eval_frequency=run_cfg.training.eval_frequency,
+        backbone_type=cast(Literal["mamba", "gru", "attention"], run_cfg.model.backbone_type),
+        model_variant=cast(Literal["full", "lite"], run_cfg.model.variant),
+        verbose=run_cfg.debug.verbose,
+        snr_range=run_cfg.dataset.snr_range,
+        snr_range_extreme=run_cfg.dataset.snr_range_extreme,
+        snr_range_very_low=run_cfg.dataset.snr_range_very_low,
+        p_extreme_snr=run_cfg.dataset.p_extreme_snr,
+        p_very_low_snr=run_cfg.dataset.p_very_low_snr,
+        p_interfer_speech=run_cfg.dataset.p_interfer_speech,
+        curriculum_warmup_epochs=run_cfg.training.curriculum_warmup_epochs,
+        speech_gain_range=run_cfg.dataset.speech_gain_range,
+        noise_gain_range=run_cfg.dataset.noise_gain_range,
+        dynamic_loss=cast(Literal["baseline", "awesome", "pipeline_awesome"], run_cfg.loss.dynamic_loss),
+        pipeline_stages=run_cfg.loss.pipeline_stages,
+        awesome_loss_weight=run_cfg.loss.awesome.loss_weight,
+        awesome_mask_sharpness=run_cfg.loss.awesome.mask_sharpness,
+        awesome_warmup_steps=run_cfg.loss.awesome.warmup_steps,
+        gan_enabled=run_cfg.gan.enabled,
+        gan_start_epoch=run_cfg.gan.start_epoch,
+        gan_ramp_epochs=run_cfg.gan.ramp_epochs,
+        gan_adv_weight=run_cfg.gan.adv_weight,
+        gan_fm_weight=run_cfg.gan.fm_weight,
+        gan_disc_type=cast(Literal["combined", "mpd", "msd"], run_cfg.gan.discriminator),
+        gan_mpd_periods=tuple(run_cfg.gan.mpd_periods) if run_cfg.gan.mpd_periods else None,
+        gan_msd_scales=run_cfg.gan.msd_scales,
+        gan_disc_lr=run_cfg.gan.disc_lr,
+        gan_disc_weight_decay=run_cfg.gan.disc_weight_decay,
+        gan_disc_grad_clip=run_cfg.gan.disc_grad_clip,
+        gan_disc_update_freq=run_cfg.gan.disc_update_freq,
+        gan_disc_max_samples=run_cfg.gan.disc_max_samples,
+        gan_mpd_channels=run_cfg.gan.mpd_channels,
+        gan_msd_channels=run_cfg.gan.msd_channels,
+        experimental_compiled_gan=run_cfg.gan.experimental_compile,
+        vad_proxy_enabled=run_cfg.loss.awesome.proxy_enabled,
+        vad_loss_weight=run_cfg.vad.loss_weight,
+        vad_threshold=run_cfg.vad.threshold,
+        vad_margin=run_cfg.vad.margin,
+        vad_speech_loss_weight=run_cfg.vad.speech_loss_weight,
+        vad_warmup_epochs=run_cfg.vad.warmup_epochs,
+        vad_snr_gate_db=run_cfg.vad.snr_gate_db,
+        vad_snr_gate_width=run_cfg.vad.snr_gate_width,
+        vad_band_low_hz=run_cfg.vad.band_low_hz,
+        vad_band_high_hz=run_cfg.vad.band_high_hz,
+        vad_z_threshold=run_cfg.vad.z_threshold,
+        vad_z_slope=run_cfg.vad.z_slope,
+        vad_eval_mode=cast(Literal["auto", "proxy", "silero", "off"], run_cfg.vad.eval.mode),
+        vad_eval_every=run_cfg.vad.eval.every,
+        vad_eval_batches=run_cfg.vad.eval.batches,
+        vad_eval_max_seconds=run_cfg.vad.eval.max_seconds,
+        vad_silero_model_path=run_cfg.vad.eval.silero_model_path,
+        vad_silero_sample_rate=run_cfg.vad.eval.silero_sample_rate,
+        vad_train_prob=run_cfg.vad.train.prob,
+        vad_train_every_steps=run_cfg.vad.train.every_steps,
+        eval_sisdr=run_cfg.metrics.eval_sisdr,
+        check_chkpts=run_cfg.checkpoint.check_chkpts,
+        max_train_batches=run_cfg.dataloader.max_train_batches,
+        max_valid_batches=run_cfg.dataloader.max_valid_batches,
+        seed=run_cfg.training.seed,
+        debug_numerics=run_cfg.debug.debug_numerics,
+        debug_numerics_fail_fast=run_cfg.debug.debug_numerics_fail_fast,
+        debug_numerics_every=run_cfg.debug.debug_numerics_every,
+        debug_numerics_dump_dir=run_cfg.debug.debug_numerics_dump_dir,
+        debug_numerics_dump_arrays=run_cfg.debug.debug_numerics_dump_arrays,
+        debug_numerics_max_dumps=run_cfg.debug.debug_numerics_max_dumps,
+        nan_skip_batch=run_cfg.debug.nan_skip_batch,
+        sync_mode=run_cfg.debug.sync_mode,
+        model_config=model_cfg,
+        dataset_overrides=dataset_overrides,
+        mrstft_config=run_cfg.loss.mrstft,
+        train_config_path=train_config_path,
     )
 
 

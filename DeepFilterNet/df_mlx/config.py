@@ -255,34 +255,57 @@ def load_config(path: str) -> ModelParams4:
 
     params = ModelParams4()
 
-    # Parse [deepfilternet] section if present
-    if "deepfilternet" in config:
-        df_cfg = config["deepfilternet"]
+    def _apply_model_like_section(section_name: str) -> None:
+        if section_name not in config:
+            return
+        sec = config[section_name]
 
-        if "nb_df" in df_cfg:
-            params.df.nb_df = int(df_cfg["nb_df"])
-        if "df_order" in df_cfg:
-            params.df.df_order = int(df_cfg["df_order"])
-        if "df_lookahead" in df_cfg:
-            params.df.df_lookahead = int(df_cfg["df_lookahead"])
-        if "nb_erb" in df_cfg:
-            params.erb.nb_erb = int(df_cfg["nb_erb"])
-        if "conv_ch" in df_cfg:
-            params.encoder.conv_channels = int(df_cfg["conv_ch"])
-        if "emb_hidden_dim" in df_cfg:
-            params.encoder.emb_hidden_dim = int(df_cfg["emb_hidden_dim"])
-        if "df_hidden_dim" in df_cfg:
-            params.df.nb_df_hidden = int(df_cfg["df_hidden_dim"])
+        if "sr" in sec:
+            params.audio.sr = sec.getint("sr")
+        if "fft_size" in sec:
+            params.audio.fft_size = sec.getint("fft_size")
+        if "hop_size" in sec:
+            params.audio.hop_size = sec.getint("hop_size")
+        if "nb_erb" in sec:
+            params.erb.nb_erb = sec.getint("nb_erb")
+        if "nb_df" in sec:
+            params.df.nb_df = sec.getint("nb_df")
+        if "df_order" in sec:
+            params.df.df_order = sec.getint("df_order")
+        if "df_lookahead" in sec:
+            params.df.df_lookahead = sec.getint("df_lookahead")
+        if "conv_lookahead" in sec:
+            params.df.conv_lookahead = sec.getint("conv_lookahead")
+        if "conv_ch" in sec:
+            params.encoder.conv_channels = sec.getint("conv_ch")
+        if "emb_hidden_dim" in sec:
+            params.encoder.emb_hidden_dim = sec.getint("emb_hidden_dim")
+        if "enc_linear_groups" in sec:
+            params.encoder.enc_linear_groups = sec.getint("enc_linear_groups")
+        if "df_hidden_dim" in sec:
+            params.df.nb_df_hidden = sec.getint("df_hidden_dim")
+        if "nb_df_hidden" in sec:
+            params.df.nb_df_hidden = sec.getint("nb_df_hidden")
+        if "df_n_layers" in sec:
+            params.df.df_n_layers = sec.getint("df_n_layers")
+        if "nb_df_layers" in sec:
+            params.df.df_n_layers = sec.getint("nb_df_layers")
+        if "mask_pf" in sec:
+            params.df.mask_pf = sec.getboolean("mask_pf")
+        if "pf_beta" in sec:
+            params.df.pf_beta = sec.getfloat("pf_beta")
 
-    # Parse [audio] section if present
+    # Accept both old/new training config section names.
+    for section in ("deepfilternet", "deepfilternet4", "df"):
+        _apply_model_like_section(section)
+
+    # [audio] can override transport-level audio params explicitly.
     if "audio" in config:
-        audio_cfg = config["audio"]
+        _apply_model_like_section("audio")
 
-        if "sr" in audio_cfg:
-            params.audio.sr = int(audio_cfg["sr"])
-        if "fft_size" in audio_cfg:
-            params.audio.fft_size = int(audio_cfg["fft_size"])
-        if "hop_size" in audio_cfg:
-            params.audio.hop_size = int(audio_cfg["hop_size"])
+    # Keep frequency aliases synchronized after any fft_size updates.
+    n_freqs = params.audio.fft_size // 2 + 1
+    params.audio.nb_freqs = n_freqs
+    params.audio.n_freqs = n_freqs
 
     return params

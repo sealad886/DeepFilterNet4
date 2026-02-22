@@ -1,7 +1,7 @@
 [package]
 name = "df-demo"
 version = "0.6.0"
-authors = ["Dr. Andrew Cox <155285242+sealad886@users.noreply.github.com>", "Hendrik Schröter"]
+authors = ["Dr. Andrew Cox", "Hendrik Schröter"]
 edition = "2021"
 
 [[bin]]
@@ -27,7 +27,7 @@ iced = { version = "0.12", features = [
   "tokio",
   "lazy",
 ], optional = true }
-itertools = "0.12"
+itertools = "0.14"
 crossbeam-channel = "0.5"
 image_rs = { package = "image", version = "0.24", optional = true }
 anyhow = "1.0"

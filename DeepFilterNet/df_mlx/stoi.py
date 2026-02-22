@@ -16,7 +16,7 @@ from typing import List, Tuple
 import mlx.core as mx
 import numpy as np
 
-EPS = np.finfo("float").eps
+EPS = float(np.finfo("float").eps)  # Cast to Python float for MLX compatibility
 
 
 def thirdoct(

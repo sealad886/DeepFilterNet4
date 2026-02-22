@@ -41,7 +41,6 @@ from __future__ import annotations
 import argparse
 import io
 import json
-import os
 import sys
 import threading
 import time
@@ -54,6 +53,8 @@ from typing import Dict, List, Optional, Tuple, cast
 
 import numpy as np
 from tqdm import tqdm
+
+from .file_lists import read_file_list as _read_file_list
 
 # Audio loading with resampling
 try:
@@ -322,16 +323,7 @@ class ShardWriter:
 
 def read_file_list(path: str) -> List[str]:
     """Read file list from text file."""
-    files = []
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith("#"):
-                if os.path.exists(line):
-                    files.append(line)
-                else:
-                    print(f"Warning: File not found: {line}")
-    return files
+    return _read_file_list(path, check_exists=True, warn_missing_entries=True)
 
 
 def merge_short_audio(

@@ -132,6 +132,7 @@ if MLX_AVAILABLE:
         CombinedLoss,
         DfAlphaLoss,
         FeatureMatchingLoss,
+        FusedSpectralLoss,
         MaskLoss,
         SegmentalSiSdrLoss,
         SiSdrLoss,
@@ -158,7 +159,12 @@ if MLX_AVAILABLE:
         GroupedGRU,
     )
     from .modules import GroupedLinear as GroupedLinearModule  # noqa: F401
-    from .modules import Mask, SqueezedGRU, SqueezedGRU_S, erb_fb  # noqa: F401
+    from .modules import (  # noqa: F401
+        Mask,
+        SqueezedGRU,
+        SqueezedGRU_S,
+        erb_fb,
+    )
 
     # Multi-frame processing modules
     from .multiframe import CRM, DF, DFreal, MfMvdr, MfWf, MultiFrameModule, MultiResolutionDF  # noqa: F401
@@ -281,6 +287,7 @@ if MLX_AVAILABLE:
         "StreamingMLXDataLoader",
         # Loss functions (new)
         "SpectralLoss",
+        "FusedSpectralLoss",
         "MaskLoss",
         "SiSdrLoss",
         "SegmentalSiSdrLoss",

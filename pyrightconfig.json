@@ -5,6 +5,8 @@
     "reportGeneralTypeIssues": "warning",
     "reportArgumentType": "none",
     "reportPossiblyUnboundVariable": "none",
+    "reportAttributeAccessIssue": "none",
+    "reportAssignmentType": "none",
     "exclude": [
         "**/tests/**",
         "**/__pycache__/**",

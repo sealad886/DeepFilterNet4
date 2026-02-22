@@ -41,6 +41,8 @@ from tqdm import tqdm
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from df_mlx.grad_utils import clip_grad_norm_tree  # noqa: E402
+
 
 def save_checkpoint(
     model: nn.Module,
@@ -118,42 +120,8 @@ def clip_grad_norm(grads, max_norm: float) -> Tuple[dict, float]:
     Returns:
         Tuple of (clipped_grads, grad_norm)
     """
-    flat_grads = []
-
-    def flatten(x):
-        if isinstance(x, mx.array):
-            flat_grads.append(x.reshape(-1))
-        elif isinstance(x, dict):
-            for v in x.values():
-                flatten(v)
-        elif isinstance(x, (list, tuple)):
-            for v in x:
-                flatten(v)
-
-    flatten(grads)
-
-    if not flat_grads:
-        return grads, 0.0
-
-    total_norm_sq = sum(mx.sum(g**2) for g in flat_grads)
-    total_norm = mx.sqrt(total_norm_sq)
-    grad_norm_val = float(total_norm)
-
-    clip_coef = max_norm / (total_norm + 1e-6)
-    clip_coef = mx.minimum(clip_coef, mx.array(1.0))
-
-    def apply_clip(x):
-        if isinstance(x, mx.array):
-            return x * clip_coef
-        elif isinstance(x, dict):
-            return {k: apply_clip(v) for k, v in x.items()}
-        elif isinstance(x, list):
-            return [apply_clip(v) for v in x]
-        elif isinstance(x, tuple):
-            return tuple(apply_clip(v) for v in x)
-        return x
-
-    return cast(dict, apply_clip(grads)), grad_norm_val
+    clipped, total_norm = clip_grad_norm_tree(grads, max_norm)
+    return cast(dict, clipped), float(total_norm)
 
 
 def train(
@@ -304,8 +272,7 @@ def train(
             feat_spec = batch["feat_spec"]
             target = batch["target"]
 
-            # TODO: Test out to see if the typechecking error is actually an issue
-            current_batch_size = spec.shape[0]
+            current_batch_size = feat_erb.shape[0]  # type: ignore[union-attr]
 
             # Forward and backward pass
             loss, grads = loss_and_grad(model, spec, feat_erb, feat_spec, target)

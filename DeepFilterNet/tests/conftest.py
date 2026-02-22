@@ -1,6 +1,8 @@
 """Pytest configuration and fixtures for DeepFilterNet tests."""
 
+import os
 import platform
+from pathlib import Path
 from typing import Optional, Tuple
 
 import pytest
@@ -140,7 +142,7 @@ LR = 1e-4
         config_path = f.name
 
     try:
-        config.load(config_path)
+        config.load(config_path, allow_reload=True)
         yield config
     finally:
         os.unlink(config_path)
@@ -153,3 +155,12 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "mps" in item.keywords and not _mps_available():
             item.add_marker(skip_mps)
+
+
+@pytest.fixture
+def ds_dir():
+    """Dataset directory for dflib dataloader tests (set via env var)."""
+    env = os.getenv("DFNET_DATASET_DIR") or os.getenv("DFNET_DS_DIR")
+    if env and Path(env).exists():
+        return env
+    pytest.skip("Set DFNET_DATASET_DIR (or DFNET_DS_DIR) to run dataloader tests.")

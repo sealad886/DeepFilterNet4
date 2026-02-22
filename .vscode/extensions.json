@@ -1,0 +1,9 @@
+{
+  "recommendations": [
+    "tamasfe.even-better-toml",
+    "ms-python.python",
+    "ms-python.debugpy",
+    "vadimcn.vscode-lldb",
+    "rust-lang.rust-analyzer"
+  ]
+}

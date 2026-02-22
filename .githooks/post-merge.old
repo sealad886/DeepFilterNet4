@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(git rev-parse --show-toplevel)"
+"$ROOT_DIR/scripts/guard-upstream-remote.sh" cleanup || true
+
+GIT_DIR="$(git rev-parse --git-dir)"
+LEGACY_HOOK="$GIT_DIR/hooks/post-merge"
+if [[ -x "$LEGACY_HOOK" ]]; then
+  exec "$LEGACY_HOOK" "$@"
+fi

@@ -69,7 +69,8 @@ def main(args):
         assert len(args.noisy_audio_files) > 0, "No audio files provided"
         input_files = args.noisy_audio_files
     ds = AudioDataset(input_files, df_sr)
-    loader = DataLoader(ds, num_workers=2, pin_memory=True)
+    loader_workers = max(0, getattr(args, "num_workers", 2))
+    loader = DataLoader(ds, num_workers=loader_workers, pin_memory=True)
     n_samples = len(ds)
     device = getattr(args, "device", None)
     for i, (file, audio, audio_sr) in enumerate(loader):
@@ -390,6 +391,12 @@ def run():
         action="store_false",
         dest="suffix",
         help="Don't add the model suffix to the enhanced audio files",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=2,
+        help="Number of DataLoader workers used for file enhancement input loading.",
     )
     parser.add_argument("--no-df-stage", action="store_true")
     args = parser.parse_args()

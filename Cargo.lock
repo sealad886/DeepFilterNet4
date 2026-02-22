@@ -3,6 +3,15 @@
 version = 3
 
 [[package]]
+name = "DeepFilterAugment"
+version = "0.1.0"
+dependencies = [
+ "ndarray",
+ "numpy",
+ "pyo3",
+]
+
+[[package]]
 name = "DeepFilterDataLoader"
 version = "0.6.0"
 dependencies = [

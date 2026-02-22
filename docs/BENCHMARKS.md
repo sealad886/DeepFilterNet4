@@ -3,6 +3,15 @@
 This document presents performance benchmarks comparing the MLX implementation
 of DeepFilterNet4 with PyTorch on Apple Silicon.
 
+## Quick Reference
+
+| Document | Purpose |
+|----------|--------|
+| [BENCHMARK_CONTRACT.md](BENCHMARK_CONTRACT.md) | Canonical benchmark matrix, metadata schema, thresholds |
+| [PERF_REGRESSION_GATE.md](PERF_REGRESSION_GATE.md) | Regression gate procedure and triage protocol |
+| [DATA_PIPELINE_TUNING.md](DATA_PIPELINE_TUNING.md) | Hardware-specific pipeline tuning profiles |
+| [RUN_CONFIG_PRESETS.md](RUN_CONFIG_PRESETS.md) | Ready-to-use TOML presets per hardware class |
+
 ## Overview
 
 The MLX implementation is designed to maximize performance on Apple Silicon
@@ -258,6 +267,44 @@ contribute by:
 1. Running the benchmark script with `--output results.json`
 2. Including your hardware specifications
 3. Opening a PR to add your results to this document
+
+## Benchmark Contract & Regression Gate
+
+The canonical benchmark protocol is defined in [BENCHMARK_CONTRACT.md](BENCHMARK_CONTRACT.md).
+It specifies a **48-point configuration matrix** (2 backbones × 3 batch sizes × 2 compile modes × 2 grad-accum × 2 FP16) with warmup, measurement window, and metadata requirements.
+
+### Running the Regression Gate
+
+Before merging performance-sensitive changes, run the automated regression gate:
+
+```bash
+# Generate baseline (on main branch)
+cd DeepFilterNet
+python -m df_mlx.benchmark_train_step --contract --metadata --json-out baseline.jsonl
+
+# Generate candidate (on feature branch)
+python -m df_mlx.benchmark_train_step --contract --metadata --json-out candidate.jsonl
+
+# Compare
+python scripts/perf_gate.py --baseline baseline.jsonl --candidate candidate.jsonl
+```
+
+See [PERF_REGRESSION_GATE.md](PERF_REGRESSION_GATE.md) for the full gate procedure and triage protocol.
+
+## Hardware-Adaptive Defaults
+
+The data pipeline and training configuration support hardware-adaptive defaults
+that automatically tune worker count, prefetch depth, and batch size for the
+detected Apple Silicon variant. See:
+
+- [DATA_PIPELINE_TUNING.md](DATA_PIPELINE_TUNING.md) — per-hardware worker/prefetch profiles
+- [RUN_CONFIG_PRESETS.md](RUN_CONFIG_PRESETS.md) — ready-to-use TOML presets (`entry`, `pro`, `max`, `ultra`, `debug`)
+
+Use `--preset <name>` to select the appropriate hardware profile:
+
+```bash
+python -m df_mlx.train_dynamic --preset max --run-config my_config.toml
+```
 
 ## References
 

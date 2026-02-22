@@ -16,7 +16,7 @@ USE_TORCHCODEC = TORCHAUDIO_VERSION >= version.parse("2.9.0")
 HAS_TORCHCODEC = False
 if USE_TORCHCODEC:
     try:
-        from torchcodec.decoders import AudioDecoder
+        from torchcodec.decoders import AudioDecoder  # type: ignore[import-not-found]
 
         HAS_TORCHCODEC = True
     except ImportError:
@@ -162,7 +162,8 @@ def save_audio(
     if audio.ndim == 1:
         audio.unsqueeze_(0)
     if dtype == torch.int16 and audio.dtype != torch.int16:
-        audio = (audio * (1 << 15)).to(torch.int16)
+        # Clamp to [-1, 1] before int16 conversion to prevent overflow wrapping
+        audio = (audio.clamp(-1.0, 1.0) * (1 << 15)).to(torch.int16)
     if dtype == torch.float32 and audio.dtype != torch.float32:
         audio = audio.to(torch.float32) / (1 << 15)
     # TorchAudio 2.9+ requires TorchCodec for ta.save(); use soundfile as fallback

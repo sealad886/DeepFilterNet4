@@ -91,6 +91,132 @@ python -m df_mlx.train_dynamic \
     --p-reverb 0.5
 ```
 
+#### Benchmark Dynamic Data Pipeline
+
+Use the benchmark harness to compare loader throughput and tail latency.
+All tunable benchmark flags accept comma-separated lists, so one command
+can execute a full benchmark matrix across `PrefetchDataLoader` and
+`MLXDataStream`.
+
+```bash
+# Cache-backed benchmark (recommended)
+python -m df_mlx.benchmark_pipeline \
+    --cache-dir /path/to/audio_cache \
+    --split train,valid \
+    --epoch 0,1 \
+    --batch-size 8,12 \
+    --batches 150,300 \
+    --warmup-batches 5,10 \
+    --repeats 2 \
+    --workers 1,2,4,8 \
+    --prefetch-factor 2,4 \
+    --prefetch-size 8,16 \
+    --backends prefetch,mlx_stream \
+    --sync-arrays true,false \
+    --json-out ./benchmarks/df_mlx_pipeline.json
+
+# Raw file-list benchmark (without cache)
+python -m df_mlx.benchmark_pipeline \
+    --speech-list ./file_lists/speech.txt \
+    --noise-list ./file_lists/noise.txt \
+    --rir-list ./file_lists/rir.txt \
+    --batch-size 8,12 \
+    --batches 100 \
+    --workers 1,2,4,8 \
+    --sample-rate 48000 \
+    --segment-length 4.0,5.0 \
+    --fft-size 960,1024 \
+    --hop-size 480,512 \
+    --nb-erb 32 \
+    --nb-df 96 \
+    --seed 42,1337
+```
+
+The script reports mean/p50/p95/p99 batch fetch latency, throughput
+(`batches/s`, `samples/s`), and measured batch/sample counts.
+
+#### Run-config (CLI/runtime settings)
+
+`--config` remains the dataset/mixer JSON. Use `--run-config` for all CLI/runtime
+settings (TOML). Precedence: defaults < run-config < explicit CLI flags.
+
+```bash
+# Generate a fully-commented example config
+python -m df_mlx.train_dynamic --print-run-config > run.toml
+
+# Use both configs together
+python -m df_mlx.train_dynamic \
+    --run-config run.toml \
+    --config ./file_lists/config.json
+```
+
+Single-file mode (no separate `--train-config` INI): inline train.py-compatible
+INI sections inside the run-config TOML under `train_ini.*`.
+
+```toml
+[train_ini.df]
+sr = 48000
+fft_size = 960
+hop_size = 480
+nb_erb = 32
+nb_df = 96
+
+[train_ini.train]
+max_epochs = 100
+batch_size = 12
+num_workers = 6
+num_prefetch_batches = 18
+
+[train_ini.deepfilternet4]
+backbone = "attention"
+model_variant = "full"
+conv_ch = 64
+conv_kernel = [1, 3]
+conv_stride = [1, 2]
+
+[train_ini.MultiResSpecLoss]
+factor = 0.6
+gamma = 0.5
+factor_complex = 0.25
+fft_sizes = [512, 1024, 2048]
+hop_sizes = [128, 256, 512]
+```
+
+#### Train-config (train.py-compatible INI)
+
+`train_dynamic` also accepts a train.py-style `config.ini` and maps supported
+sections to MLX training + model settings. Precedence: defaults < train-config
+< run-config < explicit CLI flags.
+
+Example template:
+`DeepFilterNet/df_mlx/configs/train.ini`
+
+```bash
+python -m df_mlx.train_dynamic \
+    --config ./file_lists/config.json \
+    --train-config /path/to/config.ini
+```
+
+Example using the repo template:
+
+```bash
+python -m df_mlx.train_dynamic \
+    --config /path/to/dataset/config.json \
+    --train-config DeepFilterNet/df_mlx/configs/train.ini \
+    --checkpoint-dir /path/to/checkpoints \
+    --dynamic-loss pipeline_awesome \
+    --epochs 100
+```
+
+Supported sections:
+- `[df]`, `[train]`, `[optim]`, `[distortion]`, `[deepfilternet4]`
+- `[loss]` (multi_res_stft_* keys)
+- `[MultiResSpecLoss]`
+- `[GANLoss]`, `[FeatureMatchingLoss]` (adversarial training)
+
+Unsupported sections (e.g. `[ASRLoss]`, `[MaskLoss]`, `[SpectralLoss]`) are ignored with warnings.
+Use `df/train.py` for ASR loss; GAN training is supported directly in `train_dynamic`.
+
 #### Awesome dynamic loss (speech-preserving)
 
 Enable the speech-preserving contrastive loss and cheap VAD proxy gating:
@@ -125,6 +251,66 @@ Optional VAD controls (all optional; defaults are safe):
 # Disable proxy gating if needed
 --no-vad-proxy
 ```
+
+#### Multi-res STFT loss (speech clarity)
+
+Enable the time-domain multi-resolution STFT loss (analogous to PyTorch
+`MultiResSpecLoss`) to improve speech detail:
+
+```bash
+python -m df_mlx.train_dynamic \
+    --config ./file_lists/config.json \
+    --train-config /path/to/config.ini \
+    --mrstft-factor 1.0 \
+    --mrstft-gamma 1.0 \
+    --mrstft-f-complex 0.5 \
+    --mrstft-fft-sizes 512 1024 2048
+```
+
+Note: When FP16 mixed precision is enabled, the MRSTFT path is computed in
+FP32 internally to avoid overflow in magnitude squaring and power compression.
+
+#### GAN adversarial loss (optional)
+
+Enable GAN-based perceptual cleanup using a discriminator + feature matching.
+When GAN is enabled, the compiled training step is disabled automatically.
+Set `[GANLoss] factor` (and optionally `[FeatureMatchingLoss] factor`) to
+non-zero values in your train.ini.
+
+```bash
+python -m df_mlx.train_dynamic \
+    --config ./file_lists/config.json \
+    --train-config /path/to/config.ini \
+    --gan-enabled \
+    --gan-start-epoch 0 \
+    --gan-ramp-epochs 5 \
+    --gan-adv-weight 0.1 \
+    --gan-fm-weight 2.0 \
+    --gan-discriminator combined
+```
+
+GAN checkpoints include discriminator weights alongside generator checkpoints
+using the same stem: `epoch_060.safetensors` + `epoch_060.disc.safetensors`.
+
+#### Numeric debug mode (NaN/inf diagnosis)
+
+Use the built-in numeric debugger to find the first non-finite tensor and
+dump a compact snapshot for analysis. Debug mode runs a short, deterministic
+job and disables the compiled training step for better visibility.
+
+```bash
+python -m df_mlx.train_dynamic \
+    --config ./file_lists/config.json \
+    --dynamic-loss awesome \
+    --debug-numerics \
+    --debug-numerics-dump-arrays \
+    --no-fp16
+```
+
+Optional controls:
+- `--debug-numerics-every 1` (check every step)
+- `--nan-skip-batch` (skip optimizer update on non-finite)
+- `--seed 123` (deterministic sampling)
 
 Or specify file lists directly:
 

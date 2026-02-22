@@ -3,6 +3,7 @@
 import os
 import unittest
 from functools import partial
+from pathlib import Path
 from typing import Callable, Dict, List, Optional, Union
 
 import numpy as np
@@ -36,7 +37,7 @@ def eval_metric(
     is_close = torch.isclose(m_e, m_t, atol=__a_tol, rtol=__r_tol).all()
     if not is_close:
         logger.error(prefix + f"Diff     {m_t - m_e}")
-    return all(is_close)
+    return bool(is_close)
 
 
 TARGET_METRICS = {
@@ -112,8 +113,9 @@ class TestDfModels(unittest.TestCase):
         prefix = prefix + " | " if prefix is not None else ""
         sr = df_state.sr()
         logger.info(prefix + "Loading audios")
-        noisy, _ = load_audio(os.path.join(self.df_dir, os.path.pardir, "assets", "noisy_snr0.wav"), sr)
-        clean, _ = load_audio(os.path.join(self.df_dir, os.path.pardir, "assets", "clean_freesound_33711.wav"), sr)
+        assets = self._resolve_assets_dir()
+        noisy, _ = load_audio(str(assets / "noisy_snr0.wav"), sr)
+        clean, _ = load_audio(str(assets / "clean_freesound_33711.wav"), sr)
         enhanced = enhance(model, df_state, noisy, pad=True)
         save_audio(out_n, enhanced, sr)
         is_close = True
@@ -137,6 +139,18 @@ class TestDfModels(unittest.TestCase):
     def test_deepfilternet3(self):
         model = "DeepFilterNet3"
         self._test_model(*self.models[model], target_metrics=TARGET_METRICS[model], prefix=model)
+
+    @staticmethod
+    def _resolve_assets_dir() -> Path:
+        """Locate repo assets for tests (fallback to installed package layout)."""
+        candidates = [
+            Path(__file__).resolve().parents[3] / "assets",  # repo root/assets
+            Path(df.__file__).resolve().parents[1] / "assets",  # site-packages/../assets
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        raise FileNotFoundError("Could not locate assets directory for DF model tests.")
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ Ported from df/checkpoint.py with MLX-specific adaptations.
 """
 
 import json
+import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +19,7 @@ from typing import Any, Dict, Optional, Tuple
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
+from loguru import logger
 from mlx.utils import tree_flatten, tree_unflatten
 
 from .lr import CosineScheduler
@@ -225,15 +227,17 @@ def save_checkpoint(
 
     # Save model weights
     checkpoint_path = checkpoint_dir / CHECKPOINT_FILE
-    temp_path = checkpoint_path.with_suffix(".tmp")
+    # mx.save_safetensors appends .safetensors, so use a stub name for the temp file
+    temp_stub = checkpoint_dir / "checkpoint_tmp"
+    temp_actual = checkpoint_dir / "checkpoint_tmp.safetensors"
 
     params = model.parameters()
     flat_params = tree_flatten(params)
     weights = {k: v for k, v in flat_params}
-    mx.save_safetensors(str(temp_path), weights)
+    mx.save_safetensors(str(temp_stub), weights)
 
     # Atomic rename
-    shutil.move(str(temp_path), str(checkpoint_path))
+    os.replace(str(temp_actual), str(checkpoint_path))
 
     # Build state dict
     state_dict = state.to_dict()
@@ -257,10 +261,12 @@ def save_checkpoint(
     if scheduler is not None:
         state_dict["scheduler"] = scheduler.state_dict()
 
-    # Save state
+    # Save state atomically to prevent corruption on crash
     state_path = checkpoint_dir / STATE_FILE
-    with open(state_path, "w") as f:
+    state_tmp = state_path.with_suffix(".tmp")
+    with open(state_tmp, "w") as f:
         json.dump(state_dict, f, indent=2)
+    shutil.move(str(state_tmp), str(state_path))
 
     # Save patience separately for easy access
     if state.patience is not None:
@@ -337,8 +343,8 @@ def load_checkpoint(
         try:
             unflat = tree_unflatten(list(restored.items()))
             optimizer.state = unflat
-        except Exception:
-            pass  # Optimizer state mismatch - start fresh
+        except Exception as e:
+            logger.warning(f"Failed to restore optimizer state, starting fresh: {e}")
 
     # Restore scheduler state
     if scheduler is not None and "scheduler" in state_dict:
@@ -361,6 +367,13 @@ def checkpoint_exists(checkpoint_dir: Path | str) -> bool:
     """
     checkpoint_dir = Path(checkpoint_dir)
     return (checkpoint_dir / CHECKPOINT_FILE).exists()
+
+
+def _extract_checkpoint_num(path: Path) -> int:
+    try:
+        return int(path.name.split("_")[-1])
+    except ValueError:
+        return -1
 
 
 def get_latest_checkpoint(base_dir: Path | str) -> Optional[Path]:
@@ -387,14 +400,7 @@ def get_latest_checkpoint(base_dir: Path | str) -> Optional[Path]:
             return base_dir
         return None
 
-    # Sort by number
-    def extract_num(p: Path) -> int:
-        try:
-            return int(p.name.split("_")[-1])
-        except ValueError:
-            return -1
-
-    checkpoint_dirs.sort(key=extract_num, reverse=True)
+    checkpoint_dirs.sort(key=_extract_checkpoint_num, reverse=True)
 
     for d in checkpoint_dirs:
         if checkpoint_exists(d):
@@ -492,14 +498,7 @@ class CheckpointManager:
     def _scan_existing(self) -> None:
         """Scan for existing checkpoints."""
         checkpoint_dirs = list(self.checkpoint_dir.glob("checkpoint_*"))
-
-        def extract_num(p: Path) -> int:
-            try:
-                return int(p.name.split("_")[-1])
-            except ValueError:
-                return -1
-
-        checkpoint_dirs.sort(key=extract_num)
+        checkpoint_dirs.sort(key=_extract_checkpoint_num)
         self._checkpoints = [d for d in checkpoint_dirs if checkpoint_exists(d)]
 
     def save(

@@ -4,6 +4,7 @@ resolver = "2"
 members = [
   "libDF",
   "pyDF",
+  "pyDF-augment",
   "pyDF-data",
   "ladspa",
   "demo",

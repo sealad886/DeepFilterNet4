@@ -1,0 +1,213 @@
+{
+  // Use IntelliSense to learn about possible attributes.
+  // Hover to view descriptions of existing attributes.
+  // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Python Debugger: dynamic training with df_mlx",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "df_mlx.train_dynamic",
+      "args": [
+        "--run-config", "~/DataDump/configs/run_pipeline_awesome_gan_silero_single.toml",
+        "--checkpoint-dir", "~/DataDump/checkpoints/gan_from_40"
+      ],
+      "python": "${workspaceFolder}/.venv/bin/python"
+    },
+    {
+      "name": "Python Debugger: Remote Attach",
+      "type": "debugpy",
+      "request": "attach",
+      "connect": { "host": "localhost", "port": 5678 },
+      "pathMappings": [{ "localRoot": "${workspaceFolder}", "remoteRoot": "." }]
+    },
+    {
+      "name": "Python Debugger: Attach using Process Id",
+      "type": "debugpy",
+      "request": "attach",
+      "processId": "${command:pickProcess}"
+    },
+    {
+      "name": "Python Debugger: Module",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "df.train",
+      "args": [
+        "/Volumes/TrainingData/datasets/dataset.cfg",
+        "/Volumes/TrainingData/datasets/hdf5",
+        "/Volumes/TrainingData/output"
+      ],
+      "cwd": "${workspaceFolder}/DeepFilterNet"
+    },
+    // ===== Python: prepare_data (mirrors build_hdf5.sh) =====
+    {
+      "name": "Python: prepare_data speech",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "df.scripts.prepare_data",
+      "cwd": "${workspaceFolder}/DeepFilterNet",
+      "args": [
+        "speech",
+        "${input:dataDir}/lists/clean_all.txt",
+        "${input:dataDir}/hdf5/speech_clean.hdf5",
+        "--sr",
+        "48000",
+        "--dtype",
+        "int16",
+        "--num_workers",
+        "0",
+        "--max_freq",
+        "24000"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      "name": "Python: prepare_data noise",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "df.scripts.prepare_data",
+      "cwd": "${workspaceFolder}/DeepFilterNet",
+      "args": [
+        "noise",
+        "${input:dataDir}/lists/noise_music.txt",
+        "${input:dataDir}/hdf5/noise_music.hdf5",
+        "--sr",
+        "48000",
+        "--dtype",
+        "int16",
+        "--num_workers",
+        "0",
+        "--max_freq",
+        "24000"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      "name": "Python: prepare_data rir",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "df.scripts.prepare_data",
+      "cwd": "${workspaceFolder}/DeepFilterNet",
+      "args": [
+        "rir",
+        "${input:dataDir}/lists/rir_all.txt",
+        "${input:dataDir}/hdf5/rir.hdf5",
+        "--sr",
+        "48000",
+        "--dtype",
+        "int16",
+        "--num_workers",
+        "0",
+        "--max_freq",
+        "24000"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    // ===== Rust/LLDB configurations =====
+    {
+      "name": "Debug unit tests in library 'df'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": ["test", "--package=deep_filter"]
+      }
+    },
+    {
+      "name": "Debug executable 'deep-filter'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": ["run", "--bin=deep-filter", "--package=deep_filter"]
+      },
+      "args": []
+    },
+    {
+      "name": "Debug unit tests in executable 'deep-filter'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": ["test", "--bin=deep-filter", "--package=deep_filter"]
+      }
+    },
+    {
+      "name": "Debug executable 'sample-dataset'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": ["run", "--bin=sample-dataset", "--package=deep_filter"]
+      },
+      "args": []
+    },
+    {
+      "name": "Debug unit tests in executable 'sample-dataset'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": ["test", "--bin=sample-dataset", "--package=deep_filter"]
+      }
+    },
+    {
+      "name": "Debug executable 'sample-hdf5'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": ["run", "--bin=sample-hdf5", "--package=deep_filter"]
+      },
+      "args": []
+    },
+    {
+      "name": "Debug unit tests in executable 'sample-hdf5'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": ["test", "--bin=sample-hdf5", "--package=deep_filter"]
+      }
+    },
+    {
+      "name": "Debug executable 'df-demo'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": ["run", "--bin=df-demo", "--package=df-demo"]
+      },
+      "args": []
+    },
+    {
+      "name": "Debug unit tests in executable 'df-demo'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": ["test", "--bin=df-demo", "--package=df-demo"]
+      }
+    },
+    {
+      "name": "Debug executable 'df-demo-c'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": ["run", "--bin=df-demo-c", "--package=df-demo"]
+      },
+      "args": []
+    },
+    {
+      "name": "Debug unit tests in executable 'df-demo-c'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": ["test", "--bin=df-demo-c", "--package=df-demo"]
+      }
+    }
+  ],
+  "inputs": [
+    {
+      "id": "dataDir",
+      "type": "promptString",
+      "description": "Data directory (e.g., /Volumes/TrainingData/datasets)",
+      "default": "/Volumes/TrainingData/datasets"
+    }
+  ]
+}

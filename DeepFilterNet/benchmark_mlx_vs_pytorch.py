@@ -16,6 +16,8 @@ import time
 from dataclasses import dataclass
 from typing import List
 
+import numpy as np
+
 # Check frameworks availability
 PYTORCH_AVAILABLE = False
 MLX_AVAILABLE = False
@@ -57,6 +59,8 @@ class BenchmarkResult:
     std_ms: float
     min_ms: float
     max_ms: float
+    p95_ms: float
+    p99_ms: float
     samples_per_sec: float
     memory_mb: float
 
@@ -158,6 +162,8 @@ def benchmark_pytorch(
 
         mean_ms = statistics.mean(times)
         std_ms = statistics.stdev(times) if len(times) > 1 else 0
+        p95_ms = float(np.percentile(times, 95))
+        p99_ms = float(np.percentile(times, 99))
         samples_per_sec = (batch_size * 1000) / mean_ms
 
         results.append(
@@ -169,6 +175,8 @@ def benchmark_pytorch(
                 std_ms=std_ms,
                 min_ms=min(times),
                 max_ms=max(times),
+                p95_ms=p95_ms,
+                p99_ms=p99_ms,
                 samples_per_sec=samples_per_sec,
                 memory_mb=0,  # MPS memory tracking is limited
             )
@@ -212,6 +220,8 @@ def benchmark_mlx(
 
         mean_ms = statistics.mean(times)
         std_ms = statistics.stdev(times) if len(times) > 1 else 0
+        p95_ms = float(np.percentile(times, 95))
+        p99_ms = float(np.percentile(times, 99))
         samples_per_sec = (batch_size * 1000) / mean_ms
 
         results.append(
@@ -223,6 +233,8 @@ def benchmark_mlx(
                 std_ms=std_ms,
                 min_ms=min(times),
                 max_ms=max(times),
+                p95_ms=p95_ms,
+                p99_ms=p99_ms,
                 samples_per_sec=samples_per_sec,
                 memory_mb=0,
             )
@@ -239,10 +251,10 @@ def print_results(pytorch_results: List[BenchmarkResult], mlx_results: List[Benc
 
     # Header
     print(
-        f"\n{'Batch':<8} {'Framework':<14} {'Mean (ms)':<12} {'Std (ms)':<10} "
-        f"{'Min (ms)':<10} {'Max (ms)':<10} {'Samples/s':<12}"
+        f"\n{'Batch':<8} {'Framework':<14} {'Mean (ms)':<12} {'P95 (ms)':<10} {'P99 (ms)':<10} "
+        f"{'Std (ms)':<10} {'Min (ms)':<10} {'Max (ms)':<10} {'Samples/s':<12}"
     )
-    print("-" * 80)
+    print("-" * 120)
 
     # Combine and sort by batch size
     all_results = pytorch_results + mlx_results
@@ -250,8 +262,8 @@ def print_results(pytorch_results: List[BenchmarkResult], mlx_results: List[Benc
 
     for r in all_results:
         print(
-            f"{r.batch_size:<8} {r.framework:<14} {r.mean_ms:<12.2f} {r.std_ms:<10.2f} "
-            f"{r.min_ms:<10.2f} {r.max_ms:<10.2f} {r.samples_per_sec:<12.1f}"
+            f"{r.batch_size:<8} {r.framework:<14} {r.mean_ms:<12.2f} {r.p95_ms:<10.2f} {r.p99_ms:<10.2f} "
+            f"{r.std_ms:<10.2f} {r.min_ms:<10.2f} {r.max_ms:<10.2f} {r.samples_per_sec:<12.1f}"
         )
 
     # Speedup comparison
@@ -325,7 +337,8 @@ def main():
 
             for r in pytorch_results:
                 print(
-                    f"  Batch {r.batch_size:2d}: {r.mean_ms:6.2f}ms ± {r.std_ms:5.2f}ms ({r.samples_per_sec:.1f} samples/s)"
+                    f"  Batch {r.batch_size:2d}: mean={r.mean_ms:6.2f}ms p95={r.p95_ms:6.2f}ms "
+                    f"p99={r.p99_ms:6.2f}ms ({r.samples_per_sec:.1f} samples/s)"
                 )
 
             # Clean up
@@ -356,7 +369,8 @@ def main():
 
             for r in mlx_results:
                 print(
-                    f"  Batch {r.batch_size:2d}: {r.mean_ms:6.2f}ms ± {r.std_ms:5.2f}ms ({r.samples_per_sec:.1f} samples/s)"
+                    f"  Batch {r.batch_size:2d}: mean={r.mean_ms:6.2f}ms p95={r.p95_ms:6.2f}ms "
+                    f"p99={r.p99_ms:6.2f}ms ({r.samples_per_sec:.1f} samples/s)"
                 )
 
             # Clean up

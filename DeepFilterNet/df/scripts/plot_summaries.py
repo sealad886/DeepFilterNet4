@@ -3,7 +3,7 @@ import os
 import signal
 from datetime import datetime
 
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # type: ignore[import-not-found]
 import numpy as np
 import torchaudio
 
@@ -57,7 +57,7 @@ def main():
         plt.show()
 
 
-def plot(f, ax, summary_dir, snr, update_handle=None) -> int:
+def plot(f, ax, summary_dir, snr, update_handle=None) -> list:  # type: ignore[type-arg]
     clean, sr = torchaudio.load(os.path.join(summary_dir, f"clean_snr{snr}.wav"))
     spec_figure(clean, sr, from_audio=True, ax=ax[0], figure=f, ylabel="Frequency [kHz]", kHz=True)
     noisy, sr = torchaudio.load(os.path.join(summary_dir, f"noisy_snr{snr}.wav"))

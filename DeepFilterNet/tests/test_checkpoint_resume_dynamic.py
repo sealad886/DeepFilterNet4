@@ -42,6 +42,8 @@ def _make_checkpoint(
         ckpt_path = tmpdir / f"interrupted_epoch_{epoch + 1:03d}.safetensors"
     elif kind == "best":
         ckpt_path = tmpdir / "best.safetensors"
+    elif kind == "best_final":
+        ckpt_path = tmpdir / "best.safetensors"
     elif kind == "final":
         ckpt_path = tmpdir / "final.safetensors"
     else:
@@ -123,3 +125,22 @@ def test_corrupted_checkpoint_rejected():
         bad.write_bytes(b"")
         with pytest.raises(RuntimeError):
             validate_checkpoint_dir(tmpdir, strict=True, validate_load=False)
+
+
+@pytest.mark.parametrize("kind", ["best_final", "final"])
+def test_resume_advances_for_completed_terminal_kinds(kind: str):
+    with tempfile.TemporaryDirectory() as tmp:
+        tmpdir = Path(tmp)
+        ckpt_path = _make_checkpoint(
+            tmpdir,
+            epoch=6,
+            kind=kind,
+            last_completed=6,
+            global_step=601,
+        )
+
+        report = validate_checkpoint_dir(tmpdir, strict=True, validate_load=False)
+        assert report["valid"] == 1
+        assert report["latest_path"] == ckpt_path
+        assert report["last_completed_epoch"] == 6
+        assert report["resume_epoch"] == 7

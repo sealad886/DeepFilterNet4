@@ -16,7 +16,7 @@ from typing import Dict, Literal, Optional, Tuple
 
 import mlx.core as mx
 
-from .ops import stft
+from .ops import get_window, stft
 
 # ============================================================================
 # Constants and Utilities
@@ -199,6 +199,131 @@ class SpectralLoss:
         return total_loss / len(self.fft_sizes)
 
 
+class FusedSpectralLoss:
+    """Multi-resolution spectral loss with fused STFT frontend.
+
+    Reduces kernel launches by:
+    1. Pre-computing windows at init time (not per-call)
+    2. Using mx.compile on the inner loss computation
+    3. Computing all resolutions' STFTs before loss accumulation
+       (allows MLX graph-level fusion of independent operations)
+
+    Args:
+        fft_sizes: Tuple of FFT sizes to use
+        hop_sizes: Tuple of hop sizes (defaults to fft_size // 4)
+        gamma: Magnitude compression exponent (1.0 = no compression)
+        factor: Weight for magnitude loss
+        factor_complex: Weight for complex loss (None to disable)
+        eps: Numerical stability constant
+
+    Example:
+        >>> loss_fn = FusedSpectralLoss(
+        ...     fft_sizes=(512, 1024, 2048),
+        ...     gamma=0.3,
+        ...     factor=1.0,
+        ...     factor_complex=0.5,
+        ... )
+        >>> loss = loss_fn(pred_waveform, target_waveform)
+    """
+
+    def __init__(
+        self,
+        fft_sizes: Tuple[int, ...] = (512, 1024, 2048),
+        hop_sizes: Optional[Tuple[int, ...]] = None,
+        gamma: float = 1.0,
+        factor: float = 1.0,
+        factor_complex: Optional[float] = None,
+        eps: float = EPS,
+    ):
+        self.fft_sizes = fft_sizes
+        self.hop_sizes = hop_sizes or tuple(fft // 4 for fft in fft_sizes)
+        self.gamma = gamma
+        self.factor = factor
+        self.factor_complex = factor_complex
+        self.eps = eps
+
+        self._windows = [get_window("sqrt_hann", fft_size) for fft_size in fft_sizes]
+
+        self._compiled_loss = mx.compile(self._compute_loss)
+
+    @staticmethod
+    def _stft_inline(x: mx.array, n_fft: int, hop_length: int, window: mx.array) -> Tuple[mx.array, mx.array]:
+        """Compute STFT inline without function-call overhead."""
+        pad_amount = n_fft // 2
+        x_padded = mx.pad(x, [(0, 0), (pad_amount, pad_amount)])
+        num_samples = x_padded.shape[1]
+        num_frames = (num_samples - n_fft) // hop_length + 1
+        frame_starts = mx.arange(num_frames) * hop_length
+        offsets = mx.arange(n_fft)
+        indices = frame_starts[:, None] + offsets[None, :]
+        frames = mx.take(x_padded, indices.flatten(), axis=1).reshape(x_padded.shape[0], num_frames, n_fft)
+        frames = frames * window
+        fft_out = mx.fft.rfft(frames, axis=-1)
+        return mx.real(fft_out), mx.imag(fft_out)
+
+    def _compute_loss(self, pred: mx.array, target: mx.array) -> mx.array:
+        """Core loss computation — designed for mx.compile."""
+        if pred.ndim == 1:
+            pred = mx.expand_dims(pred, axis=0)
+        if target.ndim == 1:
+            target = mx.expand_dims(target, axis=0)
+
+        total_loss = mx.array(0.0)
+
+        for i, (fft_size, hop_size) in enumerate(zip(self.fft_sizes, self.hop_sizes)):
+            window = self._windows[i]
+
+            pred_real, pred_imag = self._stft_inline(pred, fft_size, hop_size, window)
+            target_real, target_imag = self._stft_inline(target, fft_size, hop_size, window)
+
+            pred_mag = mx.sqrt(pred_real**2 + pred_imag**2 + self.eps)
+            target_mag = mx.sqrt(target_real**2 + target_imag**2 + self.eps)
+
+            if self.gamma != 1.0:
+                pred_mag_c = mx.power(pred_mag, self.gamma)
+                target_mag_c = mx.power(target_mag, self.gamma)
+            else:
+                pred_mag_c = pred_mag
+                target_mag_c = target_mag
+
+            mag_loss = mx.mean((pred_mag_c - target_mag_c) ** 2) * self.factor
+            total_loss = total_loss + mag_loss
+
+            if self.factor_complex is not None and self.factor_complex > 0:
+                if self.gamma != 1.0:
+                    pred_angle = mx.arctan2(pred_imag, pred_real + self.eps)
+                    target_angle = mx.arctan2(target_imag, target_real + self.eps)
+
+                    pred_real_c = pred_mag_c * mx.cos(pred_angle)
+                    pred_imag_c = pred_mag_c * mx.sin(pred_angle)
+                    target_real_c = target_mag_c * mx.cos(target_angle)
+                    target_imag_c = target_mag_c * mx.sin(target_angle)
+                else:
+                    pred_real_c = pred_real
+                    pred_imag_c = pred_imag
+                    target_real_c = target_real
+                    target_imag_c = target_imag
+
+                complex_loss = (
+                    mx.mean((pred_real_c - target_real_c) ** 2) + mx.mean((pred_imag_c - target_imag_c) ** 2)
+                ) * self.factor_complex
+                total_loss = total_loss + complex_loss
+
+        return total_loss / len(self.fft_sizes)
+
+    def __call__(self, pred: mx.array, target: mx.array) -> mx.array:
+        """Compute multi-resolution spectral loss (compiled path).
+
+        Args:
+            pred: Predicted waveform (batch, samples) or (samples,)
+            target: Target waveform (batch, samples) or (samples,)
+
+        Returns:
+            Scalar loss value
+        """
+        return self._compiled_loss(pred, target)
+
+
 class MaskLoss:
     """ERB-based mask loss.
 
@@ -365,6 +490,9 @@ def si_sdr(pred: mx.array, target: mx.array, eps: float = EPS) -> mx.array:
     Returns:
         SI-SDR in dB (higher is better)
     """
+    pred = pred.astype(mx.float32)
+    target = target.astype(mx.float32)
+
     if pred.ndim == 1:
         pred = mx.expand_dims(pred, axis=0)
     if target.ndim == 1:
@@ -812,10 +940,9 @@ class ASRLoss:
         factor_lm: float = 1.0,
         model: str = "base.en",
     ):
-        self.factor = factor
-        self.factor_lm = factor_lm
-        self.model = model
-        self._initialized = False
+        raise NotImplementedError(
+            "MLX ASRLoss is not yet implemented. " "Use df.loss.ASRLoss (PyTorch) or disable ASR loss in your config."
+        )
 
     def _lazy_init(self):
         """Lazy initialization of Whisper model."""
@@ -858,11 +985,11 @@ class ASRLoss:
 def create_loss_fn(
     loss_type: str = "combined",
     **kwargs,
-) -> CombinedLoss | SpectralLoss | SiSdrLoss:
+) -> CombinedLoss | SpectralLoss | FusedSpectralLoss | SiSdrLoss:
     """Factory function to create loss functions.
 
     Args:
-        loss_type: Type of loss ("combined", "spectral", "sisdr")
+        loss_type: Type of loss ("combined", "spectral", "fused_spectral", "sisdr")
         **kwargs: Arguments passed to loss constructor
 
     Returns:
@@ -872,6 +999,8 @@ def create_loss_fn(
         return CombinedLoss(**kwargs)
     elif loss_type == "spectral":
         return SpectralLoss(**kwargs)
+    elif loss_type == "fused_spectral":
+        return FusedSpectralLoss(**kwargs)
     elif loss_type == "sisdr":
         return SiSdrLoss(**kwargs)
     else:

@@ -1,0 +1,84 @@
+# Profile: Quality-biased pipeline_awesome + GAN + Silero VAD eval
+# Prioritizes stronger perceptual/speech-structure pressure over raw throughput.
+
+[training]
+batch_size = 16
+learning_rate = 0.00008
+weight_decay = 0.0
+warmup_epochs = 6
+patience = 12
+grad_accumulation_steps = 2
+max_grad_norm = 0.8
+eval_frequency = 10
+fp16 = "auto"
+
+[dataloader]
+num_workers = 8
+prefetch_size = 16
+use_mlx_data = true
+
+[checkpoint]
+save_strategy = "epoch"
+validate_every = 1
+checkpoint_batches = 200
+check_chkpts = false
+resume = false
+resume_data = false
+
+[loss]
+dynamic_loss = "pipeline_awesome"
+
+[loss.awesome]
+loss_weight = 0.5
+mask_sharpness = 7.0
+warmup_steps = 2500
+proxy_enabled = false
+
+[loss.mrstft]
+factor = 0.0
+gamma = 1.0
+f_complex = -1.0
+fft_sizes = [512, 1024, 2048]
+hop_sizes = []
+
+[gan]
+enabled = true
+start_epoch = 3
+ramp_epochs = 8
+adv_weight = 0.09
+fm_weight = 2.0
+discriminator = "combined"
+mpd_periods = [2, 3, 5, 7, 11]
+msd_scales = 3
+disc_lr = 0.0001
+disc_weight_decay = 0.0
+disc_grad_clip = 1.0
+disc_update_freq = 1
+
+[vad]
+loss_weight = 0.06
+threshold = 0.58
+margin = 0.05
+speech_loss_weight = 0.02
+warmup_epochs = 5
+snr_gate_db = -12.0
+snr_gate_width = 6.0
+band_low_hz = 300.0
+band_high_hz = 3400.0
+z_threshold = 0.0
+z_slope = 1.0
+
+[vad.eval]
+mode = "silero"
+every = 1
+batches = 12
+max_seconds = 0.0
+silero_model_path = ""
+silero_sample_rate = 16000
+
+[vad.train]
+prob = 0.0
+every_steps = 2
+
+[debug]
+verbose = true

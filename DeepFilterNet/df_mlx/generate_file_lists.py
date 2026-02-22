@@ -34,6 +34,8 @@ import json
 from pathlib import Path
 from typing import List, Optional
 
+from .file_lists import read_file_list as _read_file_list
+
 AUDIO_EXTENSIONS = {".wav", ".flac", ".mp3", ".ogg", ".opus", ".m4a", ".aac"}
 
 
@@ -165,19 +167,7 @@ def generate_config(
 
 def read_file_list(file_path: str) -> List[str]:
     """Read file list from text file."""
-    files = []
-    path = Path(file_path)
-    if not path.exists():
-        print(f"Warning: File list not found: {file_path}")
-        return files
-
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith("#"):
-                files.append(line)
-
-    return files
+    return _read_file_list(file_path, warn_missing_list=True)
 
 
 def main():

@@ -374,6 +374,8 @@ impl DataLoader {
             self.drained = true;
         }
         let mut tries = 0;
+        let mut timeout_retries = 0usize;
+        let mut max_reorder_buf = self.out_buf.len();
         let mut ids = Vec::with_capacity(self.batch_size(self.current_split));
         let reciever = match self.out_receiver.as_ref() {
             None => {
@@ -400,6 +402,7 @@ impl DataLoader {
                             return Err(DfDataloaderError::TimeoutError);
                         }
                         tries += 1;
+                        timeout_retries += 1;
                         continue 'outer;
                     }
                     Ok((_, Err(DfDataloaderError::DatasetDrained))) => {
@@ -418,6 +421,7 @@ impl DataLoader {
                             self.cur_out_idx += 1;
                         } else {
                             assert!(self.out_buf.insert(o_idx, s).is_none());
+                            max_reorder_buf = max_reorder_buf.max(self.out_buf.len());
                         }
                     }
                 }
@@ -445,6 +449,13 @@ impl DataLoader {
             batch.timings = timings;
             Some(batch)
         };
+        if timeout_retries > 0 || max_reorder_buf > 0 {
+            log::trace!(
+                "Batch fetch stats: timeout_retries={}, max_reorder_buf={}",
+                timeout_retries,
+                max_reorder_buf
+            );
+        }
         #[cfg(feature = "timings")]
         if log::log_enabled!(log::Level::Trace) {
             let t2 = Instant::now();

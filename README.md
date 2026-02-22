@@ -279,6 +279,7 @@ maturin develop --release -m pyDF/Cargo.toml
 # Required build dependency: HDF5 headers (e.g. ubuntu: libhdf5-dev)
 maturin develop --release -m pyDF-data/Cargo.toml
 # If you have troubles with hdf5 you may try to build and link hdf5 statically:
+# (This is required on macOS/Homebrew when only hdf5 2.x is installed.)
 maturin develop --release --features hdf5-static -m pyDF-data/Cargo.toml
 ```
 

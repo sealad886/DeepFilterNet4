@@ -422,7 +422,7 @@ class CompositeMetric(Metric):
 
     def compute(self, clean: np.ndarray, degraded: np.ndarray) -> float:
         try:
-            from df.sepm import composite
+            from df_mlx.sepm import composite
 
             result = composite(clean, degraded, 16000)
             idx = self._component_idx.get(self.metric_name, 3)  # default to COVL
@@ -465,7 +465,7 @@ class AllCompositeMetrics:
             )
 
         try:
-            from df.sepm import composite
+            from df_mlx.sepm import composite
 
             result = composite(clean, degraded, 16000)
             return dict(zip(self.names, [float(r) for r in result]))

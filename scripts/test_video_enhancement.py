@@ -5,29 +5,33 @@ This script tests the enhance_video_audio.py implementation without requiring
 actual video files or trained models.
 """
 
+import importlib
 import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
-# Mock MLX and df_mlx before importing enhance_video_audio
-sys.modules["mlx"] = MagicMock()
-sys.modules["mlx.core"] = MagicMock()
-sys.modules["df_mlx"] = MagicMock()
-sys.modules["df_mlx.enhance"] = MagicMock()
+import pytest
 
 # Add scripts to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from enhance_video_audio import (
-    discover_videos,
-    setup_logging,
-    update_manifest,
-)
+
+@pytest.fixture()
+def video_helpers(monkeypatch):
+    """Import enhance_video_audio with MLX/df_mlx mocked per-test."""
+    monkeypatch.setitem(sys.modules, "mlx", MagicMock())
+    monkeypatch.setitem(sys.modules, "mlx.core", MagicMock())
+    monkeypatch.setitem(sys.modules, "df_mlx", MagicMock())
+    monkeypatch.setitem(sys.modules, "df_mlx.enhance", MagicMock())
+    sys.modules.pop("enhance_video_audio", None)
+    module = importlib.import_module("enhance_video_audio")
+    return module.discover_videos, module.setup_logging, module.update_manifest
 
 
-def test_logging_setup():
+def test_logging_setup(video_helpers):
     """Test logging configuration."""
+    _, setup_logging, _ = video_helpers
     print("\n" + "=" * 60)
     print("Test 1: Logging Setup")
     print("=" * 60)
@@ -44,8 +48,9 @@ def test_logging_setup():
         print("  ✅ Logging setup successful")
 
 
-def test_video_discovery():
+def test_video_discovery(video_helpers):
     """Test video discovery logic."""
+    discover_videos, _, _ = video_helpers
     print("\n" + "=" * 60)
     print("Test 2: Video Discovery")
     print("=" * 60)
@@ -74,8 +79,9 @@ def test_video_discovery():
         print(f"  ✅ Found {len(videos)} videos (force mode)")
 
 
-def test_manifest_management():
+def test_manifest_management(video_helpers):
     """Test enhancement manifest creation and updates."""
+    _, _, update_manifest = video_helpers
     print("\n" + "=" * 60)
     print("Test 3: Manifest Management")
     print("=" * 60)

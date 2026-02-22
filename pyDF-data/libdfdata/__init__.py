@@ -9,6 +9,8 @@ except ImportError:
     pass
 
 if has_torch:
-    from .torch_dataloader import PytorchDataLoader
+    from .torch_dataloader import DataLoaderTimeoutError, PytorchDataLoader  # noqa: F401
 
-__all__ = ["PytorchDataLoader", "_FdDataLoader"]
+__all__ = ["_FdDataLoader"]
+if has_torch:
+    __all__.extend(["PytorchDataLoader", "DataLoaderTimeoutError"])

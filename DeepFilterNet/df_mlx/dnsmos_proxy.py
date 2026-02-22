@@ -12,6 +12,8 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
+from df_mlx.kernels import mel_power_log_kernel, metal_kernels_available
+
 
 def hz_to_mel(hz: mx.array) -> mx.array:
     """Convert Hz to mel scale."""
@@ -84,6 +86,8 @@ class MelSpectrogram(nn.Module):
         n_mels: Number of mel filterbank channels
         f_min: Minimum frequency for mel filterbank
         f_max: Maximum frequency for mel filterbank
+        use_metal_kernel: Use fused Metal kernel for power+mel+log (default True).
+            Falls back to pure-MLX ops when ``mx.fast.metal_kernel`` is unavailable.
     """
 
     def __init__(
@@ -94,6 +98,7 @@ class MelSpectrogram(nn.Module):
         n_mels: int = 64,
         f_min: float = 0.0,
         f_max: Optional[float] = None,
+        use_metal_kernel: bool = True,
     ):
         super().__init__()
         self.sample_rate = sample_rate
@@ -102,6 +107,7 @@ class MelSpectrogram(nn.Module):
         self.n_mels = n_mels
         self.f_max = f_max or sample_rate / 2
         self.f_min = f_min
+        self._use_kernel = use_metal_kernel and metal_kernels_available()
 
         # Pre-compute mel filterbank
         self._mel_fb = create_mel_filterbank(sample_rate, n_fft, n_mels, f_min, self.f_max)
@@ -125,39 +131,32 @@ class MelSpectrogram(nn.Module):
         batch_size = audio.shape[0]
         n_samples = audio.shape[1]
 
-        # STFT using strided view
         n_frames = (n_samples - self.n_fft) // self.hop_length + 1
+        if n_frames <= 0:
+            # Handle edge case of very short audio
+            return mx.zeros((batch_size, self.n_mels, 1), dtype=mx.float32)
 
-        mel_specs = []
-        for b in range(batch_size):
-            frames = []
-            for i in range(n_frames):
-                start = i * self.hop_length
-                frame = audio[b, start : start + self.n_fft] * self._window
-                frames.append(frame)
+        # Vectorized frame extraction for the entire batch.
+        frame_starts = mx.arange(n_frames) * self.hop_length
+        offsets = mx.arange(self.n_fft)
+        gather_indices = (frame_starts[:, None] + offsets[None, :]).reshape(-1)
 
-            if not frames:
-                # Handle edge case of very short audio
-                mel_specs.append(mx.zeros((self.n_mels, 1)))
-                continue
+        frames = mx.take(audio, gather_indices, axis=1).reshape(batch_size, n_frames, self.n_fft)
+        frames = frames * self._window
 
-            frames = mx.stack(frames, axis=0)  # [T', n_fft]
+        # FFT and power spectrogram
+        spec_complex = mx.fft.rfft(frames, axis=-1)  # [B, T', n_freqs]
 
-            # FFT
-            spec_complex = mx.fft.rfft(frames)  # [T', n_freqs]
-
-            # Power spectrogram
-            power = mx.abs(spec_complex) ** 2  # [T', n_freqs]
-
-            # Apply mel filterbank: [n_mels, n_freqs] @ [T', n_freqs].T -> [n_mels, T']
-            mel_spec = mx.matmul(self._mel_fb, mx.transpose(power))
-
-            # Log scale with floor to avoid log(0)
+        if self._use_kernel:
+            spec_real = mx.real(spec_complex)
+            spec_imag = mx.imag(spec_complex)
+            mel_spec = mel_power_log_kernel(spec_real, spec_imag, self._mel_fb, batch_size, n_frames, self.n_mels)
+        else:
+            power = mx.abs(spec_complex) ** 2
+            mel_spec = mx.matmul(power, mx.transpose(self._mel_fb))
             mel_spec = mx.log(mx.maximum(mel_spec, 1e-10))
 
-            mel_specs.append(mel_spec)
-
-        return mx.stack(mel_specs, axis=0)  # [B, n_mels, T']
+        return mx.transpose(mel_spec, (0, 2, 1))
 
 
 class ConvBlock(nn.Module):

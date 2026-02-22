@@ -18,8 +18,8 @@ import torch
 from loguru import logger
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
-from torchcodec.decoders import AudioDecoder
-from torchcodec.encoders import AudioEncoder
+from torchcodec.decoders import AudioDecoder  # type: ignore[import-not-found]
+from torchcodec.encoders import AudioEncoder  # type: ignore[import-not-found]
 from tqdm import tqdm
 
 from df.logger import init_logger
