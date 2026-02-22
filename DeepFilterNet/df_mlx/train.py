@@ -960,7 +960,7 @@ class Trainer:
 
         state_path = path.with_suffix(".json")
         if state_path.exists():
-            with open(state_path) as f:
+            with open(state_path, encoding="utf-8") as f:
                 state = json.load(f)
             self.step = state.get("step", 0)
             self.best_loss = state.get("best_loss", float("inf"))
