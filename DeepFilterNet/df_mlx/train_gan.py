@@ -626,7 +626,7 @@ class GANTrainer:
             "disc_lr_state": self.disc_lr_schedule.state_dict(),
         }
         tmp_state = state_path.with_name(f"{state_path.stem}.tmp{state_path.suffix}")
-        with open(tmp_state, "w") as f:
+        with open(tmp_state, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2)
             f.flush()
             os.fsync(f.fileno())
