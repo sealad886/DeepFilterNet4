@@ -14,6 +14,12 @@ CFG_OUT="${CFG_OUT:-${DATA_DIR}/dataset.cfg}"
 SR="${SR:-48000}"
 DTYPE="${DTYPE:-int16}"
 FORCE_COPY_CFG="${FORCE_COPY_CFG:-0}"
+QUIET="${QUIET:-1}"  # 1 = logs to file only, 0 = logs to terminal too
+
+# Log file configuration
+LOG_DIR="${LOG_DIR:-${DATA_DIR}/logs}"
+TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+LOG_FILE="${LOG_FILE:-${LOG_DIR}/build_hdf5_${TIMESTAMP}.log}"
 
 CLEAN_LIST="${CLEAN_LIST:-${LIST_DIR}/clean_all.txt}"
 NOISE_LIST="${NOISE_LIST:-${LIST_DIR}/noise_music.txt}"
@@ -22,6 +28,16 @@ RIR_LIST="${RIR_LIST:-${LIST_DIR}/rir_all.txt}"
 CFG_TEMPLATE="${ROOT_DIR}/datasets/${PROFILE}/dataset.cfg"
 
 mkdir -p "${HDF5_DIR}"
+mkdir -p "${LOG_DIR}"
+
+echo "=============================================="
+echo "DeepFilterNet HDF5 Dataset Builder"
+echo "=============================================="
+echo "Profile:    ${PROFILE}"
+echo "Data dir:   ${DATA_DIR}"
+echo "HDF5 dir:   ${HDF5_DIR}"
+echo "Log file:   ${LOG_FILE}"
+echo "=============================================="
 
 if [[ ! -f "${CLEAN_LIST}" ]]; then
   echo "Missing clean list: ${CLEAN_LIST}" >&2
@@ -59,20 +75,37 @@ else
   MAX_FREQ="${MAX_FREQ:--1}"
 fi
 
+# Common args for all prepare_data calls
+COMMON_ARGS="--sr ${SR} --dtype ${DTYPE} --num_workers ${NUM_WORKERS} --max_freq ${MAX_FREQ} --log-file ${LOG_FILE}"
+if [[ "${QUIET}" == "1" ]]; then
+  COMMON_ARGS="${COMMON_ARGS} --quiet"
+fi
+
+echo ""
+echo "[1/3] Building speech dataset..."
 python -m df.scripts.prepare_data speech \
   "${CLEAN_LIST}" "${HDF5_DIR}/speech_clean.hdf5" \
-  --sr "${SR}" --dtype "${DTYPE}" --num_workers "${NUM_WORKERS}" --max_freq "${MAX_FREQ}"
+  ${COMMON_ARGS}
 
+echo ""
+echo "[2/3] Building noise dataset..."
 python -m df.scripts.prepare_data noise \
   "${NOISE_LIST}" "${HDF5_DIR}/noise_music.hdf5" \
-  --sr "${SR}" --dtype "${DTYPE}" --num_workers "${NUM_WORKERS}" --max_freq "${MAX_FREQ}"
+  ${COMMON_ARGS}
 
+echo ""
+echo "[3/3] Building RIR dataset..."
 python -m df.scripts.prepare_data rir \
   "${RIR_LIST}" "${HDF5_DIR}/rir.hdf5" \
-  --sr "${SR}" --dtype "${DTYPE}" --num_workers "${NUM_WORKERS}" --max_freq "${MAX_FREQ}"
+  ${COMMON_ARGS}
 
 popd >/dev/null
 
-echo "Done."
-echo "HDF5 output: ${HDF5_DIR}"
+echo ""
+echo "=============================================="
+echo "Build complete!"
+echo "=============================================="
+echo "HDF5 output:    ${HDF5_DIR}"
 echo "Dataset config: ${CFG_OUT}"
+echo "Log file:       ${LOG_FILE}"
+echo "=============================================="

@@ -3,6 +3,8 @@ import os
 import random
 import signal
 import sys
+import time
+from contextlib import nullcontext
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -10,6 +12,7 @@ import torch
 import torchaudio
 from loguru import logger
 from torch import Tensor, nn, optim
+from torch.amp.autocast_mode import autocast
 from torch.autograd.anomaly_mode import set_detect_anomaly
 from torch.autograd.grad_mode import set_grad_enabled
 from torch.nn.utils.clip_grad import clip_grad_norm_
@@ -33,7 +36,7 @@ from df.utils import (
     make_np,
 )
 from libdf import DF
-from libdfdata import PytorchDataLoader as DataLoader
+from libdfdata import PytorchDataLoader as DataLoader  # type: ignore[import-not-found]
 
 should_stop = False
 debug = False
@@ -56,13 +59,13 @@ def setup_discriminator() -> Optional[nn.Module]:
     use_spectral_norm = config("DISCRIMINATOR_SPECTRAL_NORM", False, bool, section="train")
 
     if disc_type == "mpd":
-        periods = config("MPD_PERIODS", [2, 3, 5, 7, 11], Csv(int), section="train")
+        periods = config("MPD_PERIODS", [2, 3, 5, 7, 11], Csv(int), section="train")  # type: ignore[arg-type]
         disc = MultiPeriodDiscriminator(periods=periods, use_spectral_norm=use_spectral_norm)
     elif disc_type == "msd":
         num_scales = config("MSD_SCALES", 3, int, section="train")
         disc = MultiScaleDiscriminator(num_scales=num_scales, use_spectral_norm=use_spectral_norm)
     else:  # combined
-        periods = config("MPD_PERIODS", [2, 3, 5, 7, 11], Csv(int), section="train")
+        periods = config("MPD_PERIODS", [2, 3, 5, 7, 11], Csv(int), section="train")  # type: ignore[arg-type]
         num_scales = config("MSD_SCALES", 3, int, section="train")
         disc = CombinedDiscriminator(
             periods=periods,
@@ -116,6 +119,17 @@ def main():
         choices=["x86", "fbgemm", "qnnpack", "onednn"],
         help="Quantization backend (default: x86)",
     )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Enable profiling for first epoch to measure MPS/GPU utilization",
+    )
+    parser.add_argument(
+        "--profile-iterations",
+        type=int,
+        default=50,
+        help="Number of iterations to profile (default: 50)",
+    )
     args = parser.parse_args()
     if not os.path.isfile(args.data_config_file):
         raise FileNotFoundError("Dataset config not found at {}".format(args.data_config_file))
@@ -134,6 +148,64 @@ def main():
     init_logger(file=os.path.join(args.base_dir, "train.log"), level=log_level, model=args.base_dir)
     config_file = os.path.join(args.base_dir, "config.ini")
     config.load(config_file)
+
+    # Hardware auto-tuning: detect and apply optimal settings if not explicitly configured
+    auto_tune = config("AUTO_TUNE", True, bool, section="train")
+    if auto_tune:
+        try:
+            from df.hardware import HardwareConfig
+
+            hw_config = HardwareConfig.detect(verbose=True)
+
+            # Apply auto-tuned settings: override if not set OR if set to invalid/zero values
+            # This handles the case where config was saved with bad values from an interrupted session
+            current_batch = config("BATCH_SIZE", 0, int, section="train")
+            if current_batch <= 0:
+                config.set("BATCH_SIZE", hw_config.batch_size, int, section="train")
+                logger.info(f"Auto-tuned BATCH_SIZE: {hw_config.batch_size}")
+
+            current_batch_eval = config("BATCH_SIZE_EVAL", 0, int, section="train")
+            if current_batch_eval <= 0:
+                config.set("BATCH_SIZE_EVAL", hw_config.batch_size_eval, int, section="train")
+                logger.info(f"Auto-tuned BATCH_SIZE_EVAL: {hw_config.batch_size_eval}")
+
+            current_workers = config("NUM_WORKERS", 0, int, section="train")
+            if current_workers <= 0:
+                config.set("NUM_WORKERS", hw_config.num_workers, int, section="train")
+                logger.info(f"Auto-tuned NUM_WORKERS: {hw_config.num_workers}")
+
+            current_prefetch = config("NUM_PREFETCH_BATCHES", 0, int, section="train")
+            if current_prefetch <= 0:
+                config.set("NUM_PREFETCH_BATCHES", hw_config.prefetch_batches, int, section="train")
+                logger.info(f"Auto-tuned NUM_PREFETCH_BATCHES: {hw_config.prefetch_batches}")
+
+            current_device = config("DEVICE", "", str, section="train")
+            if not current_device:
+                config.set("DEVICE", hw_config.device, str, section="train")
+                logger.info(f"Auto-tuned DEVICE: {hw_config.device}")
+
+            # Apply mixed precision settings
+            current_amp = config("ENABLE_AMP", None, bool, section="train")
+            if current_amp is None:
+                config.set("ENABLE_AMP", hw_config.enable_amp, bool, section="train")
+                logger.info(f"Auto-tuned ENABLE_AMP: {hw_config.enable_amp}")
+
+            current_amp_dtype = config("AMP_DTYPE", "", str, section="train")
+            if not current_amp_dtype:
+                config.set("AMP_DTYPE", hw_config.amp_dtype, str, section="train")
+                logger.info(f"Auto-tuned AMP_DTYPE: {hw_config.amp_dtype}")
+
+            # Apply MPS fallback if needed
+            if hw_config.use_mps_fallback:
+                os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+                logger.info("Enabled PYTORCH_ENABLE_MPS_FALLBACK for MPS complex tensor support")
+
+            logger.info("Hardware auto-tuning applied (set AUTO_TUNE=false to disable)")
+        except ImportError as e:
+            logger.warning(f"Hardware auto-tuning unavailable: {e}")
+        except Exception as e:
+            logger.warning(f"Hardware auto-tuning failed, using defaults: {e}")
+
     seed = config("SEED", 42, int, section="train")
     check_manual_seed(seed)
     logger.info("Running on device {}".format(get_device()))
@@ -173,6 +245,23 @@ def main():
         mask_only=mask_only,
         train_df_only=train_df_only,
     )
+
+    # Optional torch.compile for faster training (experimental on MPS)
+    use_compile: bool = config("TORCH_COMPILE", False, bool, section="train")
+    if use_compile:
+        try:
+            dev = get_device()
+            # torch.compile works best with CUDA, has limited MPS support
+            if dev.type == "cuda":
+                logger.info("Compiling model with torch.compile (mode=reduce-overhead)")
+                model = torch.compile(model, mode="reduce-overhead")  # type: ignore
+            elif dev.type == "mps":
+                logger.info("Compiling model with torch.compile (mode=default, MPS backend)")
+                model = torch.compile(model, mode="default")  # type: ignore
+            else:
+                logger.warning("torch.compile not supported on CPU, skipping")
+        except Exception as e:
+            logger.warning(f"torch.compile failed, continuing without: {e}")
 
     bs: int = config("BATCH_SIZE", 1, int, section="train")
     bs_eval: int = config("BATCH_SIZE_EVAL", 0, int, section="train")
@@ -216,13 +305,16 @@ def main():
     # '<epoch>/<batch_size>,<epoch>/<batch_size>,<epoch>/<batch_size>'
     # The first epoch has to be 0, later epoch may modify the batch size as specified.
     # This only applies to training batch size.
-    batch_size_scheduling: List[str] = config("BATCH_SIZE_SCHEDULING", [], Csv(str), section="train")  # type: ignore
+    batch_size_scheduling_raw: List[str] = config("BATCH_SIZE_SCHEDULING", [], Csv(str), section="train")  # type: ignore
+    batch_size_scheduling: List[Tuple[int, int]] = []
     scheduling_bs = bs
     prev_scheduling_bs = bs
-    if len(batch_size_scheduling) > 0:
-        batch_size_scheduling = [(int(bs[0]), int(bs[1])) for bs in (bs.split("/") for bs in batch_size_scheduling)]
+    if len(batch_size_scheduling_raw) > 0:
+        batch_size_scheduling = [
+            (int(item.split("/")[0]), int(item.split("/")[1])) for item in batch_size_scheduling_raw
+        ]
         assert batch_size_scheduling[0][0] == 0  # First epoch must be 0
-        logger.info("Running with learning rate scheduling")
+        logger.info("Running with batch size scheduling")
 
     max_epochs = config("MAX_EPOCHS", 10, int, section="train")
     assert epoch >= 0
@@ -334,6 +426,7 @@ def main():
             opt_disc=opt_disc,
             disc_lr_values=disc_lrs,
             gan_start_epoch=gan_start_epoch if gan_enabled else 0,
+            profile_iterations=args.profile_iterations if args.profile else 0,
         )
         metrics = {"loss": train_loss}
         try:
@@ -492,6 +585,7 @@ def run_epoch(
     opt_disc: Optional[optim.Optimizer] = None,
     disc_lr_values: Optional[np.ndarray] = None,
     gan_start_epoch: int = 0,
+    profile_iterations: int = 0,
 ) -> float:
     log_freq = config("LOG_FREQ", cast=int, default=100, section="train")
     bs = loader.get_batch_size(split)
@@ -501,6 +595,27 @@ def run_epoch(
     if detect_anomaly:
         logger.info("Running with autograd profiling")
     dev = get_device()
+
+    # Mixed precision setup
+    enable_amp: bool = config("ENABLE_AMP", False, bool, section="train")
+    amp_dtype_str: str = config("AMP_DTYPE", "float16", str, section="train")
+    amp_dtype = torch.float16 if amp_dtype_str == "float16" else torch.bfloat16
+
+    # Determine autocast device type
+    if dev.type == "mps":
+        amp_device = "mps"
+    elif dev.type == "cuda":
+        amp_device = "cuda"
+    else:
+        amp_device = "cpu"
+        enable_amp = False  # AMP not beneficial on CPU
+
+    if enable_amp:
+        logger.info(f"Mixed precision enabled: {amp_dtype_str} on {amp_device}")
+        amp_context = autocast(device_type=amp_device, dtype=amp_dtype)
+    else:
+        amp_context = nullcontext()
+
     l_mem = []
     l_gan_g_mem = []
     l_gan_d_mem = []
@@ -514,11 +629,31 @@ def run_epoch(
     n_nans = 0
     start_steps = epoch * loader.len(split)
 
+    # Profiling setup
+    do_profile = profile_iterations > 0 and is_train and epoch == 0
+    profile_timings: Dict[str, List[float]] = {
+        "transfer": [],
+        "forward": [],
+        "loss": [],
+        "backward": [],
+        "optimizer": [],
+        "total": [],
+    }
+
+    def sync_device():
+        """Synchronize device for accurate timing."""
+        if dev.type == "mps":
+            torch.mps.synchronize()
+        elif dev.type == "cuda":
+            torch.cuda.synchronize()
+
     # GAN training settings
     gan_active = is_train and discriminator is not None and opt_disc is not None and epoch >= gan_start_epoch
     disc_update_freq = config("DISCRIMINATOR_UPDATE_FREQ", 1, int, section="train") if gan_active else 1
 
     for i, batch in enumerate(loader.iter_epoch(split, seed)):
+        iter_start = time.perf_counter() if do_profile and i < profile_iterations else 0.0
+
         opt.zero_grad()
         if opt_disc is not None:
             opt_disc.zero_grad()
@@ -539,21 +674,45 @@ def run_epoch(
 
         assert batch.feat_spec is not None
         assert batch.feat_erb is not None
+
+        # Profile data transfer
+        if do_profile and i < profile_iterations:
+            transfer_start = time.perf_counter()
+
         feat_erb = batch.feat_erb.to(dev, non_blocking=True)
         feat_spec = as_real(batch.feat_spec.to(dev, non_blocking=True))
         noisy = batch.noisy.to(dev, non_blocking=True)
         clean = batch.speech.to(dev, non_blocking=True)
         snrs = batch.snr.to(dev, non_blocking=True)
-        with set_detect_anomaly(detect_anomaly and is_train), set_grad_enabled(is_train):
+
+        if do_profile and i < profile_iterations:
+            sync_device()
+            profile_timings["transfer"].append((time.perf_counter() - transfer_start) * 1000)
+
+        with set_detect_anomaly(detect_anomaly and is_train), set_grad_enabled(is_train), amp_context:
             if not is_train:
                 input = as_real(noisy).clone()
             else:
                 input = as_real(noisy)
+
+            # Profile forward pass
+            if do_profile and i < profile_iterations:
+                forward_start = time.perf_counter()
+
             enh, m, lsnr, other = model.forward(
                 spec=input,
                 feat_erb=feat_erb,
                 feat_spec=feat_spec,
             )
+
+            if do_profile and i < profile_iterations:
+                sync_device()
+                profile_timings["forward"].append((time.perf_counter() - forward_start) * 1000)
+
+            # Profile loss computation
+            if do_profile and i < profile_iterations:
+                loss_start = time.perf_counter()
+
             try:
                 err = losses.forward(clean, noisy, enh, m, lsnr, snrs=snrs)
             except Exception as e:
@@ -571,6 +730,11 @@ def run_epoch(
             gan_d_loss = torch.tensor(0.0, device=dev)
 
             if gan_active:
+                # These assertions satisfy the type checker - gan_active implies all are not None
+                assert state is not None
+                assert discriminator is not None
+                assert opt_disc is not None
+
                 # Synthesize waveforms for discriminator
                 clean_wav = synthesize_waveform(clean, state)
                 enh_wav = synthesize_waveform(enh, state)
@@ -585,7 +749,15 @@ def run_epoch(
                 err = err + gan_g_loss
                 l_gan_g_mem.append(gan_g_loss.detach())
 
+            if do_profile and i < profile_iterations:
+                sync_device()
+                profile_timings["loss"].append((time.perf_counter() - loss_start) * 1000)
+
             if is_train:
+                # Profile backward pass
+                if do_profile and i < profile_iterations:
+                    backward_start = time.perf_counter()
+
                 try:
                     err.backward()
                     clip_grad_norm_(model.parameters(), 1.0, error_if_nonfinite=True)
@@ -614,9 +786,60 @@ def run_epoch(
                         continue
                     else:
                         raise e
+
+                if do_profile and i < profile_iterations:
+                    sync_device()
+                    profile_timings["backward"].append((time.perf_counter() - backward_start) * 1000)
+                    opt_start = time.perf_counter()
+
                 opt.step()
+
+                if do_profile and i < profile_iterations:
+                    sync_device()
+                    profile_timings["optimizer"].append((time.perf_counter() - opt_start) * 1000)
+
             detach_hidden(model)
         l_mem.append(err.detach())
+
+        # Record total iteration time
+        if do_profile and i < profile_iterations:
+            profile_timings["total"].append((time.perf_counter() - iter_start) * 1000)
+
+        # Print profiling report after collecting all samples
+        if do_profile and i == profile_iterations - 1:
+            logger.info("\n" + "=" * 80)
+            logger.info("MPS/GPU PROFILING REPORT")
+            logger.info("=" * 80)
+            logger.info(f"Device: {dev}")
+            logger.info(f"Profiled iterations: {profile_iterations}")
+            logger.info("-" * 80)
+
+            total_avg = sum(profile_timings["total"]) / len(profile_timings["total"])
+            for stage, times in profile_timings.items():
+                if times:
+                    avg = sum(times) / len(times)
+                    pct = (avg / total_avg * 100) if total_avg > 0 else 0
+                    bar = "█" * int(pct / 2)
+                    logger.info(f"{stage:12s}: {avg:8.2f} ms ({pct:5.1f}%) {bar}")
+
+            # MPS utilization estimate
+            if dev.type == "mps":
+                gpu_time = (
+                    sum(profile_timings["forward"]) / len(profile_timings["forward"])
+                    + sum(profile_timings["backward"]) / len(profile_timings["backward"])
+                    + sum(profile_timings["loss"]) / len(profile_timings["loss"])
+                )
+                logger.info("-" * 80)
+                logger.info(f"Estimated MPS GPU compute time: {gpu_time:.2f} ms/iter")
+                logger.info(f"Estimated MPS utilization: {gpu_time / total_avg * 100:.1f}%")
+
+                # Memory stats
+                logger.info("-" * 80)
+                logger.info(f"MPS allocated: {torch.mps.current_allocated_memory() / 1e9:.3f} GB")
+                logger.info(f"MPS driver allocated: {torch.mps.driver_allocated_memory() / 1e9:.3f} GB")
+
+            logger.info("=" * 80 + "\n")
+
         if i % log_freq == 0:
             l_mean = torch.stack(l_mem[-100:]).mean().cpu()
             if torch.isnan(l_mean):
@@ -801,6 +1024,7 @@ def summary_write(
     idx: Optional[int] = None,
 ):
     assert state is not None
+    _state = state  # Capture in local variable for closure
 
     p = ModelParams()
     bs = snrs.shape[0]
@@ -809,7 +1033,7 @@ def summary_write(
     snr = snrs[idx].detach().cpu().item()
 
     def synthesis(x: Tensor) -> Tensor:
-        return torch.as_tensor(state.synthesis(make_np(as_complex(x.detach()))))
+        return torch.as_tensor(_state.synthesis(make_np(as_complex(x.detach()))))
 
     torchaudio.save(os.path.join(summary_dir, f"{prefix}_clean_snr{snr}.wav"), synthesis(clean[idx]), p.sr)
     torchaudio.save(os.path.join(summary_dir, f"{prefix}_noisy_snr{snr}.wav"), synthesis(noisy[idx]), p.sr)
@@ -847,8 +1071,12 @@ def cleanup(*args):
 
 
 if __name__ == "__main__":
-    from icecream import ic, install
+    try:
+        from icecream import ic
+        from icecream.builtins import install
 
-    ic.includeContext = True
-    install()
+        ic.includeContext = True
+        install()
+    except ImportError:
+        pass  # icecream is optional for debugging
     main()

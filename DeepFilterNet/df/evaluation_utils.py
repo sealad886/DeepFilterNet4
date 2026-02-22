@@ -410,7 +410,7 @@ class MPMetric(Metric):
         return self_dict
 
     def __setstate__(self, state):
-        self.__dict__.update(state)
+        self.__dict__.update(state)  # type: ignore[union-attr]
 
 
 class SiSDRMetric(MPMetric):

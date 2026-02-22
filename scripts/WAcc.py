@@ -25,7 +25,7 @@ def main(args):
         original_audio, fs = sf.read(fpath)
         if fs != SUPPORTED_SAMPLING_RATE:
             print("Only sampling rate of 16000 is supported as of now so resampling audio")
-            audio = librosa.core.resample(original_audio, fs, SUPPORTED_SAMPLING_RATE)
+            audio = librosa.core.resample(original_audio, orig_sr=fs, target_sr=SUPPORTED_SAMPLING_RATE)
             sf.write(fpath, audio, SUPPORTED_SAMPLING_RATE)
 
         try:

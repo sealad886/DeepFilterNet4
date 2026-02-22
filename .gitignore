@@ -8,8 +8,14 @@ out/
 export/
 assets/valid_cache*
 DeepFilterNet/poetry.lock
-.vscode
 data/
+.*ignore
+!.gitignore
+
+.ruff_cache/
+.fastembed_cache
+.codanna/
+models/
 
 ### Rust gitignore ###
 
@@ -150,3 +156,4 @@ dmypy.json
 
 # Pre-commit
 .pre-commit-cache/
+logs/

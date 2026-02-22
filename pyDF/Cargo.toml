@@ -1,17 +1,21 @@
 [package]
 name = "DeepFilterLib"
 version = "0.6.0"
-authors = ["Dr. Andrew Cox <155285242+sealad886@users.noreply.github.com>", "Hendrik Schröter"]
+authors = ["Dr. Andrew Cox", "Hendrik Schröter"]
 edition = "2021"
 rust-version = "1.70"
 
 [lib]
 name = "libdf"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 path = "src/lib.rs"
+
+[features]
+extension-module = ["pyo3/extension-module"]
+default = ["extension-module"]
 
 [dependencies]
 deep_filter = { features = ["transforms", "logging"], path = "../libDF" }
-pyo3 = { version = "0.27", features = ["extension-module", "gil-refs"]}
-numpy = "0.22"
-ndarray = "^0.17"
+pyo3 = { version = "0.21" }
+numpy = "0.21"
+ndarray = { workspace = true }

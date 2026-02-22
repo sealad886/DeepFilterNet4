@@ -1,5 +1,6 @@
 import argparse
 import os
+from typing import cast
 
 import h5py
 import torch
@@ -24,7 +25,7 @@ for f in args.hdf5:
         for group, samples in h5f.items():
             print(f"Found {len(samples)} samples in {group}")
             codec = h5f.attrs.get("codec", "pcm")
-            sr = h5f.attrs["sr"]
+            sr = cast(int, h5f.attrs["sr"])
             if args.keys or args.hours:
                 for n, sample in samples.items():
                     if args.keys:

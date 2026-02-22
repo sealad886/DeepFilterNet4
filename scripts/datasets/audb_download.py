@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 import argparse
-import functools
-import inspect
 import os
 import shutil
 import sys
@@ -28,54 +26,45 @@ def normalize_version(version: str | None, name: str) -> str | None:
     if v in ("", "latest", "none"):
         return None
     try:
-        available = audb.available(name)
-        if version not in available:
-            print(f"[warn] audb version '{version}' not found for {name}; using latest")
-            return None
+        # audb.available() returns DataFrame of available datasets, filter by name
+        available = audb.available()
+        if name in available.index:
+            db_versions = available.loc[name].get("version", [])
+            if isinstance(db_versions, str):
+                db_versions = [db_versions]
+            if version not in db_versions:
+                print(f"[warn] audb version '{version}' not found for {name}; using latest")
+                return None
     except Exception:
         pass
     return version
 
 
 def call_load(name: str, root: str | None, version: str | None):
-    load = audb.load_to
-    # If load_to is a partial with root already set, do not pass root again.
-    if isinstance(load, functools.partial) and "root" in (load.keywords or {}):
-        if version:
-            return load(name, version=version)
-        return load(name)
+    """Load audb dataset with version-agnostic parameter handling."""
+    target_root = root or os.getcwd()
+    cleanup_tmp(target_root)
 
-    params = list(inspect.signature(load).parameters)
-    # Some audb versions use load_to(root, name, ...)
-    if params and params[0] in ("root", "path"):
-        target_root = root or os.getcwd()
-        cleanup_tmp(target_root)
-        try:
-            if version:
-                return load(target_root, name, version=version)
-            return load(target_root, name)
-        except RuntimeError as e:
-            if "temporary directory" in str(e) or "audb~" in str(e):
-                cleanup_tmp(target_root)
-                if version:
-                    return load(target_root, name, version=version)
-                return load(target_root, name)
-            raise
-
-    # Default: load_to(name, version=?, root=?)
-    if root is not None:
-        cleanup_tmp(root)
-        try:
-            return load(name, version=version, root=root)
-        except RuntimeError as e:
-            if "temporary directory" in str(e) or "audb~" in str(e):
-                cleanup_tmp(root)
-                return load(name, version=version, root=root)
-            raise
-
+    # Build kwargs for audb.load_to (preferred) or audb.load
+    load_kwargs: dict[str, str] = {"name": name}
     if version:
-        return load(name, version=version)
-    return load(name)
+        load_kwargs["version"] = version
+
+    # Prefer load_to which accepts a root parameter
+    if hasattr(audb, "load_to"):
+        load_kwargs["root"] = target_root
+        load_fn = audb.load_to
+    else:
+        load_fn = audb.load
+
+    # Call the load function
+    try:
+        return load_fn(**load_kwargs)
+    except RuntimeError as e:
+        if "temporary directory" in str(e) or "audb~" in str(e):
+            cleanup_tmp(target_root)
+            return load_fn(**load_kwargs)
+        raise
 
 
 def main() -> int:

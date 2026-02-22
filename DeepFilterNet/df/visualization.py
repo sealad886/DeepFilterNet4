@@ -1,6 +1,8 @@
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # type: ignore[import-not-found]
 import numpy as np
 import torch
+from matplotlib.collections import QuadMesh  # type: ignore[import-not-found]
+from matplotlib.figure import Figure  # type: ignore[import-not-found]
 
 from df.utils import as_complex
 
@@ -18,7 +20,7 @@ def spec_figure(
     xlabels=False,
     ylabels=False,
     **kwargs,
-) -> plt.Figure:
+) -> Figure | QuadMesh:
     spec = torch.as_tensor(spec).detach()
     if labels or xlabels:
         kwargs.setdefault("xlabel", "Time [s]")
@@ -41,7 +43,7 @@ def spec_figure(
 
     if figure is None:
         figure = plt.figure(figsize=figsize)
-        figure.set_tight_layout(True)
+        figure.set_layout_engine("tight")
     if spec.dim() > 2:
         spec = spec.squeeze(0)
     im = specshow(spec, sr, **kwargs)

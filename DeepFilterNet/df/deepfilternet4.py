@@ -699,6 +699,10 @@ class ErbDecoder4(nn.Module):
         return m
 
 
+# Alias for compatibility with df.model.ModelParams dynamic loading
+ModelParams = ModelParams4
+
+
 class Add(nn.Module):
     """Addition module for combining features."""
 

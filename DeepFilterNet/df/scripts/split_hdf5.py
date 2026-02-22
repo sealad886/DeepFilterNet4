@@ -3,10 +3,14 @@
 import os
 import shutil
 import sys
+from typing import TYPE_CHECKING, cast
 
 import h5py
 import numpy as np
 from icecream import ic
+
+if TYPE_CHECKING:
+    from h5py import Group  # noqa: F401 (used by cast())
 
 splits = (0.7, 0.15, 0.15)
 assert np.sum(splits) == 1
@@ -33,7 +37,7 @@ def main(hdf5: str, force: bool = False):
         f_valid.attrs[attr] = v
         f_test.attrs[attr] = v
     for key in f_train:
-        grp_train = f_train[key]
+        grp_train = cast("Group", f_train[key])
         grp_train_new = f_train_new.create_group(key)
         grp_valid = f_valid.create_group(key)
         grp_test = f_test.create_group(key)

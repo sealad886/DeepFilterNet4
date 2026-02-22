@@ -1,0 +1,20 @@
+[package]
+name = "DeepFilterAugment"
+version = "0.1.0"
+authors = ["Dr. Andrew Cox"]
+edition = "2021"
+rust-version = "1.70"
+
+[lib]
+name = "libdfaugment"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[features]
+extension-module = ["pyo3/extension-module"]
+default = ["extension-module"]
+
+[dependencies]
+pyo3 = { version = "0.21" }
+numpy = "0.21"
+ndarray = { workspace = true }

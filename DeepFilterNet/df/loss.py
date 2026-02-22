@@ -1,6 +1,6 @@
 import warnings
 from collections import defaultdict
-from typing import Dict, Final, Iterable, List, Literal, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Dict, Final, Iterable, List, Literal, Optional, Tuple, Union, cast
 
 import torch
 import torch.nn.functional as F
@@ -13,6 +13,9 @@ from df.modules import LocalSnrTarget, Mask, erb_fb
 from df.stoi import stoi
 from df.utils import angle, as_complex, get_device
 from libdf import DF
+
+if TYPE_CHECKING:
+    from df.whisper_adapter import MLXWhisperBackend  # noqa: F401 (used by cast())
 
 
 def wg(S: Tensor, X: Tensor, eps: float = 1e-10) -> Tensor:
@@ -95,7 +98,7 @@ class Istft(nn.Module):
 class MultiResSpecLoss(nn.Module):
     gamma: Final[float]
     f: Final[float]
-    f_complex: Final[Optional[List[float]]]
+    f_complex: Optional[List[float]]  # Mutable during __init__, then treated as Final
 
     def __init__(
         self,
@@ -113,7 +116,7 @@ class MultiResSpecLoss(nn.Module):
         elif isinstance(f_complex, Iterable):
             self.f_complex = list(f_complex)
         else:
-            self.f_complex = [f_complex] * len(self.stfts)
+            self.f_complex = [float(f_complex)] * len(self.stfts)
 
     def forward(self, input: Tensor, target: Tensor) -> Tensor:
         loss = torch.zeros((), device=input.device, dtype=input.dtype)
@@ -298,6 +301,11 @@ class DfAlphaLoss(nn.Module):
 
     def __init__(self, factor: float = 1, lsnr_thresh: float = -7.5, lsnr_min: float = -10.0):
         super().__init__()
+        if lsnr_thresh == lsnr_min:
+            raise ValueError(
+                f"lsnr_thresh ({lsnr_thresh}) must differ from lsnr_min ({lsnr_min}) "
+                "to avoid division by zero in lsnr_mapping"
+            )
         self.factor = factor
         self.lsnr_thresh = lsnr_thresh
         self.lsnr_min = lsnr_min
@@ -342,6 +350,9 @@ class SiSdr(nn.Module):
         t = input.shape[-1]
         target = target.reshape(-1, t)
         input = input.reshape(-1, t)
+        # Zero-mean normalization (required for scale-invariant SDR)
+        target = target - target.mean(dim=-1, keepdim=True)
+        input = input - input.mean(dim=-1, keepdim=True)
         # Einsum for batch vector dot product
         Rss: Tensor = torch.einsum("bi,bi->b", target, target).unsqueeze(-1)
         a: Tensor = torch.einsum("bi,bi->b", target, input).add(eps).unsqueeze(-1) / Rss.add(eps)
@@ -469,13 +480,14 @@ class ASRLoss(nn.Module):
     def forward(self, input: Tensor, target: Tensor) -> Tensor:
         # Use backend with automatic tensor conversion for gradient flow
         if self.backend.backend_name == "mlx":
-            features_i = self.backend.embed_audio_as_torch(self.preprocess(input), dtype=input.dtype)
-            features_t = self.backend.embed_audio_as_torch(self.preprocess(target), dtype=target.dtype)
+            mlx_backend = cast("MLXWhisperBackend", self.backend)
+            features_i = mlx_backend.embed_audio_as_torch(self.preprocess(input), dtype=input.dtype)
+            features_t = mlx_backend.embed_audio_as_torch(self.preprocess(target), dtype=target.dtype)
         else:
             features_i = self.backend.embed_audio(self.preprocess(input))
             features_t = self.backend.embed_audio(self.preprocess(target))
         # Loss based on the audio encoding:
-        loss = 0
+        loss: Tensor = torch.zeros((), device=input.device)
         if self.factor > 0:
             loss = F.mse_loss(features_i[0], features_t[0]) * self.factor
         if self.factor_lm > 0:
@@ -545,17 +557,51 @@ class ASRLoss(nn.Module):
         sum_logprobs: Tensor = torch.zeros(n, device=features.device)
         tokens: Tensor = start_tokens or torch.tensor([self.initial_tokens], device=features.device).repeat(n, 1)
         logits: List[Tensor] = []
+
+        # For MLX backend, we need to use MLX arrays with the decoder
+        is_mlx = self.backend.backend_name == "mlx"
+        if is_mlx:
+            import mlx.core as mx
+
+            from df.whisper_adapter import mx_to_torch, torch_to_mx
+
         for i in range(self.sample_len):
             # Use backend with automatic tensor conversion for MLX
-            if self.backend.backend_name == "mlx":
-                logit = self.backend.logits_as_torch(tokens, features, dtype=features.dtype)[:, -1]
+            if is_mlx:
+                mlx_backend = cast("MLXWhisperBackend", self.backend)
+                logit = mlx_backend.logits_as_torch(tokens, features, dtype=features.dtype)[:, -1]
             else:
                 logit = self.backend.logits(tokens, features)[:, -1]
             logits.append(logit)
-            tokens, completed = self.decoder.update(tokens, logits[-1], sum_logprobs)
+
+            # Decoder.update() requires MLX arrays for MLX backend
+            if is_mlx:
+                tokens_mx = torch_to_mx(tokens)
+                logits_mx = torch_to_mx(logits[-1])
+                sum_logprobs_mx = torch_to_mx(sum_logprobs)
+                tokens_mx, completed, sum_logprobs_mx = self.decoder.update(tokens_mx, logits_mx, sum_logprobs_mx)
+                tokens = mx_to_torch(tokens_mx, dtype=tokens.dtype).to(features.device)
+                sum_logprobs = mx_to_torch(sum_logprobs_mx, dtype=sum_logprobs.dtype).to(features.device)
+            else:
+                tokens, completed = self.decoder.update(tokens, logits[-1], sum_logprobs)
+
             if completed or tokens.shape[-1] > self.n_ctx:
                 break
-        tokens, _ = self.decoder.finalize(tokens, sum_logprobs)
+
+        # Decoder.finalize() also requires MLX arrays for MLX backend
+        # MLX finalize expects 3D tokens [batch, num_results, seq_len], we have 2D [batch, seq_len]
+        if is_mlx:
+            tokens_mx = torch_to_mx(tokens)
+            sum_logprobs_mx = torch_to_mx(sum_logprobs)
+            # Add middle dimension for num_results (always 1 for greedy decoding)
+            tokens_mx = mx.expand_dims(tokens_mx, axis=1)
+            tokens_mx, _ = self.decoder.finalize(tokens_mx, sum_logprobs_mx)
+            # Remove the num_results dimension and convert back to torch
+            tokens_mx = mx.squeeze(tokens_mx, axis=1)
+            tokens = mx_to_torch(tokens_mx, dtype=torch.long).to(features.device)
+        else:
+            tokens, _ = self.decoder.finalize(tokens, sum_logprobs)
+
         return torch.stack(logits, dim=1), tokens[:, self.sample_begin : -1]
 
     def preprocess(self, audio: Tensor) -> Tensor:
@@ -727,7 +773,7 @@ class SpeakerContrastiveLoss(nn.Module):
             return
 
         try:
-            from resemblyzer import VoiceEncoder
+            from resemblyzer import VoiceEncoder  # type: ignore[import-not-found]
 
             self.speaker_encoder = VoiceEncoder(device=str(device))
             # Freeze encoder weights
@@ -793,6 +839,7 @@ class SpeakerContrastiveLoss(nn.Module):
             Speaker embedding [B, D]
         """
         # resemblyzer expects numpy arrays
+        assert self.speaker_encoder is not None, "Speaker encoder not loaded"
         audio_np = audio.detach().cpu().numpy()
         embeddings = []
         for i in range(audio_np.shape[0]):
@@ -1310,7 +1357,7 @@ class Loss(nn.Module):
 def test_local_snr():
     import librosa
     import librosa.display
-    import matplotlib.pyplot as plt
+    import matplotlib.pyplot as plt  # type: ignore[import-not-found]
     import numpy as np
     import soundfile as sf
 

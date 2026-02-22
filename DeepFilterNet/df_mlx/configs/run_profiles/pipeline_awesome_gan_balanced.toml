@@ -1,0 +1,88 @@
+# Profile: Balanced stability/quality/speed for pipeline_awesome + GAN + Silero VAD eval
+# Usage:
+#   python -m df_mlx.train_dynamic \
+#     --run-config DeepFilterNet/df_mlx/configs/run_profiles/pipeline_awesome_gan_balanced.toml \
+#     --config /path/to/dataset_config.json \
+#     --train-config /path/to/train.ini
+
+[training]
+batch_size = 20
+learning_rate = 0.0001
+weight_decay = 0.0
+warmup_epochs = 5
+patience = 10
+grad_accumulation_steps = 2
+max_grad_norm = 1.0
+eval_frequency = 20
+fp16 = "auto"
+
+[dataloader]
+num_workers = 8
+prefetch_size = 16
+use_mlx_data = true
+
+[checkpoint]
+save_strategy = "epoch"
+validate_every = 1
+checkpoint_batches = 200
+check_chkpts = false
+resume = false
+resume_data = false
+
+[loss]
+dynamic_loss = "pipeline_awesome"
+
+[loss.awesome]
+loss_weight = 0.4
+mask_sharpness = 6.0
+warmup_steps = 2000
+proxy_enabled = false
+
+[loss.mrstft]
+factor = 0.0
+gamma = 1.0
+f_complex = -1.0
+fft_sizes = [512, 1024, 2048]
+hop_sizes = []
+
+[gan]
+enabled = true
+start_epoch = 5
+ramp_epochs = 10
+adv_weight = 0.07
+fm_weight = 1.5
+discriminator = "combined"
+mpd_periods = [2, 3, 5, 7, 11]
+msd_scales = 3
+disc_lr = 0.0001
+disc_weight_decay = 0.0
+disc_grad_clip = 1.0
+disc_update_freq = 1
+
+[vad]
+loss_weight = 0.05
+threshold = 0.6
+margin = 0.05
+speech_loss_weight = 0.01
+warmup_epochs = 5
+snr_gate_db = -10.0
+snr_gate_width = 6.0
+band_low_hz = 300.0
+band_high_hz = 3400.0
+z_threshold = 0.0
+z_slope = 1.0
+
+[vad.eval]
+mode = "silero"
+every = 1
+batches = 8
+max_seconds = 0.0
+silero_model_path = ""
+silero_sample_rate = 16000
+
+[vad.train]
+prob = 0.0
+every_steps = 4
+
+[debug]
+verbose = true

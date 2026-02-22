@@ -59,8 +59,11 @@ pub struct DFState {
     pub erb: Vec<usize>, // frequencies bandwidth (in bands) per ERB band
     analysis_mem: Vec<f32>,
     analysis_scratch: Vec<Complex32>,
+    analysis_fft_buf: Vec<f32>,
     synthesis_mem: Vec<f32>,
     synthesis_scratch: Vec<Complex32>,
+    synthesis_fft_buf: Vec<f32>,
+    freq_mem: Vec<Complex32>,
     mean_norm_state: Vec<f32>,
     unit_norm_state: Vec<f32>,
 }
@@ -120,6 +123,9 @@ impl DFState {
         let synthesis_mem = vec![0.; fft_size - frame_size];
         let analysis_scratch = forward.make_scratch_vec();
         let synthesis_scratch = backward.make_scratch_vec();
+        let analysis_fft_buf = forward.make_input_vec();
+        let synthesis_fft_buf = backward.make_output_vec();
+        let freq_mem = vec![Complex32::default(); freq_size];
 
         let erb = erb_fb(sr, fft_size, nb_bands, min_nb_freqs);
 
@@ -144,8 +150,11 @@ impl DFState {
             erb,
             analysis_mem,
             analysis_scratch,
+            analysis_fft_buf,
             synthesis_mem,
             synthesis_scratch,
+            synthesis_fft_buf,
+            freq_mem,
             window,
             wnorm,
             mean_norm_state,
@@ -161,7 +170,14 @@ impl DFState {
     pub fn process_frame(&mut self, input: &[f32], output: &mut [f32]) {
         debug_assert_eq!(input.len(), self.frame_size);
         debug_assert_eq!(output.len(), self.frame_size);
-        process_frame(input, output, self);
+        // Reuse a pre-allocated spectral buffer to avoid per-frame heap traffic.
+        let mut freq_mem = std::mem::take(&mut self.freq_mem);
+        if freq_mem.len() != self.freq_size {
+            freq_mem.resize(self.freq_size, Complex32::default());
+        }
+        frame_analysis(input, &mut freq_mem, self);
+        frame_synthesis(&mut freq_mem, output, self);
+        self.freq_mem = freq_mem;
     }
 
     pub fn analysis(&mut self, input: &[f32], output: &mut [Complex32]) {
@@ -347,17 +363,11 @@ fn apply_band_gain(out: &mut [Complex32], band_e: &[f32], erb_fb: &[usize]) {
     }
 }
 
-fn process_frame(input: &[f32], output: &mut [f32], state: &mut DFState) {
-    let mut freq_mem = vec![Complex32::default(); state.freq_size];
-    frame_analysis(input, &mut freq_mem, state);
-    frame_synthesis(&mut freq_mem, output, state);
-}
-
 fn frame_analysis(input: &[f32], output: &mut [Complex32], state: &mut DFState) {
     debug_assert_eq!(input.len(), state.frame_size);
     debug_assert_eq!(output.len(), state.freq_size);
 
-    let mut buf = state.fft_forward.make_input_vec();
+    let buf = state.analysis_fft_buf.as_mut_slice();
     // First part of the window on the previous frame
     let (buf_first, buf_second) = buf.split_at_mut(state.window_size - state.frame_size);
     let (window_first, window_second) = state.window.split_at(state.window_size - state.frame_size);
@@ -384,7 +394,7 @@ fn frame_analysis(input: &[f32], output: &mut [Complex32], state: &mut DFState) 
     }
     state
         .fft_forward
-        .process_with_scratch(&mut buf, output, &mut state.analysis_scratch)
+        .process_with_scratch(buf, output, &mut state.analysis_scratch)
         .expect("FFT forward failed");
     // Apply normalization in analysis only
     let norm = state.wnorm;
@@ -394,16 +404,13 @@ fn frame_analysis(input: &[f32], output: &mut [Complex32], state: &mut DFState) 
 }
 
 fn frame_synthesis(input: &mut [Complex32], output: &mut [f32], state: &mut DFState) {
-    let mut x = state.fft_inverse.make_output_vec();
-    match state
-        .fft_inverse
-        .process_with_scratch(input, &mut x, &mut state.synthesis_scratch)
-    {
+    let x = state.synthesis_fft_buf.as_mut_slice();
+    match state.fft_inverse.process_with_scratch(input, x, &mut state.synthesis_scratch) {
         Err(realfft::FftError::InputValues(_, _)) => (),
         Err(e) => panic!("Error during fft_inverse: {:?}", e),
         Ok(_) => (),
     }
-    apply_window_in_place(&mut x, &state.window);
+    apply_window_in_place(x, &state.window);
     let (x_first, x_second) = x.split_at(state.frame_size);
     for ((&xi, &mem), out) in x_first.iter().zip(state.synthesis_mem.iter()).zip(output.iter_mut())
     {

@@ -317,8 +317,7 @@ class TestDfNet4Lite:
     def lite_config(self, tmp_path):
         """Create config for lite model."""
         config_path = tmp_path / "dfnet4_lite.ini"
-        config_path.write_text(
-            """
+        config_path.write_text("""
 [df]
 SR = 48000
 FFT_SIZE = 960
@@ -334,8 +333,7 @@ USE_PHASE_BRANCH = false
 USE_MULTI_RES_DF = false
 ADAPTIVE_ORDER = false
 MODEL_VARIANT = lite
-"""
-        )
+""")
         return str(config_path)
 
     def test_model_creation_lite(self, lite_config):

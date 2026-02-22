@@ -1,0 +1,1145 @@
+#!/usr/bin/env python3
+"""Build pre-processed audio cache for efficient MLX training.
+
+This script pre-processes raw audio files and saves them in a format
+optimized for fast loading during training:
+- Resample to target sample rate
+- Convert to mono float32
+- Normalize peak amplitude
+- Save as sharded NPZ files for efficient I/O
+
+The resulting cache enables dynamic mixing (like the original Rust DataLoader)
+while avoiding the overhead of decoding audio files during training.
+
+Usage:
+    python -m df_mlx.build_audio_cache \
+        --speech-list /path/to/speech_files.txt \
+        --noise-list /path/to/noise_files.txt \
+        --rir-list /path/to/rir_files.txt \
+        --output-dir /path/to/audio_cache \
+        --sample-rate 48000 \
+        --num-workers 8
+
+Output structure:
+    output_dir/
+        speech/
+            shard_0000.npz  # Contains multiple audio arrays
+            shard_0001.npz
+            ...
+        noise/
+            shard_0000.npz
+            ...
+        rir/
+            shard_0000.npz
+            ...
+        index.json  # Maps file paths to shard locations
+        config.json  # Dataset configuration
+"""
+
+from __future__ import annotations
+
+import argparse
+import io
+import json
+import sys
+import threading
+import time
+import zipfile
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
+from pathlib import Path
+from queue import Queue
+from typing import Dict, List, Optional, Tuple, cast
+
+import numpy as np
+from tqdm import tqdm
+
+from .file_lists import read_file_list as _read_file_list
+
+# Audio loading with resampling
+try:
+    import soundfile as sf
+    from scipy import signal as scipy_signal
+
+    def load_audio_file(path: str, target_sr: int) -> Optional[np.ndarray]:
+        """Load audio file and resample if needed."""
+        try:
+            audio, file_sr = sf.read(path, dtype="float32")
+            if audio.ndim > 1:
+                audio = audio.mean(axis=1)  # Convert to mono
+            if file_sr != target_sr:
+                num_samples = int(len(audio) * target_sr / file_sr)
+                audio = scipy_signal.resample(audio, num_samples)
+            return cast(np.ndarray, audio).astype(np.float32)
+        except Exception as e:
+            print(f"Warning: Failed to load {path}: {e}")
+            return None
+
+except ImportError:
+    print("Error: soundfile and scipy required. Install with:")
+    print("  pip install soundfile scipy")
+    sys.exit(1)
+
+
+@dataclass
+class AsyncShardWriter:
+    """Writes audio arrays to sharded NPZ files with incremental I/O.
+
+    Each shard contains:
+    - __paths__: numpy array of original file paths (string)
+    - audio_00000, audio_00001, ...: audio arrays
+
+    Features:
+    - Incremental writes: each audio array written to disk immediately
+    - Thread-safe: uses locks for concurrent access to zip file
+    - Memory-efficient: only one array in memory at a time
+    - Crash-resistant: partial shards contain all previously written data
+    """
+
+    output_dir: Path
+    category: str  # 'speech', 'noise', or 'rir'
+    shard_size: int = 500  # Files per shard
+    resume_from_shard: int = 0  # Starting shard index when resuming
+    base_dir: Optional[str] = None  # Base dir for relative paths in index
+    max_pending_bytes: int = 8 * 1024 * 1024 * 1024  # Unused, kept for API compat
+
+    def __post_init__(self):
+        self.shard_dir = self.output_dir / self.category
+        self.shard_dir.mkdir(parents=True, exist_ok=True)
+        self.current_shard_idx = self.resume_from_shard
+        self.current_paths: List[str] = []
+        self.current_count = 0
+        self.index: Dict[str, Tuple[str, str]] = {}
+        self._lock = threading.Lock()
+        self._base_path = Path(self.base_dir) if self.base_dir else None
+
+        # Current temp file and zip handle
+        self._temp_path: Optional[Path] = None
+        self._zip_file: Optional[zipfile.ZipFile] = None
+        self._open_new_shard()
+
+    def _open_new_shard(self) -> None:
+        """Open a new temp zip file for the current shard."""
+        self._temp_path = self.shard_dir / f"shard_{self.current_shard_idx:04d}.tmp.npz"
+        # Remove any existing temp file from previous failed run
+        if self._temp_path.exists():
+            self._temp_path.unlink()
+        # Use ZIP_STORED (no compression) - audio data doesn't compress well
+        # and ZIP_DEFLATED is extremely slow for large float32 arrays
+        self._zip_file = zipfile.ZipFile(self._temp_path, "w", compression=zipfile.ZIP_STORED)
+        self.current_paths = []
+        self.current_count = 0
+
+    def _write_array_to_zip(self, key: str, array: np.ndarray) -> None:
+        """Write a numpy array to the current zip file."""
+        if self._zip_file is None:
+            raise RuntimeError("No zip file open for writing")
+
+        # Serialize array to bytes using numpy's format
+        buf = io.BytesIO()
+        np.save(buf, array, allow_pickle=True)
+        buf.seek(0)
+
+        # Write to zip with .npy extension (standard NPZ format)
+        self._zip_file.writestr(f"{key}.npy", buf.getvalue())
+
+    def _get_index_key(self, original_path: str) -> str:
+        """Convert absolute path to index key (relative if base_dir set)."""
+        if self._base_path:
+            try:
+                return str(Path(original_path).relative_to(self._base_path))
+            except ValueError:
+                return original_path
+        return original_path
+
+    def add(self, original_path: str, audio: np.ndarray) -> None:
+        """Add an audio array - writes immediately to temp shard file."""
+        with self._lock:
+            idx = self.current_count
+            key = f"audio_{idx:05d}"
+
+            # Write array immediately to zip file
+            self._write_array_to_zip(key, audio)
+
+            # Track path for later __paths__ write
+            index_key = self._get_index_key(original_path)
+            self.current_paths.append(index_key)
+
+            # Update index
+            shard_rel_path = f"{self.category}/shard_{self.current_shard_idx:04d}.npz"
+            self.index[index_key] = (shard_rel_path, key)
+
+            self.current_count += 1
+
+            # Flush shard if full
+            if self.current_count >= self.shard_size:
+                self._finalize_current_shard()
+                self.current_shard_idx += 1
+                self._open_new_shard()
+
+    def _finalize_current_shard(self) -> None:
+        """Finalize and rename the current shard temp file."""
+        if self._zip_file is None or self.current_count == 0:
+            return
+
+        # Write __paths__ array
+        paths_array = np.array(self.current_paths, dtype=object)
+        self._write_array_to_zip("__paths__", paths_array)
+
+        # Close zip file
+        self._zip_file.close()
+        self._zip_file = None
+
+        # Atomic rename to final location
+        final_path = self.shard_dir / f"shard_{self.current_shard_idx:04d}.npz"
+        if self._temp_path and self._temp_path.exists():
+            self._temp_path.rename(final_path)
+
+    def finalize(self) -> Dict[str, Tuple[str, str]]:
+        """Finalize any remaining data and close files."""
+        with self._lock:
+            if self.current_count > 0:
+                self._finalize_current_shard()
+            elif self._zip_file is not None:
+                # Empty shard, just close and remove
+                self._zip_file.close()
+                self._zip_file = None
+                if self._temp_path and self._temp_path.exists():
+                    self._temp_path.unlink()
+
+        return self.index
+
+
+@dataclass
+class ShardWriter:
+    """Writes audio arrays to sharded NPZ files (synchronous version).
+
+    Each shard contains:
+    - __paths__: numpy array of original file paths (string)
+    - audio_00000, audio_00001, ...: audio arrays
+
+    This makes shards self-contained and allows index reconstruction.
+    """
+
+    output_dir: Path
+    category: str  # 'speech', 'noise', or 'rir'
+    shard_size: int = 500  # Files per shard
+    resume_from_shard: int = 0  # Starting shard index when resuming
+    base_dir: Optional[str] = None  # Base dir for relative paths in index
+
+    def __post_init__(self):
+        self.shard_dir = self.output_dir / self.category
+        self.shard_dir.mkdir(parents=True, exist_ok=True)
+        self.current_shard: Dict[str, np.ndarray] = {}
+        self.current_paths: List[str] = []  # Paths for current shard
+        self.current_shard_idx = self.resume_from_shard
+        self.index: Dict[str, Tuple[str, str]] = {}  # path -> (shard_file, key)
+        self._lock = threading.Lock()
+        self._base_path = Path(self.base_dir) if self.base_dir else None
+
+    def _get_index_key(self, original_path: str) -> str:
+        """Convert absolute path to index key (relative if base_dir set)."""
+        if self._base_path:
+            try:
+                return str(Path(original_path).relative_to(self._base_path))
+            except ValueError:
+                # Path not under base_dir, use as-is
+                return original_path
+        return original_path
+
+    def add(self, original_path: str, audio: np.ndarray) -> None:
+        """Add an audio array to the current shard."""
+        with self._lock:
+            idx = len(self.current_shard)
+            key = f"audio_{idx:05d}"
+            self.current_shard[key] = audio
+
+            # Store path for embedding in shard
+            index_key = self._get_index_key(original_path)
+            self.current_paths.append(index_key)
+
+            # Update in-memory index
+            shard_rel_path = f"{self.category}/shard_{self.current_shard_idx:04d}.npz"
+            self.index[index_key] = (shard_rel_path, key)
+
+            if len(self.current_shard) >= self.shard_size:
+                self._flush_shard()
+
+    def _flush_shard(self) -> None:
+        """Write current shard to disk with embedded paths.
+
+        Uses atomic write (temp file + rename) to prevent corrupt shards
+        if interrupted. Either the entire shard is written, or nothing is.
+        """
+        if not self.current_shard:
+            return
+
+        shard_path = self.shard_dir / f"shard_{self.current_shard_idx:04d}.npz"
+        # Use .tmp extension (not .npz.tmp) because np.savez_compressed auto-adds .npz
+        temp_path = self.shard_dir / f"shard_{self.current_shard_idx:04d}.tmp"
+
+        # Skip if shard already exists (from previous run that got further than index)
+        if shard_path.exists():
+            print(f"    Shard {shard_path.name} already exists, skipping to next")
+            self.current_shard = {}
+            self.current_paths = []
+            self.current_shard_idx += 1
+            return
+
+        # Include paths array in shard for index reconstruction
+        shard_data = dict(self.current_shard)
+        shard_data["__paths__"] = np.array(self.current_paths, dtype=object)
+
+        # np.savez_compressed auto-appends .npz, so temp_path.tmp -> temp_path.tmp.npz
+        temp_path_with_npz = temp_path.with_suffix(".tmp.npz")
+
+        # Write to temp file first, then atomic rename
+        # If interrupted during write, temp file is left (will be cleaned up on retry)
+        # If interrupted after write but before rename, temp file is left
+        # Either way, shard_NNNN.npz is never corrupt
+        try:
+            # Ensure shard directory exists
+            self.shard_dir.mkdir(parents=True, exist_ok=True)
+            np.savez_compressed(temp_path, **shard_data)
+            if not temp_path_with_npz.exists():
+                raise RuntimeError(f"np.savez_compressed did not create {temp_path_with_npz}")
+            temp_path_with_npz.rename(shard_path)  # Atomic on POSIX
+        except Exception as e:
+            # Clean up temp file on failure
+            if temp_path_with_npz.exists():
+                temp_path_with_npz.unlink()
+            raise RuntimeError(f"Failed to write shard {shard_path}: {e}") from e
+
+        self.current_shard = {}
+        self.current_paths = []
+        self.current_shard_idx += 1
+
+    def finalize(self) -> Dict[str, Tuple[str, str]]:
+        """Flush remaining data and return index."""
+        with self._lock:
+            self._flush_shard()
+        return self.index
+
+
+def read_file_list(path: str) -> List[str]:
+    """Read file list from text file."""
+    return _read_file_list(path, check_exists=True, warn_missing_entries=True)
+
+
+def merge_short_audio(
+    short_files: List[Tuple[str, np.ndarray]],
+    target_samples: int,
+    sample_rate: int,
+    merge_id: int,
+) -> Tuple[str, np.ndarray]:
+    """Merge multiple short audio files into one that meets the minimum duration.
+
+    Uses simple concatenation with 10ms crossfade at join points.
+
+    Args:
+        short_files: List of (path, audio_array) tuples to merge
+        target_samples: Minimum number of samples needed
+        sample_rate: Sample rate for crossfade calculation
+        merge_id: Unique ID for the merged file path
+
+    Returns:
+        Tuple of (merged_path, merged_audio)
+    """
+    # Crossfade length (10ms)
+    fade_samples = int(0.01 * sample_rate)
+
+    # Calculate total length after crossfades
+    total_samples = sum(len(audio) for _, audio in short_files)
+    # Subtract crossfade overlap for each join
+    total_samples -= fade_samples * (len(short_files) - 1)
+
+    # Pre-allocate output
+    result = np.zeros(total_samples, dtype=np.float32)
+
+    # Concatenate with crossfade
+    pos = 0
+    source_paths = []
+    for i, (path, audio) in enumerate(short_files):
+        source_paths.append(path)
+        if i == 0:
+            # First file - copy directly
+            result[pos : pos + len(audio)] = audio
+            pos += len(audio)
+        else:
+            # Apply crossfade at join point
+            fade_len = min(fade_samples, len(audio), pos)
+
+            # Fade out previous segment
+            fade_out = np.linspace(1.0, 0.0, fade_len, dtype=np.float32)
+            result[pos - fade_len : pos] *= fade_out
+
+            # Fade in current segment and add
+            fade_in = np.linspace(0.0, 1.0, fade_len, dtype=np.float32)
+            result[pos - fade_len : pos] += audio[:fade_len] * fade_in
+
+            # Copy remainder of current segment
+            if len(audio) > fade_len:
+                end_pos = pos + len(audio) - fade_len
+                result[pos:end_pos] = audio[fade_len:]
+                pos = end_pos
+
+    # Generate synthetic path that encodes the source files
+    merged_path = f"__merged_{merge_id:06d}__"
+
+    return merged_path, result
+
+
+def process_file(
+    file_path: str,
+    target_sr: int,
+    normalize: bool = True,
+    min_samples: int = 0,
+) -> Optional[Tuple[str, np.ndarray, bool]]:
+    """Load and process a single audio file.
+
+    Returns:
+        Tuple of (path, audio, is_short) or None if failed.
+        is_short is True if audio length < min_samples.
+    """
+    audio = load_audio_file(file_path, target_sr)
+    if audio is None:
+        return None
+
+    # Normalize to peak amplitude
+    if normalize:
+        peak = np.abs(audio).max()
+        if peak > 1e-6:
+            audio = audio / peak
+
+    is_short = min_samples > 0 and len(audio) < min_samples
+    return (file_path, audio, is_short)
+
+
+def build_cache_for_category(
+    file_list: List[str],
+    category: str,
+    output_dir: Path,
+    sample_rate: int,
+    shard_size: int,
+    num_workers: int,
+    normalize: bool = True,
+    existing_index: Optional[Dict[str, Tuple[str, str]]] = None,
+    base_dir: Optional[str] = None,
+    max_writer_bytes: Optional[int] = None,
+    min_duration: float = 0.0,
+    merge_short: bool = False,
+) -> Tuple[Dict[str, Tuple[str, str]], Dict]:
+    """Build cache for a single category (speech/noise/rir).
+
+    Args:
+        file_list: List of file paths to process
+        category: Category name ('speech', 'noise', or 'rir')
+        output_dir: Output directory for cache
+        sample_rate: Target sample rate
+        shard_size: Files per shard
+        num_workers: Number of parallel workers
+        normalize: Whether to normalize audio
+        existing_index: Existing index from previous run (for resume)
+        base_dir: Base directory for computing relative paths (None = absolute)
+        min_duration: Minimum audio duration in seconds (0 = no filter, only for speech)
+        merge_short: If True, merge short files; if False, skip them
+
+    Returns:
+        Tuple of (index dict, stats dict)
+    """
+    if not file_list:
+        return existing_index or {}, {
+            "total": 0,
+            "cached": 0,
+            "failed": 0,
+            "skipped": 0,
+            "short_skipped": 0,
+            "merged": 0,
+        }
+
+    # Helper to convert path to index key (same logic as ShardWriter)
+    base_path = Path(base_dir) if base_dir else None
+
+    def to_index_key(path: str) -> str:
+        if base_path:
+            try:
+                return str(Path(path).relative_to(base_path))
+            except ValueError:
+                return path
+        return path
+
+    # Filter out already-processed files when resuming
+    if existing_index:
+        existing_paths = set(existing_index.keys())
+        # Compare using index keys (relative paths if base_dir set)
+        files_to_process = [f for f in file_list if to_index_key(f) not in existing_paths]
+        skipped_count = len(file_list) - len(files_to_process)
+    else:
+        files_to_process = file_list
+        skipped_count = 0
+
+    # Find highest existing shard index by scanning ACTUAL FILES on disk
+    # This handles cases where shards exist beyond what the index knows about
+    # (e.g., previous run wrote shards but crashed before updating index)
+    shard_dir = output_dir / category
+    existing_shard_nums = set()
+    if shard_dir.exists():
+        for shard_file in shard_dir.glob("shard_*.npz"):
+            try:
+                shard_num = int(shard_file.stem.split("_")[1])
+                existing_shard_nums.add(shard_num)
+            except (IndexError, ValueError):
+                pass  # Skip malformed shard names
+
+    resume_from_shard = max(existing_shard_nums) + 1 if existing_shard_nums else 0
+
+    if existing_index:
+        print(f"\nResuming {category}: {skipped_count:,} already cached, {len(files_to_process):,} remaining")
+        print(f"  Found {len(existing_shard_nums)} existing shards on disk")
+        print(f"  Starting from shard index: {resume_from_shard}")
+    else:
+        if existing_shard_nums:
+            print(f"\nProcessing {category}: {len(file_list):,} files")
+            print(f"  Found {len(existing_shard_nums)} existing shards on disk (no index)")
+            print(f"  Starting from shard index: {resume_from_shard}")
+        else:
+            print(f"\nProcessing {category}: {len(file_list):,} files")
+
+    if not files_to_process:
+        print("  All files already cached!")
+        return existing_index or {}, {
+            "total": len(file_list),
+            "cached": 0,
+            "failed": 0,
+            "skipped": skipped_count,
+            "short_skipped": 0,
+            "merged": 0,
+        }
+
+    # Calculate minimum samples for speech files
+    min_samples = int(min_duration * sample_rate) if category == "speech" and min_duration > 0 else 0
+    if min_samples > 0:
+        action = "merge" if merge_short else "skip"
+        print(f"  Min duration: {min_duration}s ({min_samples:,} samples) - will {action} short files")
+
+    writer_kwargs = {
+        "output_dir": output_dir,
+        "category": category,
+        "shard_size": shard_size,
+        "resume_from_shard": resume_from_shard,
+        "base_dir": base_dir,
+    }
+    if max_writer_bytes is not None:
+        writer_kwargs["max_pending_bytes"] = max_writer_bytes
+    writer = AsyncShardWriter(**writer_kwargs)
+
+    # Stats
+    total_files = len(files_to_process)
+    cached_count = 0
+    failed_count = 0
+    short_skipped_count = 0
+    merged_count = 0
+    total_samples = 0
+    total_duration = 0.0
+
+    # Buffer for short files when merging
+    short_buffer: List[Tuple[str, np.ndarray]] = []
+    short_buffer_samples = 0
+    merge_id = 0
+
+    # Use bounded queue to prevent OOM
+    max_in_flight = num_workers * 4
+    pending_futures: Queue[Future] = Queue(maxsize=max_in_flight)
+
+    def submit_task(executor, path):
+        future = executor.submit(process_file, path, sample_rate, normalize, min_samples)
+        pending_futures.put(future)
+
+    def flush_short_buffer():
+        """Merge accumulated short files and write to cache."""
+        nonlocal short_buffer, short_buffer_samples, merge_id, merged_count
+        nonlocal cached_count, total_samples, total_duration
+        if not short_buffer:
+            return
+        merged_path, merged_audio = merge_short_audio(short_buffer, min_samples, sample_rate, merge_id)
+        writer.add(merged_path, merged_audio)
+        cached_count += 1
+        merged_count += 1
+        total_samples += len(merged_audio)
+        total_duration += len(merged_audio) / sample_rate
+        merge_id += 1
+        short_buffer = []
+        short_buffer_samples = 0
+
+    def process_completed():
+        nonlocal cached_count, failed_count, total_samples, total_duration
+        nonlocal short_buffer, short_buffer_samples, short_skipped_count
+        future = pending_futures.get()
+        result = future.result()
+        if result is not None:
+            path, audio, is_short = result
+            if is_short:
+                if merge_short:
+                    # Add to buffer for merging
+                    short_buffer.append((path, audio))
+                    short_buffer_samples += len(audio)
+                    # Flush when buffer reaches target length
+                    if short_buffer_samples >= min_samples:
+                        flush_short_buffer()
+                else:
+                    # Skip short files
+                    short_skipped_count += 1
+            else:
+                # Normal file - add directly
+                writer.add(path, audio)
+                cached_count += 1
+                total_samples += len(audio)
+                total_duration += len(audio) / sample_rate
+        else:
+            failed_count += 1
+
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        pbar = tqdm(total=total_files, desc=f"  {category}", unit="files", dynamic_ncols=True, smoothing=0.1)
+
+        for i, file_path in enumerate(files_to_process):
+            # If queue is full, process one completed task first
+            if pending_futures.full():
+                process_completed()
+                pbar.update(1)
+
+            submit_task(executor, file_path)
+
+        # Process remaining tasks
+        while not pending_futures.empty():
+            process_completed()
+            pbar.update(1)
+
+        pbar.close()
+
+    # Flush any remaining short files (discard if not enough to merge)
+    if short_buffer:
+        if short_buffer_samples >= min_samples:
+            flush_short_buffer()
+        else:
+            # Not enough to merge, skip these
+            short_skipped_count += len(short_buffer)
+            print(f"  Discarded {len(short_buffer)} short files at end (not enough to merge)")
+            short_buffer = []
+
+    new_index = writer.finalize()
+
+    # Merge with existing index
+    if existing_index:
+        merged_index = {**existing_index, **new_index}
+    else:
+        merged_index = new_index
+
+    stats = {
+        "total": len(file_list),
+        "cached": cached_count,
+        "failed": failed_count,
+        "skipped": skipped_count,
+        "short_skipped": short_skipped_count,
+        "merged": merged_count,
+        "total_samples": total_samples,
+        "total_duration_hours": total_duration / 3600,
+        "num_shards": writer.current_shard_idx,
+    }
+
+    print(f"  Newly cached: {cached_count:,} files")
+    if short_skipped_count > 0:
+        print(f"  Short files skipped: {short_skipped_count:,}")
+    if merged_count > 0:
+        print(f"  Merged segments created: {merged_count:,}")
+    print(f"  Duration: {total_duration / 3600:.1f} hours")
+    print(f"  Total in index: {len(merged_index):,} files")
+
+    return merged_index, stats
+
+
+def cleanup_temp_files(output_dir: Path) -> int:
+    """Remove leftover temp files from interrupted writes.
+
+    Returns the number of temp files removed.
+    """
+    removed = 0
+    for category in ["speech", "noise", "rir"]:
+        shard_dir = output_dir / category
+        if not shard_dir.exists():
+            continue
+        # Match both old pattern (*.npz.tmp) and new pattern (*.tmp.npz)
+        for pattern in ["*.npz.tmp", "*.tmp.npz", "*.npz.tmp.npz"]:
+            for temp_file in shard_dir.glob(pattern):
+                temp_file.unlink()
+                removed += 1
+    return removed
+
+
+def compact_shards(output_dir: Path) -> Dict[str, int]:
+    """Remove legacy/corrupt shards and renumber remaining shards sequentially.
+
+    This ensures the shard sequence has no gaps and all shards are in the
+    new format with embedded __paths__. Files from removed shards will be
+    reprocessed on the next run.
+
+    Returns dict mapping category -> number of shards removed.
+    """
+    print("Checking for legacy/corrupt shards to remove...")
+    removed_counts: Dict[str, int] = {}
+
+    for category in ["speech", "noise", "rir"]:
+        shard_dir = output_dir / category
+        if not shard_dir.exists():
+            continue
+
+        shard_files = sorted(shard_dir.glob("shard_*.npz"))
+        if not shard_files:
+            continue
+
+        # First pass: identify which shards to keep vs remove
+        shards_to_keep: List[Path] = []
+        shards_to_remove: List[Path] = []
+
+        for shard_path in shard_files:
+            try:
+                with np.load(shard_path, allow_pickle=True) as npz:
+                    if "__paths__" in npz.files:
+                        paths = npz["__paths__"]
+                        audio_keys = {k for k in npz.files if k.startswith("audio_")}
+                        # Validate consistency
+                        if len(paths) == len(audio_keys):
+                            shards_to_keep.append(shard_path)
+                        else:
+                            print(f"    {shard_path.name}: corrupt (path/audio mismatch) - removing")
+                            shards_to_remove.append(shard_path)
+                    else:
+                        print(f"    {shard_path.name}: legacy format (no __paths__) - removing")
+                        shards_to_remove.append(shard_path)
+            except Exception as e:
+                print(f"    {shard_path.name}: unreadable ({e}) - removing")
+                shards_to_remove.append(shard_path)
+
+        if not shards_to_remove:
+            continue
+
+        removed_counts[category] = len(shards_to_remove)
+        print(f"  {category}: removing {len(shards_to_remove)} invalid shards, keeping {len(shards_to_keep)}")
+
+        # Delete invalid shards
+        for shard_path in shards_to_remove:
+            shard_path.unlink()
+
+        # Renumber remaining shards to be sequential (0, 1, 2, ...)
+        # Sort by original index to maintain order
+        shards_to_keep.sort(key=lambda p: int(p.stem.split("_")[1]))
+
+        # Rename to sequential indices, using temp names first to avoid collisions
+        temp_names: List[Tuple[Path, Path, int]] = []
+        for new_idx, old_path in enumerate(shards_to_keep):
+            old_idx = int(old_path.stem.split("_")[1])
+            if old_idx != new_idx:
+                # Need to rename - use temp name first
+                temp_path = shard_dir / f"shard_{new_idx:04d}.npz.renaming"
+                temp_names.append((old_path, temp_path, new_idx))
+
+        # First pass: rename to temp names
+        for old_path, temp_path, _ in temp_names:
+            old_path.rename(temp_path)
+
+        # Second pass: rename temp to final names
+        for _, temp_path, new_idx in temp_names:
+            final_path = shard_dir / f"shard_{new_idx:04d}.npz"
+            temp_path.rename(final_path)
+
+        if temp_names:
+            print(f"    Renumbered {len(temp_names)} shards to maintain sequential order")
+
+    return removed_counts
+
+
+def rebuild_index_from_shards(output_dir: Path) -> Dict[str, Dict[str, Tuple[str, str]]]:
+    """Reconstruct index.json from existing shard files.
+
+    Reads the __paths__ array embedded in each shard to recover the
+    original file path -> (shard_file, audio_key) mapping.
+
+    Legacy shards (without __paths__) and corrupt shards are automatically
+    removed and remaining shards are renumbered to maintain sequential order.
+    Files from removed shards will be reprocessed on the next run.
+    """
+    print("Rebuilding index from existing shards...")
+
+    # Clean up any leftover temp files from interrupted writes
+    removed = cleanup_temp_files(output_dir)
+    if removed > 0:
+        print(f"  Cleaned up {removed} incomplete temp files from previous run")
+
+    # Remove legacy/corrupt shards and compact the sequence
+    removed_shards = compact_shards(output_dir)
+    total_removed = sum(removed_shards.values())
+    if total_removed > 0:
+        print(f"  Removed {total_removed} legacy/corrupt shards total")
+        print("  Files from these shards will be reprocessed")
+
+    all_indices: Dict[str, Dict[str, Tuple[str, str]]] = {}
+
+    for category in ["speech", "noise", "rir"]:
+        shard_dir = output_dir / category
+        if not shard_dir.exists():
+            continue
+
+        category_index: Dict[str, Tuple[str, str]] = {}
+        shard_files = sorted(shard_dir.glob("shard_*.npz"))
+
+        if not shard_files:
+            continue
+
+        print(f"  Indexing {category}: {len(shard_files)} shards...")
+
+        for shard_path in tqdm(shard_files, desc=f"  {category}", unit="shard", dynamic_ncols=True, smoothing=0.1):
+            shard_rel_path = f"{category}/{shard_path.name}"
+            try:
+                with np.load(shard_path, allow_pickle=True) as npz:
+                    # All shards should now have __paths__ after compaction
+                    if "__paths__" not in npz.files:
+                        # This shouldn't happen after compact_shards, but handle it
+                        print(f"    Warning: {shard_path.name} missing __paths__ - skipping")
+                        continue
+
+                    paths = npz["__paths__"]
+                    audio_keys = {k for k in npz.files if k.startswith("audio_")}
+
+                    for idx, path in enumerate(paths):
+                        key = f"audio_{idx:05d}"
+                        if key not in audio_keys:
+                            print(f"    Warning: {shard_path.name} missing {key} for path {path}")
+                            continue
+                        category_index[str(path)] = (shard_rel_path, key)
+            except Exception as e:
+                print(f"    Warning: Failed to read {shard_path}: {e}")
+
+        if category_index:
+            all_indices[category] = category_index
+            print(f"  {category}: {len(category_index):,} files indexed")
+
+    return all_indices
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Build pre-processed audio cache for MLX training")
+
+    # Input file lists
+    parser.add_argument(
+        "--speech-list",
+        type=str,
+        required=True,
+        help="Text file with speech audio paths",
+    )
+    parser.add_argument(
+        "--noise-list",
+        type=str,
+        required=True,
+        help="Text file with noise audio paths",
+    )
+    parser.add_argument(
+        "--rir-list",
+        type=str,
+        help="Text file with RIR audio paths (optional)",
+    )
+
+    # Output
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        required=True,
+        help="Directory to write audio cache",
+    )
+
+    # Resume support
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from existing index.json (skip already-cached files)",
+    )
+    parser.add_argument(
+        "--rebuild-index",
+        action="store_true",
+        help="Rebuild index.json from existing shard files (use if previous run was interrupted)",
+    )
+
+    # Index path storage
+    parser.add_argument(
+        "--base-dir",
+        type=str,
+        help="Base directory for computing relative paths in index (default: use absolute paths)",
+    )
+
+    # Max memory for async writer
+    parser.add_argument(
+        "--max-pending-bytes",
+        type=int,
+        default=8,
+        help="Max bytes in-flight for async writer (GB, default: 8)",
+    )
+
+    # Audio parameters
+    parser.add_argument(
+        "--sample-rate",
+        type=int,
+        default=48000,
+        help="Target sample rate (default: 48000)",
+    )
+    parser.add_argument(
+        "--segment-length",
+        type=float,
+        default=5.0,
+        help="Segment length in seconds for training (default: 5.0)",
+    )
+
+    # Performance
+    parser.add_argument(
+        "--shard-size",
+        type=int,
+        default=500,
+        help="Files per shard (default: 500)",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=4,
+        help="Number of parallel workers (default: 4)",
+    )
+
+    # Augmentation config (for config.json)
+    parser.add_argument("--p-reverb", type=float, default=0.5)
+    parser.add_argument("--p-clipping", type=float, default=0.0)
+    parser.add_argument("--snr-min", type=float, default=-5.0)
+    parser.add_argument("--snr-max", type=float, default=40.0)
+
+    # Short file handling (speech only)
+    parser.add_argument(
+        "--min-duration",
+        type=float,
+        default=0.0,
+        help="Minimum audio duration in seconds for speech files (0 = no filter). "
+        "Files shorter than this will be skipped or merged based on --merge-short.",
+    )
+    parser.add_argument(
+        "--merge-short",
+        action="store_true",
+        help="Merge short files together instead of skipping them. "
+        "Short files are concatenated with crossfade until they reach --min-duration.",
+    )
+
+    args = parser.parse_args()
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    print("=" * 60)
+    print("DeepFilterNet MLX Audio Cache Builder")
+    print("=" * 60)
+    print(f"Output directory: {output_dir}")
+    print(f"Sample rate: {args.sample_rate} Hz")
+    print(f"Shard size: {args.shard_size} files")
+    print(f"Workers: {args.num_workers}")
+
+    # Load existing index for resume support
+    existing_indices: Dict[str, Dict[str, Tuple[str, str]]] = {}
+    index_path = output_dir / "index.json"
+
+    # Helper to count shards on disk for a category
+    def count_shards_on_disk(category: str) -> int:
+        shard_dir = output_dir / category
+        if not shard_dir.exists():
+            return 0
+        return len(list(shard_dir.glob("shard_*.npz")))
+
+    # Helper to count shards referenced in index for a category
+    def count_shards_in_index(index: Dict[str, Tuple[str, str]], category: str) -> int:
+        shard_files = set()
+        for shard_file, _ in index.values():
+            if shard_file.startswith(f"{category}/"):
+                shard_files.add(shard_file)
+        return len(shard_files)
+
+    # Rebuild index from shards if requested or if resuming without index
+    if args.rebuild_index or (args.resume and not index_path.exists()):
+        # Check if any shards exist
+        has_shards = any((output_dir / cat).exists() for cat in ["speech", "noise", "rir"])
+        if has_shards:
+            if not args.rebuild_index:
+                print("\nResume mode: No index.json found but shards exist - rebuilding index...")
+            existing_indices = rebuild_index_from_shards(output_dir)
+            # Save the rebuilt index immediately
+            if existing_indices:
+                with open(index_path, "w") as f:
+                    json.dump(existing_indices, f)
+                print(f"Saved rebuilt index to {index_path}")
+                if args.rebuild_index:
+                    print("\nIndex rebuild complete. Exiting.")
+                    print(f"Total indexed: {sum(len(idx) for idx in existing_indices.values()):,} files")
+                    return
+        elif args.rebuild_index:
+            print("\nNo existing shards found to rebuild index from.")
+            return
+        else:
+            print("\nResume mode: No existing index or shards found, starting fresh")
+    elif args.resume and index_path.exists():
+        print(f"\nResume mode: Loading existing index from {index_path}")
+        with open(index_path) as f:
+            existing_indices = json.load(f)
+        for cat, idx in existing_indices.items():
+            print(f"  {cat}: {len(idx):,} files in index")
+
+        # Check if index is stale (more shards on disk than index knows about)
+        index_is_stale = False
+        for category in ["speech", "noise", "rir"]:
+            disk_count = count_shards_on_disk(category)
+            index_count = count_shards_in_index(existing_indices.get(category, {}), category)
+            if disk_count > index_count:
+                print(
+                    f"  WARNING: {category} has {disk_count} shards on disk "
+                    f"but index only knows about {index_count}"
+                )
+                index_is_stale = True
+
+        if index_is_stale:
+            print("\nIndex is stale - rebuilding from shards to get accurate file list...")
+            existing_indices = rebuild_index_from_shards(output_dir)
+            # Save the rebuilt index
+            if existing_indices:
+                with open(index_path, "w") as f:
+                    json.dump(existing_indices, f)
+                print(f"Saved rebuilt index to {index_path}")
+    elif args.resume:
+        print("\nResume mode: No existing index found, starting fresh")
+
+    # Read file lists
+    print("\nReading file lists...")
+    speech_files = read_file_list(args.speech_list)
+    noise_files = read_file_list(args.noise_list)
+    rir_files = read_file_list(args.rir_list) if args.rir_list else []
+
+    print(f"  Speech files: {len(speech_files):,}")
+    print(f"  Noise files: {len(noise_files):,}")
+    print(f"  RIR files: {len(rir_files):,}")
+
+    if not speech_files:
+        print("Error: No speech files found!")
+        sys.exit(1)
+    if not noise_files:
+        print("Error: No noise files found!")
+        sys.exit(1)
+
+    start_time = time.time()
+
+    # Build caches
+    all_indices = {}
+    all_stats = {}
+
+    # Convert GB to bytes for async writer
+    max_writer_bytes = args.max_pending_bytes * 1024 * 1024 * 1024
+
+    # Speech cache (with short file handling)
+    speech_index, speech_stats = build_cache_for_category(
+        speech_files,
+        "speech",
+        output_dir,
+        args.sample_rate,
+        args.shard_size,
+        args.num_workers,
+        normalize=True,
+        existing_index=existing_indices.get("speech"),
+        base_dir=args.base_dir,
+        max_writer_bytes=max_writer_bytes,
+        min_duration=args.min_duration,
+        merge_short=args.merge_short,
+    )
+    all_indices["speech"] = speech_index
+    all_stats["speech"] = speech_stats
+
+    # Noise cache (no min duration - noise can be any length)
+    noise_index, noise_stats = build_cache_for_category(
+        noise_files,
+        "noise",
+        output_dir,
+        args.sample_rate,
+        args.shard_size,
+        args.num_workers,
+        normalize=True,
+        existing_index=existing_indices.get("noise"),
+        base_dir=args.base_dir,
+        max_writer_bytes=max_writer_bytes,
+    )
+    all_indices["noise"] = noise_index
+    all_stats["noise"] = noise_stats
+
+    # RIR cache (no min duration - RIR can be any length)
+    if rir_files:
+        rir_index, rir_stats = build_cache_for_category(
+            rir_files,
+            "rir",
+            output_dir,
+            args.sample_rate,
+            args.shard_size,
+            args.num_workers,
+            normalize=False,
+            existing_index=existing_indices.get("rir"),
+            base_dir=args.base_dir,
+            max_writer_bytes=max_writer_bytes,
+        )
+        all_indices["rir"] = rir_index
+        all_stats["rir"] = rir_stats
+
+    elapsed = time.time() - start_time
+
+    # Write index file (can be reconstructed from shards if lost)
+    index_path = output_dir / "index.json"
+    with open(index_path, "w") as f:
+        json.dump(all_indices, f)
+    print(f"\nWrote index to {index_path}")
+
+    # Write config file for training
+    config = {
+        "cache_dir": str(output_dir),
+        "sample_rate": args.sample_rate,
+        "segment_length": args.segment_length,
+        "min_duration": args.min_duration,
+        "merge_short": args.merge_short,
+        "fft_size": 960,
+        "hop_size": 480,
+        "nb_erb": 32,
+        "nb_df": 96,
+        "snr_range": [args.snr_min, args.snr_max],
+        "snr_range_extreme": [-20.0, -5.0],
+        "p_extreme_snr": 0.1,
+        "gain_range": [-6.0, 6.0],
+        "speech_gain_range": [-12.0, 12.0],
+        "noise_gain_range": [-12.0, 12.0],
+        "p_reverb": args.p_reverb if rir_files else 0.0,
+        "p_clipping": args.p_clipping,
+        "n_noise_min": 2,
+        "n_noise_max": 5,
+        "stats": all_stats,
+    }
+
+    config_path = output_dir / "config.json"
+    with open(config_path, "w") as f:
+        json.dump(config, f, indent=2)
+    print(f"Wrote config to {config_path}")
+
+    # Summary
+    print("\n" + "=" * 60)
+    print("Build complete!")
+    print("=" * 60)
+    print(f"Elapsed time: {elapsed / 60:.1f} minutes")
+    print(f"Cache directory: {output_dir}")
+    print()
+    print("To train with dynamic mixing:")
+    print(f"  python -m df_mlx.train_dynamic --cache-dir {output_dir}")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    main()

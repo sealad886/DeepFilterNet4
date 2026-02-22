@@ -1,0 +1,21 @@
+# DeepFilterNet4 Run Config — Ultra Preset
+# Target: Apple M1-M2 Ultra (dual-die, 60-76 GPU cores, 64-192GB RAM)
+# Tuning rationale: Maximum I/O parallelism to keep the dual-die
+# interconnect saturated.  Eight workers with a deep prefetch buffer
+# of 16 prevents GPU stalls.  MLXDataStream is essential at this scale
+# for zero-copy tensor delivery.
+# sync_mode=fast with eval_frequency=50 yields the highest sustained
+# throughput by minimizing sync barriers.
+
+[training]
+batch_size = 8
+eval_frequency = 50
+fp16 = "auto"
+
+[dataloader]
+num_workers = 8
+prefetch_size = 16
+use_mlx_data = true
+
+[debug]
+sync_mode = "fast"

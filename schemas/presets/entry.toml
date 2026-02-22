@@ -1,0 +1,19 @@
+# DeepFilterNet4 Run Config — Entry Preset
+# Target: Apple M1/M2 base chips (8 GPU cores, 8-16GB RAM)
+# Tuning rationale: Conservative settings to avoid OOM on memory-constrained
+# devices.  PrefetchDataLoader is used instead of MLXDataStream to reduce
+# baseline RSS (~100-200 MB overhead vs ~300-500 MB for mlx-data).
+# Two workers keep memory bandwidth contention low on the shared bus.
+
+[training]
+batch_size = 2
+eval_frequency = 10
+fp16 = "auto"
+
+[dataloader]
+num_workers = 2
+prefetch_size = 4
+use_mlx_data = false
+
+[debug]
+sync_mode = "normal"

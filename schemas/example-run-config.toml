@@ -1,0 +1,78 @@
+#:schema file:///Users/andrew/zRepos/DeepFilterNet/schemas/run-config.schema.json
+# Example DeepFilterNet4 Run Configuration
+# This file demonstrates IDE autocomplete via the JSON Schema
+# Open this file in VS Code with "Even Better TOML" extension installed
+
+[training]
+epochs = 50
+batch_size = 16
+learning_rate = 1e-4
+# Try typing 'fp16 = ' and you'll see enum suggestions: "auto", true, false
+fp16 = "auto"
+grad_accumulation_steps = 2
+warmup_epochs = 5
+
+[model]
+# Try typing 'backbone_type = ' and you'll see: "mamba", "gru", "attention"
+backbone_type = "attention"
+variant = "full"
+
+[loss]
+# Try typing 'dynamic_loss = ' and you'll see: "baseline", "awesome", "pipeline_awesome"
+dynamic_loss = "pipeline_awesome"
+
+[loss.awesome]
+loss_weight = 0.4
+mask_sharpness = 6.0
+warmup_steps = 2000
+proxy_enabled = true
+
+[loss.mrstft]
+factor = 0.2
+gamma = 0.7
+f_complex = 0.15
+fft_sizes = [512, 1024, 2048]
+hop_sizes = [128, 256, 512]
+
+[gan]
+enabled = true
+start_epoch = 20
+ramp_epochs = 5
+adv_weight = 0.05
+fm_weight = 1.0
+discriminator = "combined"
+mpd_periods = [2, 3, 5, 7, 11]
+msd_scales = 3
+
+[checkpoint]
+checkpoint_dir = "checkpoints/example"
+resume = true
+resume_data = true
+save_strategy = "epoch"
+validate_every = 1
+
+[dataset]
+cache_dir = "~/DataDump/datasets/mlx_datastore"
+# Hover over any key to see its description, type, and constraints
+
+[vad]
+loss_weight = 0.05
+threshold = 0.6
+warmup_epochs = 5
+
+[vad.eval]
+mode = "silero"
+every = 1
+batches = 8
+
+[dataloader]
+num_workers = 4
+prefetch_size = 8
+use_mlx_data = true
+
+[metrics]
+eval_sisdr = false
+
+[debug]
+verbose = true
+debug_numerics = false

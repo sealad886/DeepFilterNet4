@@ -3,6 +3,7 @@
 import argparse
 import os
 import sys
+from typing import TYPE_CHECKING, cast
 
 import h5py
 import numpy as np
@@ -13,6 +14,9 @@ import df.scripts.dnsmos as dnsmos
 from df.io import resample
 from df.scripts.hdf5_utils import load_encoded
 from df.scripts.prepare_data import encode
+
+if TYPE_CHECKING:
+    from h5py import Group
 
 
 def to_f32(audio: Tensor) -> Tensor:
@@ -42,7 +46,7 @@ def main(args):
         for k, v in h5_read.attrs.items():
             h5_write.attrs[k] = v
 
-        sr: int = h5_read.attrs["sr"]
+        sr = cast(int, h5_read.attrs["sr"])
         if sr is None:
             print("sr not found.", file=sys.stderr)
             exit(1)
@@ -51,9 +55,9 @@ def main(args):
         h5_write.attrs["codec"] = codec_write
         for grp_name, group_read in h5_read.items():
             if grp_name not in h5_write:
-                group_write = h5_write.create_group(grp_name)
+                group_write: Group = h5_write.create_group(grp_name)
             else:
-                group_write = h5_write[grp_name]
+                group_write = cast("Group", h5_write[grp_name])
             for key, ds in group_read.items():
                 encoded = ds[...]
                 if codec == "pcm":
@@ -68,7 +72,7 @@ def main(args):
                 audio = to_f32(audio)
                 for ch in range(audio.shape[0]):
                     resampled = resample(audio[ch], sr, dnsmos.SR)
-                    (ch_sig, ch_bak, ch_ovr) = dnsmos.dnsmos_local(resampled, onnx_sig, onnx_bak_ovr)
+                    ch_sig, ch_bak, ch_ovr = dnsmos.dnsmos_local(resampled, onnx_sig, onnx_bak_ovr)
                 sig, bak, ovr = np.mean(ch_sig), np.mean(ch_bak), np.mean(ch_ovr)
                 print(f" sig: {sig:.2f}, bak: {bak:.2f}, ovr: {ovr:.2f} ... ", end="")
                 if sig > t[0] and bak > t[1] and ovr > t[2]:
@@ -80,7 +84,9 @@ def main(args):
                             audio = to_int16(audio)
                         if audio.dim() == 1:
                             audio = audio.unsqueeze(0)
-                        data = encode(audio, sr, codec_write, compression=8)
+                        # Use dtype from source dataset attributes or default to float32
+                        dtype = str(ds.attrs.get("dtype", "float32"))
+                        data = encode(audio, sr, codec_write, dtype)
                     if key in group_write:
                         del group_write[key]
                     ds_write = group_write.create_dataset(

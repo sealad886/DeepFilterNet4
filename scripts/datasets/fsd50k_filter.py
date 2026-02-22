@@ -4,6 +4,7 @@
 Reads license info from the JSON metadata files (dev_clips_info_FSD50K.json
 and eval_clips_info_FSD50K.json) provided by FSD50K.
 """
+
 import argparse
 import json
 import os

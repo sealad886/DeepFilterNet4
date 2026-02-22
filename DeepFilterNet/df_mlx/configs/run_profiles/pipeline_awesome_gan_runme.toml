@@ -1,0 +1,432 @@
+# DeepFilterNet4 train_dynamic run-config (TOML)
+# Precedence: defaults < run-config < explicit CLI flags
+# NOTE: --config remains the dataset/mixer config (JSON).
+# Includes all training/runtime CLI settings except meta flags:
+#   --run-config (path to this TOML file)
+#   --print-run-config (prints template and exits)
+
+[dataset]
+# Path to pre-built audio cache (from build_audio_cache.py)
+# Default: 
+cache_dir = ""
+
+# Path to file containing speech file paths (one per line)
+# Default: 
+speech_list = ""
+
+# Path to file containing noise file paths (one per line)
+# Default: 
+noise_list = ""
+
+# Path to file containing RIR file paths (one per line)
+# Default: 
+rir_list = ""
+
+# Dataset/mixer config JSON path (same as --config)
+# Default: 
+config = ""
+
+# Override base SNR range in dB (e.g., [-5, 40])
+# Default: []
+snr_range = []
+
+# Override extreme SNR range in dB (e.g., [-20, -5])
+# Default: []
+snr_range_extreme = []
+
+# Probability of sampling from extreme SNR range (0-1)
+# Default: -1.0
+p_extreme_snr = -1.0
+
+# Override very-low SNR range in dB (e.g., [-30, -20])
+# Default: []
+snr_range_very_low = []
+
+# Probability of sampling from very-low SNR range (0-1)
+# Default: -1.0
+p_very_low_snr = -1.0
+
+# Probability of adding interfering speaker (0-1)
+# Default: -1.0
+p_interfer_speech = -1.0
+
+# Override speech gain range in dB (e.g., [-12, 12])
+# Default: []
+speech_gain_range = []
+
+# Override noise gain range in dB (e.g., [-12, 12])
+# Default: []
+noise_gain_range = []
+
+[augmentation]
+# Probability of applying reverb
+# Range: [0.0, 1.0]
+# Default: 0.5
+p_reverb = 0.5
+
+# Probability of clipping distortion
+# Range: [0.0, 1.0]
+# Default: 0.0
+p_clipping = 0.0
+
+[training]
+# Number of training epochs
+# Default: 100
+epochs = 100
+
+# Batch size
+# Default: 8
+batch_size = 20
+
+# Initial learning rate
+# Min: 0.0
+# Default: 0.0001
+learning_rate = 0.00001
+
+# Minimum learning rate for cosine schedule (None=1% of base)
+# Default: -1.0
+learning_rate_min = -1.0
+
+# Weight decay for AdamW
+# Min: 0.0
+# Default: 0.0
+weight_decay = 0.0
+
+# Warmup epochs
+# Default: 5
+warmup_epochs = 5
+
+# Curriculum learning warmup epochs (0=disabled). SNR/interferer probabilities ramp from 0 to target.
+# Default: 0
+curriculum_warmup_epochs = 0
+
+# Early stopping patience
+# Default: 10
+patience = 10
+
+# Gradient accumulation steps
+# Default: 1
+grad_accumulation_steps = 4
+
+# Maximum gradient norm
+# Min: 0.0
+# Default: 1.0
+max_grad_norm = 10.8
+
+# Sync/eval frequency in batches
+# Default: 10
+eval_frequency = 10
+
+# Enable FP16 (true/false) or 'auto' for hardware default
+# Allowed: ['auto', True, False]
+# Note: If set to 'auto', hardware defaults determine FP16 usage.
+# Default: auto
+fp16 = "false"
+
+# Optional RNG seed override (-1 disables override)
+# Default: -1
+seed = -1
+
+# Path to train.py-compatible INI config (optional)
+# Default: 
+train_config = ""
+
+[dataloader]
+# Data loader workers
+# Default: 4
+num_workers = 4
+
+# Prefetch size
+# Default: 8
+prefetch_size = 8
+
+# Use MLXDataStream if available
+# Default: True
+use_mlx_data = true
+
+# Limit number of train batches per epoch (-1 disables)
+# Default: -1
+max_train_batches = -1
+
+# Limit number of validation batches (-1 disables)
+# Default: -1
+max_valid_batches = -1
+
+[checkpoint]
+# Directory for checkpoints
+# Default: checkpoints
+checkpoint_dir = "checkpoints"
+
+# Checkpoint cadence: no | epoch | steps
+# Allowed: ['no', 'epoch', 'steps']
+# Note: If save_strategy='steps', save_steps must be > 0.
+# Default: epoch
+save_strategy = "epoch"
+
+# Steps between checkpoints
+# Default: 500
+save_steps = 500
+
+# Max checkpoints to keep (-1 disables pruning)
+# Default: -1
+save_total_limit = -1
+
+# Save data checkpoint every N batches (0 disables)
+# Default: 0
+checkpoint_batches = 0
+
+# Validate every N epochs
+# Default: 1
+validate_every = 1
+
+# Resume from checkpoint: true (auto) | false | path
+# Default: False
+resume = false
+
+# Resume data state: true (auto) | false | path
+# Default: False
+resume_data = false
+
+# Validate checkpoints before start
+# Default: False
+check_chkpts = false
+
+[model]
+# Backbone type: mamba | gru | attention
+# Allowed: ['mamba', 'gru', 'attention']
+# Default: mamba
+backbone_type = "mamba"
+
+# Model variant: full | lite
+# Allowed: ['full', 'lite']
+# Default: full
+variant = "full"
+
+[loss]
+# Dynamic loss: baseline | awesome | pipeline_awesome
+# Allowed: ['baseline', 'awesome', 'pipeline_awesome']
+# Note: If not 'awesome' or 'pipeline_awesome', the [loss.awesome] block is ignored.
+# Default: baseline
+dynamic_loss = "baseline"
+
+[loss.awesome]
+# Awesome loss weight
+# Min: 0.0
+# Default: 0.4
+loss_weight = 0.4
+
+# Mask sharpness
+# Min: 0.0
+# Default: 6.0
+mask_sharpness = 6.0
+
+# Warmup steps for awesome loss
+# Default: 0
+warmup_steps = 0
+
+# Enable cheap VAD proxy gating
+# Default: True
+proxy_enabled = true
+
+[loss.mrstft]
+# Multi-res STFT loss weight (0 disables)
+# Min: 0.0
+# Default: 0.0
+factor = 0.0
+
+# Magnitude compression exponent
+# Min: 0.0
+# Default: 1.0
+gamma = 1.0
+
+# Complex loss weight (None disables)
+# Default: -1.0
+f_complex = -1.0
+
+# FFT sizes for multi-res loss
+# Default: [512, 1024, 2048]
+fft_sizes = [512, 1024, 2048]
+
+# Hop sizes for multi-res loss (None=fft_size//4)
+# Default: []
+hop_sizes = []
+
+[gan]
+# Enable GAN adversarial training
+# Default: False
+enabled = false
+
+# Epoch to start GAN training (0-based)
+# Default: 0
+start_epoch = 0
+
+# Linearly ramp GAN weights over N epochs (0 disables ramp)
+# Default: 0
+ramp_epochs = 0
+
+# Generator adversarial loss weight
+# Min: 0.0
+# Default: 0.0
+adv_weight = 0.0
+
+# Feature matching loss weight
+# Min: 0.0
+# Default: 0.0
+fm_weight = 0.0
+
+# Discriminator type: combined | mpd | msd
+# Allowed: ['combined', 'mpd', 'msd']
+# Default: combined
+discriminator = "combined"
+
+# MPD periods
+# Default: [2, 3, 5, 7, 11]
+mpd_periods = [2, 3, 5, 7, 11]
+
+# MSD number of scales
+# Default: 3
+msd_scales = 3
+
+# Discriminator learning rate
+# Min: 0.0
+# Default: 0.0001
+disc_lr = 0.0001
+
+# Discriminator weight decay
+# Min: 0.0
+# Default: 0.0
+disc_weight_decay = 0.0
+
+# Discriminator gradient clipping
+# Min: 0.0
+# Default: 1.0
+disc_grad_clip = 1.0
+
+# Update discriminator every N steps
+# Default: 1
+disc_update_freq = 1
+
+[vad]
+# VAD loss weight
+# Min: 0.0
+# Default: 0.05
+loss_weight = 0.05
+
+# VAD probability threshold for speech gating
+# Range: [0.0, 1.0]
+# Default: 0.6
+threshold = 0.6
+
+# VAD margin
+# Min: 0.0
+# Default: 0.05
+margin = 0.05
+
+# VAD speech-structure loss weight
+# Min: 0.0
+# Default: 0.0
+speech_loss_weight = 0.0
+
+# VAD warmup epochs
+# Default: 5
+warmup_epochs = 5
+
+# SNR gate threshold (dB)
+# Default: -10.0
+snr_gate_db = -10.0
+
+# SNR gate softness (dB)
+# Default: 6.0
+snr_gate_width = 6.0
+
+# Speech band low cutoff (Hz)
+# Default: 300.0
+band_low_hz = 300.0
+
+# Speech band high cutoff (Hz)
+# Default: 3400.0
+band_high_hz = 3400.0
+
+# VAD z-score threshold
+# Default: 0.0
+z_threshold = 0.0
+
+# VAD z-score slope
+# Default: 1.0
+z_slope = 1.0
+
+[vad.eval]
+# VAD eval mode: auto | proxy | silero | off
+# Allowed: ['auto', 'proxy', 'silero', 'off']
+# Note: If mode='silero', install: pip install silero-vad onnxruntime torch.
+# Default: auto
+mode = "auto"
+
+# Evaluate VAD metrics every N epochs
+# Default: 1
+every = 1
+
+# Number of batches for VAD eval
+# Default: 8
+batches = 8
+
+# Max seconds per clip for VAD eval (0 disables)
+# Min: 0.0
+# Default: 0.0
+max_seconds = 0.0
+
+# Path to silero_vad.onnx (optional)
+# Default: 
+silero_model_path = ""
+
+# Silero sample rate (Hz)
+# Default: 16000
+silero_sample_rate = 16000
+
+[vad.train]
+# Probability of VAD regularizer per batch
+# Range: [0.0, 1.0]
+# Default: 0.0
+prob = 0.0
+
+# Apply VAD regularizer every N steps (0 disables)
+# Default: 0
+every_steps = 0
+
+[metrics]
+# Compute SI-SDR during validation
+# Default: False
+eval_sisdr = false
+
+[debug]
+# Verbose timing/logging
+# Default: False
+verbose = false
+
+# Enable numeric debug mode
+# Default: False
+debug_numerics = false
+
+# Fail fast on non-finite
+# Default: True
+debug_numerics_fail_fast = true
+
+# Check every N steps
+# Default: 1
+debug_numerics_every = 1
+
+# Directory for numeric debug dumps (empty disables override)
+# Default: 
+debug_numerics_dump_dir = ""
+
+# Dump small tensor slices
+# Default: False
+debug_numerics_dump_arrays = false
+
+# Max debug dumps
+# Default: 5
+debug_numerics_max_dumps = 5
+
+# Skip optimizer update on non-finite
+# Default: False
+nan_skip_batch = false

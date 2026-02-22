@@ -1,4 +1,5 @@
 import timeit
+from pathlib import Path
 from typing import Union
 
 import matplotlib.pyplot as plt
@@ -146,9 +147,10 @@ def test_timings(num=1000):
 def test_dataloader(ds_dir):
     import os
 
+    assets_cfg = Path(__file__).resolve().parents[2] / "assets" / "dataset.cfg"
     loader = DataLoader(
         ds_dir=os.path.expanduser(ds_dir),
-        ds_config="../assets/dataset.cfg",
+        ds_config=str(assets_cfg),
         sr=48_000,
         batch_size=8,
         split="train",
@@ -167,13 +169,19 @@ def test_fft_dataloader(ds_dir):
 
     import librosa
 
-    config.load("/tmp/dfrs1/config.ini")
+    config_path = Path("/tmp/dfrs1/config.ini")
+    if not config_path.exists():
+        import pytest
+
+        pytest.skip("Missing /tmp/dfrs1/config.ini for FFT dataloader test.")
+    config.load(str(config_path), allow_reload=True)
     p = ModelParams()
     df = DF(p.sr, p.fft_size, p.hop_size, p.nb_erb)
     norm_alpha = _calculate_norm_alpha(p.sr, p.hop_size, tau=1)
+    assets_cfg = Path(__file__).resolve().parents[2] / "assets" / "dataset.cfg"
     loader = DataLoader(
         ds_dir=os.path.expanduser(ds_dir),
-        ds_config="assets/dataset.cfg",
+        ds_config=str(assets_cfg),
         sr=p.sr,
         batch_size=1,
         fft_size=p.fft_size,

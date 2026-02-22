@@ -1,0 +1,20 @@
+# DeepFilterNet4 Run Config — Max Preset
+# Target: Apple M1-M3 Max (30-40 GPU cores, 32-96GB RAM)
+# Tuning rationale: High throughput leveraging the Max chip's wider memory
+# bus and larger unified memory pool.  MLXDataStream's native C++ threads
+# bypass the GIL and enable zero-copy MLX tensor creation.  Six workers
+# sit below the diminishing-returns regime (~8 on Max chips).
+# sync_mode=fast minimizes eval barriers for maximum training throughput.
+
+[training]
+batch_size = 8
+eval_frequency = 25
+fp16 = "auto"
+
+[dataloader]
+num_workers = 6
+prefetch_size = 12
+use_mlx_data = true
+
+[debug]
+sync_mode = "fast"

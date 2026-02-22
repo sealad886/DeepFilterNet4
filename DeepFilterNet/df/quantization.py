@@ -486,7 +486,7 @@ def export_quantized_model(
                 raise ValueError("example_inputs required for TorchScript tracing")
         # Trace the model
         traced = torch.jit.trace(model, example_inputs)
-        traced.save(export_path)
+        traced.save(export_path)  # type: ignore[union-attr]
         logger.info(f"Exported quantized model to {export_path} (TorchScript)")
 
     elif export_format == "onnx":

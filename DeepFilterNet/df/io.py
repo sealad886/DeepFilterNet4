@@ -16,7 +16,7 @@ USE_TORCHCODEC = TORCHAUDIO_VERSION >= version.parse("2.9.0")
 HAS_TORCHCODEC = False
 if USE_TORCHCODEC:
     try:
-        from torchcodec.decoders import AudioDecoder
+        from torchcodec.decoders import AudioDecoder  # type: ignore[import-not-found]
 
         HAS_TORCHCODEC = True
     except ImportError:
@@ -33,7 +33,7 @@ except ImportError:
 
 # Handle AudioMetaData import across TorchAudio versions
 try:
-    from torchaudio import AudioMetaData
+    from torchaudio import AudioMetaData  # type: ignore[import-unresolved]  # noqa: F401
 
     TA_RESAMPLE_SINC = "sinc_interp_hann"
     TA_RESAMPLE_KAISER = "sinc_interp_kaiser"
@@ -77,9 +77,9 @@ def get_audio_metadata(file: str) -> AudioMetaData:
         decoder = AudioDecoder(file)  # type: ignore[possibly-undefined]
         metadata = decoder.metadata
         return AudioMetaData(
-            sample_rate=metadata.sample_rate,
-            num_frames=metadata.num_frames if hasattr(metadata, "num_frames") else 0,
-            num_channels=metadata.num_channels,
+            sample_rate=getattr(metadata, "sample_rate", 0),  # type: ignore[attr-defined]
+            num_frames=getattr(metadata, "num_frames", 0),  # type: ignore[attr-defined]
+            num_channels=getattr(metadata, "num_channels", 0),  # type: ignore[attr-defined]
             bits_per_sample=getattr(metadata, "bits_per_sample", 0),
             encoding=getattr(metadata, "codec", ""),
         )
@@ -162,7 +162,8 @@ def save_audio(
     if audio.ndim == 1:
         audio.unsqueeze_(0)
     if dtype == torch.int16 and audio.dtype != torch.int16:
-        audio = (audio * (1 << 15)).to(torch.int16)
+        # Clamp to [-1, 1] before int16 conversion to prevent overflow wrapping
+        audio = (audio.clamp(-1.0, 1.0) * (1 << 15)).to(torch.int16)
     if dtype == torch.float32 and audio.dtype != torch.float32:
         audio = audio.to(torch.float32) / (1 << 15)
     # TorchAudio 2.9+ requires TorchCodec for ta.save(); use soundfile as fallback

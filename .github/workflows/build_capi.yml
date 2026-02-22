@@ -46,12 +46,12 @@ jobs:
             libname: libdeep_filter_ladspa
             libext: so
           - build: macos-x86
-            os: macos-12
+            os: macos-13
             target: x86_64-apple-darwin
             libname: libdeep_filter_ladspa
             libext: dylib
           - build: macos-aarch64
-            os: macos-12
+            os: macos-14
             target: aarch64-apple-darwin
             libname: libdeep_filter_ladspa
             libext: dylib
@@ -63,7 +63,7 @@ jobs:
             libname: deep_filter_ladspa
             libext: dll
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -141,7 +141,7 @@ jobs:
         if: ${{ runner.os == 'macos' }}
         run: find ./staging
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v4
         with:
           name: clib-${{ matrix.target }}
           path: ./staging

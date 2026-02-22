@@ -72,7 +72,7 @@ def read_cp(
         epoch = get_epoch(latest)
     if log:
         logger.info("Found checkpoint {} with epoch {}".format(latest, epoch))
-    latest = torch.load(latest, map_location="cpu", weights_only=False)
+    latest = torch.load(latest, map_location="cpu", weights_only=True)
     latest = {k.replace("clc", "df"): v for k, v in latest.items()}
     if blacklist:
         reg = re.compile("".join(f"({b})|" for b in blacklist)[:-1])
@@ -131,11 +131,16 @@ def write_cp(
                 prev_best_f.seek(0, os.SEEK_END)
                 np.savetxt(prev_best_f, np.array([[float(epoch), metric]]))
                 cp_name = os.path.join(dirname, f"{name}_{epoch}.{extension}.best")
-                torch.save(obj.state_dict(), cp_name)
+                tmp_best = cp_name + ".tmp"
+                torch.save(obj.state_dict(), tmp_best)
+                os.replace(tmp_best, cp_name)
                 cleanup(name, dirname, extension + ".best", nkeep=n_keep_best)
     cp_name = os.path.join(dirname, f"{name}_{epoch}.{extension}")
     logger.info(f"Writing checkpoint {cp_name} with epoch {epoch}")
-    torch.save(obj.state_dict(), cp_name)
+    # Safety: write to temp file then atomic rename to prevent corruption on crash
+    tmp_name = cp_name + ".tmp"
+    torch.save(obj.state_dict(), tmp_name)
+    os.replace(tmp_name, cp_name)
     cleanup(name, dirname, extension, nkeep=n_keep)
 
 
