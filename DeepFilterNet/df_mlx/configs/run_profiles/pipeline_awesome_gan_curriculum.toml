@@ -110,7 +110,7 @@ vad_speech_loss_weight = 0.15
 start_epoch = 60
 name = "full_multitask"
 # All non-GAN losses at target strength — model converges on pre-GAN optimum
-# aux = 0.80 + 0.40 + 0.35 = 1.55 vs reconstruction 1.35 → 1:1.15 (balanced)
+# aux = 0.80 + 0.40 + 0.45 = 1.65 vs reconstruction 1.35 → 1:1.22 (balanced)
 # 55 epochs of stable multi-task training before GAN phase
 awesome_loss_weight = 0.80
 vad_loss_weight = 0.40
