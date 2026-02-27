@@ -165,6 +165,7 @@ from df_mlx.training_diagnostics import (  # noqa: E402, F401
     DiagnosticContext,
     diagnose_nonfinite as _diagnose_nonfinite_impl,
 )
+from df_mlx.training_setup import build_train_config, print_training_config  # noqa: E402
 from df_mlx.training_validation import (  # noqa: E402, F401
     ValidationContext,
     run_validation as _run_validation,
@@ -803,86 +804,52 @@ def train(
 
     min_lr = learning_rate_min if learning_rate_min is not None else learning_rate * 0.01
 
-    # Print file counts after dataset init (so cache files are included)
-    print(f"Speech files:   {len(config.speech_files):,}")
-    print(f"Noise files:    {len(config.noise_files):,}")
-    print(f"RIR files:      {len(config.rir_files):,}")
-    print(f"Epochs:         {epochs}")
-    print(f"Batch size:     {batch_size}")
-    print(f"Learning rate:  {learning_rate} (min {min_lr})")
-    print(f"Weight decay:   {weight_decay}")
-    print(f"Checkpoint dir: {checkpoint_dir}")
-    print(f"P(reverb):      {config.p_reverb}")
-    print(f"P(clipping):    {config.p_clipping}")
-    print(f"SNR range:      {config.snr_range} dB")
-    print(f"SNR extreme:    {config.snr_range_extreme} dB (p={config.p_extreme_snr})")
-    print(f"Speech gain:    {config.speech_gain_range} dB")
-    print(f"Noise gain:     {config.noise_gain_range} dB")
-    print(f"Dynamic loss:   {dynamic_loss}")
-    if use_mrstft_loss and mrstft_cfg is not None:
-        hop_sizes_display = mrstft_cfg.hop_sizes if mrstft_cfg.hop_sizes is not None else "auto"
-        print(
-            "MRSTFT loss:   "
-            f"factor={mrstft_cfg.factor}, gamma={mrstft_cfg.gamma}, "
-            f"f_complex={mrstft_cfg.f_complex}, fft_sizes={mrstft_cfg.fft_sizes}, "
-            f"hop_sizes={hop_sizes_display}"
-        )
-    if use_awesome_loss or use_pipeline_awesome_loss:
-        print(
-            f"  Awesome loss: weight={awesome_loss_weight}, mask_sharpness={awesome_mask_sharpness}, "
-            f"warmup_steps={awesome_warmup_steps}, proxy={'on' if vad_proxy_enabled else 'off'}"
-        )
-    if gan_enabled:
-        print(
-            "GAN loss:       on "
-            f"(adv={gan_adv_weight}, fm={gan_fm_weight}, start={gan_start_epoch}, ramp={gan_ramp_epochs})"
-        )
-        print(
-            "  Discriminator: "
-            f"type={gan_disc_type}, mpd_periods={gan_mpd_periods or [2, 3, 5, 7, 11]}, "
-            f"msd_scales={gan_msd_scales}, update_freq={gan_disc_update_freq}"
-        )
-        print(
-            "  Disc memory:  "
-            f"max_samples={gan_disc_max_samples or 'full'}, "
-            f"mpd_ch={gan_mpd_channels}, msd_ch={gan_msd_channels}"
-        )
-    vad_enabled = vad_loss_weight > 0 or vad_speech_loss_weight > 0
-    print(
-        f"VAD loss:       {'on' if vad_enabled else 'off'} "
-        f"(w_vad={vad_loss_weight}, w_speech={vad_speech_loss_weight})"
+    vad_enabled = print_training_config(
+        config,
+        epochs=epochs,
+        batch_size=batch_size,
+        learning_rate=learning_rate,
+        min_lr=min_lr,
+        weight_decay=weight_decay,
+        checkpoint_dir=checkpoint_dir,
+        dynamic_loss=dynamic_loss,
+        mrstft_cfg=mrstft_cfg,
+        awesome_loss_weight=awesome_loss_weight,
+        awesome_mask_sharpness=awesome_mask_sharpness,
+        awesome_warmup_steps=awesome_warmup_steps,
+        vad_proxy_enabled=vad_proxy_enabled,
+        gan_enabled=gan_enabled,
+        gan_adv_weight=gan_adv_weight,
+        gan_fm_weight=gan_fm_weight,
+        gan_start_epoch=gan_start_epoch,
+        gan_ramp_epochs=gan_ramp_epochs,
+        gan_disc_type=gan_disc_type,
+        gan_mpd_periods=gan_mpd_periods,
+        gan_msd_scales=gan_msd_scales,
+        gan_disc_update_freq=gan_disc_update_freq,
+        gan_disc_max_samples=gan_disc_max_samples,
+        gan_mpd_channels=gan_mpd_channels,
+        gan_msd_channels=gan_msd_channels,
+        vad_loss_weight=vad_loss_weight,
+        vad_speech_loss_weight=vad_speech_loss_weight,
+        vad_threshold=vad_threshold,
+        vad_margin=vad_margin,
+        vad_warmup_epochs=vad_warmup_epochs,
+        vad_snr_gate_db=vad_snr_gate_db,
+        vad_snr_gate_width=vad_snr_gate_width,
+        vad_band_low_hz=vad_band_low_hz,
+        vad_band_high_hz=vad_band_high_hz,
+        vad_eval_mode=vad_eval_mode,
+        vad_eval_every=vad_eval_every,
+        vad_eval_batches=vad_eval_batches,
+        vad_eval_max_seconds=vad_eval_max_seconds,
+        vad_silero_sample_rate=vad_silero_sample_rate,
+        vad_silero_model_path=vad_silero_model_path,
+        use_vad_train_reg=use_vad_train_reg,
+        vad_train_prob=vad_train_prob,
+        vad_train_every_steps=vad_train_every_steps,
+        pipeline_stage_defs=pipeline_stage_defs,
     )
-    if vad_enabled:
-        print(f"  VAD threshold: {vad_threshold} | margin: {vad_margin}")
-        print(f"  VAD warmup:    {vad_warmup_epochs} epochs")
-        print(f"  VAD SNR gate:  {vad_snr_gate_db} dB (width {vad_snr_gate_width} dB)")
-        print(f"  VAD band:      {vad_band_low_hz:.0f}-{vad_band_high_hz:.0f} Hz")
-    if vad_eval_enabled:
-        print(f"  VAD eval:      mode={vad_eval_mode} every={vad_eval_every} epochs batches={vad_eval_batches}")
-        if vad_eval_mode == "silero":
-            max_sec = vad_eval_max_seconds if vad_eval_max_seconds > 0 else "full"
-            print(
-                "  Silero VAD:    "
-                f"sr={vad_silero_sample_rate}Hz, max_sec={max_sec}, "
-                f"model={vad_silero_model_path or 'package'}"
-            )
-    if use_vad_train_reg:
-        print(
-            "  VAD train:     " f"prob={vad_train_prob} every_steps={vad_train_every_steps} (weight={vad_loss_weight})"
-        )
-    if pipeline_stage_defs:
-        print("  Pipeline stages:")
-        for idx, stage in enumerate(pipeline_stage_defs):
-            stage_name = stage.get("name", f"stage_{idx}")
-            stage_parts = [f"start={stage['start_epoch']}", f"name={stage_name}"]
-            if stage.get("awesome_loss_weight") is not None:
-                stage_parts.append(f"awesome_w={stage['awesome_loss_weight']}")
-            if stage.get("vad_loss_weight") is not None:
-                stage_parts.append(f"vad_w={stage['vad_loss_weight']}")
-            if stage.get("vad_speech_loss_weight") is not None:
-                stage_parts.append(f"speech_w={stage['vad_speech_loss_weight']}")
-            print("    - " + ", ".join(stage_parts))
-    print("=" * 60)
 
     tqdm_setup_panel = None
     tqdm_train_position = 0
@@ -910,68 +877,64 @@ def train(
         tqdm_train_position = 1
         tqdm_valid_position = 2
 
-    train_config = {
-        **config.__dict__,
-        "train_config_path": train_config_path,
-        "dynamic_loss": dynamic_loss,
-        "pipeline_stages": pipeline_stage_defs,
-        "awesome_loss_weight": awesome_loss_weight,
-        "awesome_mask_sharpness": awesome_mask_sharpness,
-        "awesome_warmup_steps": awesome_warmup_steps,
-        "vad_proxy_enabled": vad_proxy_enabled,
-        "mrstft_factor": mrstft_cfg.factor if mrstft_cfg is not None else 0.0,
-        "mrstft_gamma": mrstft_cfg.gamma if mrstft_cfg is not None else 1.0,
-        "mrstft_f_complex": mrstft_cfg.f_complex if mrstft_cfg is not None else None,
-        "mrstft_fft_sizes": list(mrstft_cfg.fft_sizes) if mrstft_cfg is not None else None,
-        "mrstft_hop_sizes": (list(mrstft_cfg.hop_sizes) if (mrstft_cfg and mrstft_cfg.hop_sizes) else None),
-        "gan_enabled": gan_enabled,
-        "gan_start_epoch": gan_start_epoch,
-        "gan_ramp_epochs": gan_ramp_epochs,
-        "gan_adv_weight": gan_adv_weight,
-        "gan_fm_weight": gan_fm_weight,
-        "gan_disc_type": gan_disc_type,
-        "gan_mpd_periods": list(gan_mpd_periods) if gan_mpd_periods else [2, 3, 5, 7, 11],
-        "gan_msd_scales": gan_msd_scales,
-        "gan_disc_lr": gan_disc_lr,
-        "gan_disc_weight_decay": gan_disc_weight_decay,
-        "gan_disc_grad_clip": gan_disc_grad_clip,
-        "gan_disc_update_freq": gan_disc_update_freq,
-        "gan_cache_gen_waveforms": gan_cache_gen_waveforms,
-        "gan_disc_gradient_checkpoint": gan_disc_gradient_checkpoint,
-        "gan_gen_gradient_checkpoint": gan_gen_gradient_checkpoint,
-        "gan_eval_frequency": gan_eval_frequency,
-        "experimental_compiled_gan": experimental_compiled_gan,
-        "vad_loss_weight": vad_loss_weight,
-        "vad_threshold": vad_threshold,
-        "vad_margin": vad_margin,
-        "vad_speech_loss_weight": vad_speech_loss_weight,
-        "vad_warmup_epochs": vad_warmup_epochs,
-        "vad_snr_gate_db": vad_snr_gate_db,
-        "vad_snr_gate_width": vad_snr_gate_width,
-        "vad_band_low_hz": vad_band_low_hz,
-        "vad_band_high_hz": vad_band_high_hz,
-        "vad_z_threshold": vad_z_threshold,
-        "vad_z_slope": vad_z_slope,
-        "vad_eval_mode": vad_eval_mode,
-        "vad_eval_every": vad_eval_every,
-        "vad_eval_batches": vad_eval_batches,
-        "vad_eval_max_seconds": vad_eval_max_seconds,
-        "vad_silero_model_path": vad_silero_model_path,
-        "vad_silero_sample_rate": vad_silero_sample_rate,
-        "vad_train_prob": vad_train_prob,
-        "vad_train_every_steps": vad_train_every_steps,
-        "eval_sisdr": eval_sisdr,
-        "max_train_batches": max_train_batches,
-        "max_valid_batches": max_valid_batches,
-        "seed": seed,
-        "learning_rate_min": learning_rate_min,
-        "weight_decay": weight_decay,
-        "model_variant": model_variant,
-        "debug_numerics": debug_numerics,
-        "debug_numerics_fail_fast": debug_numerics_fail_fast,
-        "debug_numerics_every": debug_numerics_every,
-        "nan_skip_batch": nan_skip_batch,
-    }
+    train_config = build_train_config(
+        config,
+        mrstft_cfg=mrstft_cfg,
+        gan_mpd_periods=gan_mpd_periods,
+        pipeline_stage_defs=pipeline_stage_defs,
+        train_config_path=train_config_path,
+        dynamic_loss=dynamic_loss,
+        awesome_loss_weight=awesome_loss_weight,
+        awesome_mask_sharpness=awesome_mask_sharpness,
+        awesome_warmup_steps=awesome_warmup_steps,
+        vad_proxy_enabled=vad_proxy_enabled,
+        gan_enabled=gan_enabled,
+        gan_start_epoch=gan_start_epoch,
+        gan_ramp_epochs=gan_ramp_epochs,
+        gan_adv_weight=gan_adv_weight,
+        gan_fm_weight=gan_fm_weight,
+        gan_disc_type=gan_disc_type,
+        gan_msd_scales=gan_msd_scales,
+        gan_disc_lr=gan_disc_lr,
+        gan_disc_weight_decay=gan_disc_weight_decay,
+        gan_disc_grad_clip=gan_disc_grad_clip,
+        gan_disc_update_freq=gan_disc_update_freq,
+        gan_cache_gen_waveforms=gan_cache_gen_waveforms,
+        gan_disc_gradient_checkpoint=gan_disc_gradient_checkpoint,
+        gan_gen_gradient_checkpoint=gan_gen_gradient_checkpoint,
+        gan_eval_frequency=gan_eval_frequency,
+        experimental_compiled_gan=experimental_compiled_gan,
+        vad_loss_weight=vad_loss_weight,
+        vad_threshold=vad_threshold,
+        vad_margin=vad_margin,
+        vad_speech_loss_weight=vad_speech_loss_weight,
+        vad_warmup_epochs=vad_warmup_epochs,
+        vad_snr_gate_db=vad_snr_gate_db,
+        vad_snr_gate_width=vad_snr_gate_width,
+        vad_band_low_hz=vad_band_low_hz,
+        vad_band_high_hz=vad_band_high_hz,
+        vad_z_threshold=vad_z_threshold,
+        vad_z_slope=vad_z_slope,
+        vad_eval_mode=vad_eval_mode,
+        vad_eval_every=vad_eval_every,
+        vad_eval_batches=vad_eval_batches,
+        vad_eval_max_seconds=vad_eval_max_seconds,
+        vad_silero_model_path=vad_silero_model_path,
+        vad_silero_sample_rate=vad_silero_sample_rate,
+        vad_train_prob=vad_train_prob,
+        vad_train_every_steps=vad_train_every_steps,
+        eval_sisdr=eval_sisdr,
+        max_train_batches=max_train_batches,
+        max_valid_batches=max_valid_batches,
+        seed=seed,
+        learning_rate_min=learning_rate_min,
+        weight_decay=weight_decay,
+        model_variant=model_variant,
+        debug_numerics=debug_numerics,
+        debug_numerics_fail_fast=debug_numerics_fail_fast,
+        debug_numerics_every=debug_numerics_every,
+        nan_skip_batch=nan_skip_batch,
+    )
 
     dataset.set_split("train")
 
