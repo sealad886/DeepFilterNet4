@@ -88,12 +88,10 @@ from df_mlx.training_cli import (  # noqa: E402, F401
     _resolve_pipeline_stage,
 )
 from df_mlx.training_cli_main import main  # noqa: E402, F401
-from df_mlx.training_helpers import (  # noqa: E402, F401
-    build_setup_panel_line as _build_setup_panel_line_impl,
-    clip_gan_scores as _clip_gan_scores_impl,
-    curriculum_schedule as _curriculum_schedule_impl,
-    is_vad_train_reg_enabled as _is_vad_train_reg_enabled_impl,
-)
+from df_mlx.training_helpers import build_setup_panel_line as _build_setup_panel_line_impl  # noqa: E402, F401
+from df_mlx.training_helpers import clip_gan_scores as _clip_gan_scores_impl
+from df_mlx.training_helpers import curriculum_schedule as _curriculum_schedule_impl
+from df_mlx.training_helpers import is_vad_train_reg_enabled as _is_vad_train_reg_enabled_impl
 from df_mlx.training_losses import (  # noqa: E402, F401
     _AWESOME_ENERGY_BOOST_DB,
     _AWESOME_ENERGY_BOOST_WIDTH,

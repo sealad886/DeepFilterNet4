@@ -268,6 +268,10 @@ class TrainingSession:
             raise TypeError(f"TrainingSession received unexpected keyword arguments: {sorted(unknown)}")
         self._kwargs: dict[str, Any] = kwargs
         self._ready: bool = False
+        self.state: Any | None = None
+        self.step: Any | None = None
+        self.validation: Any | None = None
+        self.loop: Any | None = None
 
     @classmethod
     def from_run_config(cls, run_config: RunConfig, **overrides: Any) -> TrainingSession:
@@ -285,20 +289,15 @@ class TrainingSession:
     def setup(self) -> None:
         """Prepare the session for execution.
 
-        Currently a no-op placeholder.  Future phases will move model
-        initialization, dataset creation, and optimizer setup here.
+        For now this is intentionally lightweight and only marks the
+        session as ready. The heavy lifting remains in ``train()``.
         """
         self._ready = True
 
     def run(self) -> None:
-        """Execute the training loop.
-
-        Delegates to :func:`~df_mlx.train_dynamic.train` with the stored
-        keyword arguments.
-        """
+        """Execute the training loop."""
         if not self._ready:
             self.setup()
-
         from df_mlx.train_dynamic import train
 
         train(**self._kwargs)
