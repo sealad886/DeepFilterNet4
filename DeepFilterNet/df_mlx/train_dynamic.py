@@ -426,6 +426,10 @@ def train(
         mrstft_config: Optional multi-res STFT loss config
         train_config_path: Optional path to INI train config (stored in metadata)
     """
+    # Reset the session-scoped non-finite loss counter so consecutive
+    # train() invocations in the same process don't carry over stale counts.
+    train._nonfinite_loss_count = 0  # type: ignore[attr-defined]
+
     from df_mlx.config import get_default_config
     from df_mlx.dynamic_dataset import (
         DynamicDataset,
@@ -2156,7 +2160,8 @@ def train(
                     # This allows MLX to batch operations for better throughput
                     if should_sync:
                         mx.eval(state)
-                grad_norm = float("nan")  # Not tracked in compiled path
+                    # Grad norm not tracked in the fully-compiled (non-accumulation) path.
+                    grad_norm = float("nan")
             else:
                 # Standard training step
                 (loss, model_out, cached_out_wav, cached_clean_wav), grads = loss_and_grad(
