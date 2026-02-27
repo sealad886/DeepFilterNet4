@@ -1,4 +1,26 @@
-"""Checkpoint management for dynamic training."""
+"""Checkpoint save, load, resume, and cleanup for dynamic training.
+
+Manages the full checkpoint lifecycle: writing model/optimizer/discriminator
+state to disk, loading from a checkpoint directory, resuming interrupted
+training runs, and pruning stale checkpoint files.
+
+Key exports:
+    - CheckpointManifest: File-layout naming patterns.
+    - CheckpointRecord: Metadata for a single persisted checkpoint.
+    - ResumeResult: Dataclass returned by reconcile_resume.
+    - save_checkpoint: Persist model + optimizer + discriminator state.
+    - load_checkpoint: Restore state from a checkpoint directory.
+    - find_latest_checkpoint: Locate the most recent checkpoint path.
+    - cleanup_checkpoints: Remove old checkpoints beyond a retention limit.
+    - reconcile_resume: Detect and reconcile a prior run for seamless resume.
+    - validate_checkpoint_dir: Verify directory integrity.
+    - compute_resume_epoch / resolve_resume_batch_count: Resume arithmetic.
+
+Relationship to train_dynamic:
+    All public symbols are re-exported via train_dynamic.py for backward
+    compatibility.  Called at the start of train() (reconcile_resume), at
+    sync boundaries (save_checkpoint), and at epoch end (cleanup_checkpoints).
+"""
 
 from __future__ import annotations
 

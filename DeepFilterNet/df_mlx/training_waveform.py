@@ -1,4 +1,21 @@
-"""Waveform conversion and GAN signal processing utilities."""
+"""Waveform conversion and GAN signal-processing utilities.
+
+Converts complex spectrograms back to time-domain waveforms for GAN
+discriminator input and multi-resolution STFT loss computation.  Also provides
+cropping and dtype-casting helpers used by the GAN training path.
+
+Key exports:
+    - specs_to_wavs: iSTFT complex spec pairs to waveform pairs (with FP32 stabilisation).
+    - compute_mrstft_loss: Multi-resolution STFT loss between two waveforms.
+    - _gan_waveform_view: Cast/reshape a waveform for discriminator consumption.
+    - _disc_crop_waveform: Random-crop a waveform to a fixed length for the discriminator.
+
+Relationship to train_dynamic:
+    compute_mrstft_loss is re-exported via train_dynamic.py for backward
+    compatibility.  All functions are called inside the sync-window metric
+    collection (training_metrics) and validation loop (training_validation),
+    as well as the GAN loss closure in train().
+"""
 
 from __future__ import annotations
 

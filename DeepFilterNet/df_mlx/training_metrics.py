@@ -1,11 +1,20 @@
-"""Sync-window metric collection for the training loop.
+"""Sync-window metric collection and progress-bar formatting.
 
-Extracted from train_dynamic.train() to reduce the size of the batch loop body.
-At each sync boundary (every eval_frequency batches), these functions:
-1. Recompute model output if needed for metric decomposition
-2. Compute individual loss components (spectral, MRSTFT, GAN, VAD, awesome)
-3. Accumulate per-epoch totals
-4. Format and display progress bar metrics
+At each sync boundary (every ``eval_frequency`` batches) the training loop
+needs to decompose the composite loss into its individual components, accumulate
+per-epoch totals, and refresh the tqdm progress bar.  This module encapsulates
+that logic so the batch loop in ``train()`` remains compact.
+
+Key exports:
+    - create_epoch_accums: Build the dict of zero-initialised epoch accumulators.
+    - compute_epoch_averages: Divide accumulated sums by sync count for logging.
+    - collect_sync_metrics: Decompose loss and accumulate at a sync boundary.
+    - update_progress_bar: Format accumulated values into tqdm postfix dict.
+
+Relationship to train_dynamic:
+    Called every ``eval_frequency`` batches inside the inner batch loop of
+    train().  Not included in the backward-compat re-export block; imported
+    directly by train_dynamic.
 """
 
 from __future__ import annotations

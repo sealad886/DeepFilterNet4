@@ -1,40 +1,29 @@
 #!/usr/bin/env python3
-"""Train MLX DeepFilterNet4 with dynamic on-the-fly mixing.
+"""Orchestrator for MLX DeepFilterNet4 dynamic training.
 
-This script provides training using the dynamic dataset which mirrors the
-original Rust DataLoader:
-- Dynamic speech + noise + RIR mixing each epoch
-- Full dataset diversity (all files available each epoch)
-- Same speech can appear with different noise/RIR/SNR each epoch
+This module is the central hub for the DFNet4 training pipeline.  It defines
+the ``train()`` function, which contains the loss closures (``loss_fn``,
+``loss_fn_gan``) and their ``mx.compile``-wrapped training steps — these must
+remain as closures due to MLX autograd/compile semantics.  All other concerns
+(dataset setup, checkpointing, validation, metrics, CLI, etc.) are delegated
+to purpose-specific ``training_*.py`` modules.
+
+For backward compatibility, this module re-exports every public symbol from
+eight helper modules (see the ``# noqa: F401`` block and
+``test_train_dynamic_reexports.py``).
+
+Key exports:
+    - train: Main entry-point — builds closures, runs epoch/batch loop.
+    - (re-exports): All public symbols from training_checkpoints,
+      training_cli, training_losses, training_ops, training_session,
+      training_signals, and training_waveform.
 
 Usage:
-    python -m df_mlx.train_dynamic \
-        --speech-list /path/to/speech_files.txt \
-        --noise-list /path/to/noise_files.txt \
-        --rir-list /path/to/rir_files.txt \
-        --epochs 100 \
-        --batch-size 8 \
-        --checkpoint-dir ./checkpoints
-
-    # Or with a config file
-    python -m df_mlx.train_dynamic \
-        --config dataset_config.json \
-        --epochs 100
-
-    # Or with a train.py-compatible INI config
-    python -m df_mlx.train_dynamic \
-        --config dataset_config.json \
-        --train-config training_config.ini \
-        --epochs 100
-
-Features:
-    - Dynamic on-the-fly mixing (matches original training strategy)
-    - Full dataset diversity each epoch
-    - Automatic learning rate scheduling
-    - Gradient clipping for stability
-    - Periodic checkpointing
-    - Validation with fixed noise/RIR for reproducibility
-    - Optional GAN adversarial + feature matching loss for perceptual cleanup
+    python -m df_mlx.train_dynamic \\
+        --speech-list /path/to/speech_files.txt \\
+        --noise-list /path/to/noise_files.txt \\
+        --rir-list /path/to/rir_files.txt \\
+        --epochs 100 --batch-size 8 --checkpoint-dir ./checkpoints
 """
 
 from __future__ import annotations

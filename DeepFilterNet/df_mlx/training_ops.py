@@ -1,4 +1,22 @@
-"""Numeric debugging, batch conversion, and gradient accumulation utilities."""
+"""Numeric debugging, batch-to-float conversion, and gradient utilities.
+
+Provides gradient clipping, gradient accumulation (for effective batch-size
+scaling), gradient scaling, batch-to-float sync-barrier reduction, and a
+numeric debugging framework for detecting NaN/Inf during forward passes.
+
+Key exports:
+    - _batch_to_float: Single-sync extraction of multiple MLX arrays to floats.
+    - NumericDebugConfig / NumericDebugger: Optional per-layer NaN/Inf checking.
+    - clip_grad_norm: Clip gradient tree by global L2 norm.
+    - accumulate_grads: Sum gradient trees across micro-batches.
+    - scale_grads: Scale a gradient tree by a constant factor.
+    - _tree_all_finite: Check whether every leaf in a pytree is finite.
+
+Relationship to train_dynamic:
+    NumericDebugConfig, NumericDebugger, and _batch_to_float are re-exported
+    via train_dynamic.py for backward compatibility.  Gradient utilities are
+    called inside the compiled training steps in train().
+"""
 
 from __future__ import annotations
 

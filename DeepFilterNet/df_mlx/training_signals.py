@@ -1,4 +1,22 @@
-"""Signal handling and graceful interrupt management for training."""
+"""Signal handling and graceful interrupt management for training.
+
+Registers a SIGINT handler that captures training state at the moment of
+interruption, writes an emergency checkpoint, and sets a flag so the batch
+loop can exit cleanly.  A module-level ``_interrupt_state`` dict is shared
+between the signal handler and the training loop.
+
+Key exports:
+    - _handle_sigint: The SIGINT signal handler callback.
+    - _register_sigint_handler: Install the handler with current training state.
+    - _update_interrupt_state: Refresh the shared state dict each batch.
+    - _interrupt_state: Module-level dict consulted by train() to detect interrupts.
+
+Relationship to train_dynamic:
+    _handle_sigint is re-exported via train_dynamic.py for backward
+    compatibility.  _register_sigint_handler is called once during train()
+    setup; _update_interrupt_state is called every batch; _interrupt_state is
+    polled by the batch loop to decide whether to break.
+"""
 
 from __future__ import annotations
 

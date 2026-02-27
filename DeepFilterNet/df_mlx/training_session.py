@@ -1,11 +1,18 @@
-"""Class-based API for DfNet4 dynamic training.
+"""Class-based API for DFNet4 dynamic training.
 
-Provides :class:`TrainingSession` as a thin wrapper around
-:func:`~df_mlx.train_dynamic.train`.  Future phases will incrementally
-migrate the body of ``train()`` into class methods; for now, the session
-simply delegates to the function.
+Provides :class:`TrainingSession` as a thin, kwargs-driven wrapper around
+:func:`~df_mlx.train_dynamic.train`.  Callers can construct a session from
+either explicit keyword arguments or a :class:`~df_mlx.run_config.RunConfig`,
+then invoke ``session.run()`` to execute the full training pipeline.
 
-Phase 3 of the train_dynamic.py monolith decomposition.
+Key exports:
+    - TrainingSession: High-level session object wrapping train().
+    - _kwargs_from_run_config: Convert a RunConfig into train() kwargs dict.
+    - _TRAIN_KWARGS: Canonical ordered tuple of all train() keyword argument names.
+
+Relationship to train_dynamic:
+    All public symbols are re-exported via train_dynamic.py for backward
+    compatibility.  TrainingSession.run() delegates directly to train().
 """
 
 from __future__ import annotations

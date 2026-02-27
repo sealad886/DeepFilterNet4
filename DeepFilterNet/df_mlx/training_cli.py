@@ -1,4 +1,21 @@
-"""CLI parsing and argument override utilities for dynamic training."""
+"""CLI parsing and argument-override utilities for dynamic training.
+
+Contains low-level helpers that translate raw CLI arguments and JSON strings
+into validated RunConfig mutations.  Separated from training_cli_main (which
+owns the argparse parser and main() entry-point) to keep parsing logic
+reusable and independently testable.
+
+Key exports:
+    - _apply_cli_overrides: Apply argparse namespace overrides onto a RunConfig.
+    - _parse_pipeline_stages_cli: Parse --pipeline-stages JSON into a stage list.
+    - _resolve_pipeline_stage: Select the active pipeline stage for a given epoch.
+    - _flag_in_argv: Check whether a CLI flag was explicitly supplied.
+
+Relationship to train_dynamic:
+    All public symbols are re-exported via train_dynamic.py for backward
+    compatibility.  Used by training_cli_main.main() during argument
+    resolution, and by train() for per-epoch pipeline stage selection.
+"""
 
 from __future__ import annotations
 

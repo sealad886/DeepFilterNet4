@@ -1,4 +1,23 @@
-"""Shared helper utilities for dynamic MLX training flows."""
+"""Shared helper utilities and mutable loop-state dataclass for training.
+
+Small, self-contained helpers used across multiple training modules, plus the
+``TrainingLoopState`` dataclass that tracks mutable iteration-level state
+(counters, best-loss, stage tracking, mode flags) throughout the epoch loop.
+
+Key exports:
+    - TrainingLoopState: Mutable dataclass for loop-iteration bookkeeping.
+    - build_setup_panel_line: Format a key/value pair for the config panel.
+    - curriculum_schedule: Compute curriculum learning schedule values.
+    - clip_gan_scores: Clamp discriminator logit lists to a safe range.
+    - is_vad_train_reg_enabled: Check whether VAD regularisation is active.
+    - _resolve_pipeline_stage_by_index: Look up a pipeline stage definition.
+    - print_compiled_step_eligibility: Log which compiled-step variant is used.
+
+Relationship to train_dynamic:
+    TrainingLoopState is instantiated at the top of train() and updated every
+    batch.  Helper functions are imported by train_dynamic, training_metrics,
+    and training_setup.  Not included in the backward-compat re-export block.
+"""
 
 from __future__ import annotations
 

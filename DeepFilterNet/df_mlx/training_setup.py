@@ -1,8 +1,24 @@
-"""Training setup helpers extracted from train_dynamic.train().
+"""Training setup, teardown, and auxiliary-loss configuration.
 
-Provides console config printing, train-config dict construction, dataset
-configuration setup, and GAN initialisation — keeping train() focused on the
-training loop itself.
+Consolidates everything that happens *before* and *after* the epoch loop:
+dataset/data-pipeline construction, GAN discriminator initialisation,
+auxiliary-loss wiring, console config printing, train-config dict assembly,
+epoch-summary logging, and post-training finalisation.
+
+Key exports:
+    - DatasetSetupResult / setup_dataset: Build and validate the DatasetConfig.
+    - DataPipelineResult / setup_data_pipeline: Construct train/valid iterators.
+    - AuxLossSetupResult / setup_auxiliary_losses: Wire VAD, awesome, pipeline losses.
+    - setup_gan: Initialise discriminator, disc optimizer, and disc scheduler.
+    - print_training_config: Pretty-print the full training configuration panel.
+    - build_train_config: Assemble the flat config dict saved alongside checkpoints.
+    - print_epoch_summary: Log end-of-epoch stats.
+    - finalize_training: Post-training cleanup (final checkpoint, summary, etc.).
+
+Relationship to train_dynamic:
+    Called during the setup phase of train() (before the epoch loop) and during
+    teardown (finalize_training).  Not included in the backward-compat re-export
+    block; imported directly by train_dynamic.
 """
 
 from __future__ import annotations

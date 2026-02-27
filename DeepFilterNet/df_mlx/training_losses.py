@@ -1,12 +1,27 @@
 """Loss computation functions for MLX DeepFilterNet4 training.
 
-Extracted from train_dynamic.py. Contains:
-- Constants for awesome loss, VAD, and pipeline loss computation
-- VAD (Voice Activity Detection) probability and loss helpers
-- Awesome loss (speech-preserving contrastive) functions
-- Pipeline awesome loss (improved speech preservation + music suppression)
-- Speech band analysis utilities
-- SNR bucketing helpers
+Contains all auxiliary loss helpers consumed by the loss closures inside
+``train()``: VAD probability estimation, awesome (speech-preserving
+contrastive) loss, pipeline awesome loss (improved speech preservation and
+music suppression), speech-band analysis, and SNR bucketing.  Constants
+governing loss behaviour thresholds are also defined here.
+
+Key exports:
+    - _compute_vad_probs / _compute_vad_loss / _compute_vad_reg_loss:
+      Voice-activity detection probability and loss computation.
+    - _compute_awesome_losses: Speech-preserving contrastive loss.
+    - _compute_pipeline_awesome_losses: Improved pipeline-aware awesome loss.
+    - _compute_speech_band_logmag_loss: Speech-band log-magnitude loss.
+    - _compute_vad_eval_metrics: VAD metrics for validation.
+    - _snr_bucket_name: Bin an SNR value into a named bucket.
+    - _log1p_mag: Numerically stable log1p magnitude helper.
+    - Various threshold/scale constants (_AWESOME_*, _PIPELINE_*, _VAD_*).
+
+Relationship to train_dynamic:
+    All public symbols (functions and constants) are re-exported via
+    train_dynamic.py for backward compatibility.  Functions are called inside
+    the ``loss_fn`` / ``loss_fn_gan`` closures and by training_metrics and
+    training_validation during sync-window and validation metric collection.
 """
 
 from __future__ import annotations

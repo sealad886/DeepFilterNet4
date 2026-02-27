@@ -1,7 +1,18 @@
 """Validation loop for DFNet4 dynamic training.
 
-Extracted from train_dynamic.py to reduce monolith size.
-Contains the run_validation() function and its supporting context dataclass.
+Runs the full validation pass over a held-out dataset at the end of each epoch
+(or at sync boundaries when configured).  Computes all loss components
+(spectral, MRSTFT, VAD, awesome, pipeline) and aggregates per-SNR-bucket
+metrics for detailed logging.
+
+Key exports:
+    - ValidationContext: Bundles immutable configuration needed by run_validation.
+    - run_validation: Execute a complete validation pass and return a metrics dict.
+
+Relationship to train_dynamic:
+    ValidationContext is constructed once during train() setup.  run_validation
+    is called at epoch end (and optionally at sync boundaries).  Not included
+    in the backward-compat re-export block; imported directly by train_dynamic.
 """
 
 from __future__ import annotations

@@ -1,8 +1,18 @@
 """Numeric diagnostic utilities for training.
 
-Extracted from train_dynamic.py to reduce monolith size.
-Contains the _diagnose_nonfinite forward-pass analysis that runs when
-a non-finite loss is detected during training.
+Provides the ``diagnose_nonfinite`` function and its companion
+``DiagnosticContext`` dataclass.  When a non-finite loss is detected during
+training, this module performs a layer-by-layer forward-pass analysis to
+identify which operation introduced NaN/Inf values.
+
+Key exports:
+    - DiagnosticContext: Bundles immutable config needed by the diagnostic pass.
+    - diagnose_nonfinite: Layer-by-layer forward analysis for NaN/Inf root-cause.
+
+Relationship to train_dynamic:
+    DiagnosticContext is constructed once during train() setup.  diagnose_nonfinite
+    is called from the batch loop when a non-finite loss is detected.  Not
+    re-exported; imported directly by train_dynamic.
 """
 
 from __future__ import annotations

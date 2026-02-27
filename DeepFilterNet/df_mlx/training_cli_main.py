@@ -1,9 +1,17 @@
-"""CLI entry-point for DfNet4 dynamic training.
+"""CLI entry-point for DFNet4 dynamic training.
 
-Extracted from ``train_dynamic.py`` (Phase 2 decomposition).  Houses the
-``main()`` function that parses CLI arguments, assembles a
+Houses the ``main()`` function that builds an ``argparse`` parser with the
+full set of training CLI flags, assembles a validated
 :class:`~df_mlx.run_config.RunConfig`, and delegates to
-:func:`~df_mlx.train_dynamic.train`.
+:func:`~df_mlx.train_dynamic.train`.  This is the module invoked by
+``python -m df_mlx.train_dynamic``.
+
+Key exports:
+    - main: CLI entry-point — parse arguments, build RunConfig, call train().
+
+Relationship to train_dynamic:
+    Imported directly by train_dynamic.py (not a backward-compat re-export).
+    ``main()`` is the outermost layer that feeds configuration into train().
 """
 
 from __future__ import annotations
