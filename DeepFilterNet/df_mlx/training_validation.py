@@ -45,7 +45,6 @@ from df_mlx.training_waveform import compute_mrstft_loss
 if TYPE_CHECKING:
     from df_mlx.training_ops import NumericDebugger
 
-
 from df_mlx.training_helpers import SCALAR_ZERO as _SCALAR_ZERO
 
 
