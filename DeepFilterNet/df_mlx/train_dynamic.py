@@ -171,10 +171,12 @@ from df_mlx.training_diagnostics import (  # noqa: E402, F401
     diagnose_nonfinite as _diagnose_nonfinite_impl,
 )
 from df_mlx.training_setup import (  # noqa: E402
+    DataPipelineResult,
     DatasetSetupResult,
     build_train_config,
     print_epoch_summary,
     print_training_config,
+    setup_data_pipeline,
     setup_dataset,
     setup_gan,
 )
@@ -844,109 +846,37 @@ def train(
     dataset.set_split("train")
     dataset.set_epoch(0)
 
-    # Create checkpoint directory early (needed for data checkpoint path)
-    ckpt_dir = Path(checkpoint_dir)
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    pipeline = setup_data_pipeline(
+        dataset=dataset,
+        checkpoint_dir=checkpoint_dir,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        prefetch_size=prefetch_size,
+        use_mlx_data=use_mlx_data,
+        resume_from=resume_from,
+        resume_data_from=resume_data_from,
+        debug_numerics=debug_numerics,
+        debug_numerics_fail_fast=debug_numerics_fail_fast,
+        debug_numerics_every=debug_numerics_every,
+        debug_numerics_dump_dir=debug_numerics_dump_dir,
+        debug_numerics_dump_arrays=debug_numerics_dump_arrays,
+        debug_numerics_max_dumps=debug_numerics_max_dumps,
+        nan_skip_batch=nan_skip_batch,
+        check_chkpts=check_chkpts,
+    )
+    ckpt_dir = pipeline.ckpt_dir
+    debugger = pipeline.debugger
+    debug_dump_dir = pipeline.debug_dump_dir
+    validation_report = pipeline.validation_report
+    use_mlx_stream = pipeline.use_mlx_stream
+    train_stream = pipeline.train_stream
+    data_checkpoint_path = pipeline.data_checkpoint_path
+    data_resume_progress = pipeline.data_resume_progress
+    data_resume_source = pipeline.data_resume_source
+    resume_from = pipeline.resume_from
 
-    debug_dump_dir = None
-    if debug_numerics:
-        debug_dump_dir = Path(debug_numerics_dump_dir) if debug_numerics_dump_dir else ckpt_dir / "debug_numerics"
-        debug_cfg = NumericDebugConfig(
-            enabled=True,
-            fail_fast=debug_numerics_fail_fast and not nan_skip_batch,
-            skip_batch=nan_skip_batch,
-            every=max(debug_numerics_every, 1),
-            dump_dir=debug_dump_dir,
-            dump_arrays=debug_numerics_dump_arrays,
-            max_dumps=debug_numerics_max_dumps,
-            check_grads=True,
-        )
-        debugger = NumericDebugger(debug_cfg)
-        print(
-            "  Debug numerics: enabled "
-            f"(fail_fast={'on' if debug_cfg.fail_fast else 'off'}, "
-            f"every={debug_cfg.every}, dump_dir={debug_dump_dir})"
-        )
-    else:
-        debugger = None
-
-    validation_report = None
-    if check_chkpts:
-        validation_report = validate_checkpoint_dir(ckpt_dir, strict=True, validate_load=True)
-        print(
-            f"Checkpoint validation: total={validation_report['total']} "
-            f"valid={validation_report['valid']} invalid={len(validation_report['invalid'])}"
-        )
-        if validation_report["latest_path"]:
-            print(f"  Latest valid checkpoint: {validation_report['latest_path']}")
-        if validation_report["latest_state"]:
-            print(
-                f"  last_completed_epoch={validation_report['last_completed_epoch']}, "
-                f"resume_epoch={validation_report['resume_epoch']}, "
-                f"resume_batch={validation_report['resume_batch']}, "
-                f"resume_global_step={validation_report['resume_global_step']}"
-            )
-
-        if resume_from is None and validation_report["latest_path"]:
-            resume_from = str(validation_report["latest_path"])
-    # Determine which data loader to use
-    use_mlx_stream = use_mlx_data and HAS_MLX_DATA
-    if use_mlx_data and not HAS_MLX_DATA:
-        print("  Note: mlx-data not available, using PrefetchDataLoader")
-    elif use_mlx_stream:
-        print(f"  Using MLXDataStream (workers={num_workers}, prefetch={prefetch_size})")
-
-    # Create data stream/loader
-    data_checkpoint_path = ckpt_dir / "data_checkpoint.json"
-    train_stream: MLXDataStream | None = None
-    data_resume_progress: dict[str, Any] | None = None
-    data_resume_source: str | None = None
-
-    if use_mlx_stream:
-        # Check for data checkpoint to resume from
-        if resume_data_from:
-            train_stream = MLXDataStream.from_checkpoint(
-                dataset=dataset,
-                checkpoint_path=resume_data_from,
-                batch_size=batch_size,
-                prefetch_size=prefetch_size,
-                num_workers=num_workers,
-            )
-            print(f"  Resuming data from: {resume_data_from}")
-            data_resume_progress = train_stream.get_progress()
-            data_resume_source = resume_data_from
-            print(
-                f"  Data checkpoint: epoch {data_resume_progress['epoch']}, " f"batch {data_resume_progress['batch']}"
-            )
-        elif data_checkpoint_path.exists():
-            # Auto-resume from last data checkpoint
-            try:
-                train_stream = MLXDataStream.from_checkpoint(
-                    dataset=dataset,
-                    checkpoint_path=data_checkpoint_path,
-                    batch_size=batch_size,
-                    prefetch_size=prefetch_size,
-                    num_workers=num_workers,
-                )
-                data_resume_progress = train_stream.get_progress()
-                data_resume_source = str(data_checkpoint_path)
-                print(
-                    "  Auto-resuming from data checkpoint: "
-                    f"epoch {data_resume_progress['epoch']}, batch {data_resume_progress['batch']}"
-                )
-            except Exception as e:
-                print(f"  Warning: Could not load data checkpoint: {e}")
-                train_stream = None
-
-        if train_stream is None:
-            train_stream = MLXDataStream(
-                dataset=dataset,
-                batch_size=batch_size,
-                prefetch_size=prefetch_size,
-                num_workers=num_workers,
-            )
-
-        # Make data checkpoint path available to the interrupt handler
+    # Connect data pipeline to interrupt handler
+    if use_mlx_stream and train_stream is not None:
         _interrupt_state["data_checkpoint_path"] = data_checkpoint_path
         _interrupt_state["train_stream"] = train_stream
 
