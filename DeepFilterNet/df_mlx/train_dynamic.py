@@ -197,7 +197,7 @@ if TYPE_CHECKING:
     from df_mlx.run_config import MultiResSpecLossConfig
 
 # Canonical definition lives in training_helpers; alias here for local use.
-from df_mlx.training_helpers import SCALAR_ZERO as _SCALAR_ZERO  # noqa: E402
+from df_mlx.training_helpers import SCALAR_ZERO  # noqa: E402
 
 # =============================================================================
 # tqdm configuration
@@ -1844,19 +1844,19 @@ def train(
 
         # Gradient accumulation tracking (only used when grad_accumulation_steps > 1)
         accumulated_grads: dict | None = None
-        accumulated_loss = _SCALAR_ZERO
+        accumulated_loss = SCALAR_ZERO
         micro_batches_in_accum = 0
 
         # Cached mx.array weight scalars — avoid per-batch mx.array() allocation
         # when the Python float hasn't changed.
         _prev_vad_w: float | None = None
-        _prev_vad_w_mx = _SCALAR_ZERO
+        _prev_vad_w_mx = SCALAR_ZERO
         _prev_speech_w: float | None = None
-        _prev_speech_w_mx = _SCALAR_ZERO
+        _prev_speech_w_mx = SCALAR_ZERO
         _prev_awesome_w: float | None = None
-        _prev_awesome_w_mx = _SCALAR_ZERO
+        _prev_awesome_w_mx = SCALAR_ZERO
         _prev_vad_reg_w: float | None = None
-        _prev_vad_reg_w_mx = _SCALAR_ZERO
+        _prev_vad_reg_w_mx = SCALAR_ZERO
 
         # Create data iterator (MLXDataStream or PrefetchDataLoader)
         resume_batches_for_epoch = 0
@@ -2089,7 +2089,7 @@ def train(
                                 f"(step={loop_state.global_step})"
                             )
                         accumulated_grads = None
-                        accumulated_loss = _SCALAR_ZERO
+                        accumulated_loss = SCALAR_ZERO
                         micro_batches_in_accum = 0
 
                     if should_sync:
@@ -2231,7 +2231,7 @@ def train(
 
                     # Reset accumulator for next window
                     accumulated_grads = None
-                    accumulated_loss = _SCALAR_ZERO
+                    accumulated_loss = SCALAR_ZERO
                     micro_batches_in_accum = 0
 
                 # ---- Single sync point per eval_frequency batches ----

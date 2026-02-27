@@ -4,7 +4,7 @@ Manages the full checkpoint lifecycle: writing model/optimizer/discriminator
 state to disk, loading from a checkpoint directory, resuming interrupted
 training runs, and pruning stale checkpoint files.
 
-Key exports:
+Key exports include:
     - CheckpointManifest: File-layout naming patterns.
     - CheckpointRecord: Metadata for a single persisted checkpoint.
     - ResumeResult: Dataclass returned by reconcile_resume.

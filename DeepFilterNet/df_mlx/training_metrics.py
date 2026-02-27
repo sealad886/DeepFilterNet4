@@ -24,7 +24,7 @@ from typing import Any
 
 import mlx.core as mx
 
-from df_mlx.training_helpers import SCALAR_ZERO as _SCALAR_ZERO
+from df_mlx.training_helpers import SCALAR_ZERO
 from df_mlx.training_helpers import clip_gan_scores
 from df_mlx.training_losses import (
     _AWESOME_MASK_LOGIT_CLAMP,
@@ -358,7 +358,7 @@ def collect_sync_metrics(
             debug=debugger,
             debug_ctx=debug_ctx,
         )
-        speech_loss = _SCALAR_ZERO
+        speech_loss = SCALAR_ZERO
         if speech_weight > 0:
             speech_loss = _compute_speech_band_logmag_loss(
                 clean_real,

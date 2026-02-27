@@ -1,4 +1,4 @@
-"""CLI entry-point for DFNet4 dynamic training.
+"""CLI entry-point for DeepFilterNet4 dynamic training.
 
 Houses the ``main()`` function that builds an ``argparse`` parser with the
 full set of training CLI flags, assembles a validated

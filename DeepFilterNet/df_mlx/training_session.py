@@ -1,4 +1,4 @@
-"""Class-based API for DFNet4 dynamic training.
+"""Class-based API for DeepFilterNet4 dynamic training.
 
 Provides :class:`TrainingSession` as a thin, kwargs-driven wrapper around
 :func:`~df_mlx.train_dynamic.train`.  Callers can construct a session from
@@ -275,6 +275,10 @@ class TrainingSession:
             raise TypeError(f"TrainingSession received unexpected keyword arguments: {sorted(unknown)}")
         self._kwargs: dict[str, Any] = kwargs
         self._ready: bool = False
+        # Extension-point attributes — reserved for future refactoring phases
+        # that will move model init, dataset creation, and optimizer setup into
+        # the session object.  Kept as typed placeholders so the interface is
+        # stable when that work lands.
         self.state: Any | None = None
         self.step: Any | None = None
         self.validation: Any | None = None
@@ -297,7 +301,9 @@ class TrainingSession:
         """Prepare the session for execution.
 
         For now this is intentionally lightweight and only marks the
-        session as ready. The heavy lifting remains in ``train()``.
+        session as ready — "ready" simply means ``setup()`` has been
+        called; no validation of arguments or initialisation of external
+        resources occurs here.  The heavy lifting remains in ``train()``.
         """
         self._ready = True
 

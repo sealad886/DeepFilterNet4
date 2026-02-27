@@ -179,10 +179,6 @@ while [[ $# -gt 0 ]]; do
       PY_EDITABLE_EXPLICIT=1
       shift 1
       ;;
-    --no-editable)
-      PY_EDITABLE=0
-      shift 1
-      ;;
     -h|--help)
       usage
       exit 0

@@ -1,4 +1,4 @@
-"""Validation loop for DFNet4 dynamic training.
+"""Validation loop for DeepFilterNet4 dynamic training.
 
 Runs the full validation pass over a held-out dataset at the end of each epoch
 (or at sync boundaries when configured).  Computes all loss components
@@ -45,7 +45,7 @@ from df_mlx.training_waveform import compute_mrstft_loss
 if TYPE_CHECKING:
     from df_mlx.training_ops import NumericDebugger
 
-from df_mlx.training_helpers import SCALAR_ZERO as _SCALAR_ZERO
+from df_mlx.training_helpers import SCALAR_ZERO
 
 
 @dataclass
@@ -255,7 +255,7 @@ def run_validation(
             if vad_logits is not None:
                 ctx.debugger.check("model.vad_logits", vad_logits, debug_ctx)
         spec_loss = ctx.spectral_loss_fn(spec_out, target_spec)
-        mrstft_loss = _SCALAR_ZERO
+        mrstft_loss = SCALAR_ZERO
         if ctx.use_mrstft_loss and ctx.mrstft_loss_fn is not None and ctx.mrstft_istft is not None:
             mrstft_loss = compute_mrstft_loss(
                 spec_out,
@@ -268,20 +268,20 @@ def run_validation(
                 force_fp32=True,
             )
 
-        awesome_loss = _SCALAR_ZERO
-        awesome_speech = _SCALAR_ZERO
-        awesome_noise = _SCALAR_ZERO
-        awesome_smooth = _SCALAR_ZERO
-        music_suppression_loss = _SCALAR_ZERO
-        mask_saturation_loss = _SCALAR_ZERO
-        mask = _SCALAR_ZERO
-        proxy_frame = _SCALAR_ZERO
-        speech_ratio = _SCALAR_ZERO
-        music_gate = _SCALAR_ZERO
-        musicness = _SCALAR_ZERO
-        mod_energy = _SCALAR_ZERO
-        energy_boost = _SCALAR_ZERO
-        snr_boost = _SCALAR_ZERO
+        awesome_loss = SCALAR_ZERO
+        awesome_speech = SCALAR_ZERO
+        awesome_noise = SCALAR_ZERO
+        awesome_smooth = SCALAR_ZERO
+        music_suppression_loss = SCALAR_ZERO
+        mask_saturation_loss = SCALAR_ZERO
+        mask = SCALAR_ZERO
+        proxy_frame = SCALAR_ZERO
+        speech_ratio = SCALAR_ZERO
+        music_gate = SCALAR_ZERO
+        musicness = SCALAR_ZERO
+        mod_energy = SCALAR_ZERO
+        energy_boost = SCALAR_ZERO
+        snr_boost = SCALAR_ZERO
 
         if ctx.use_awesome_loss:
             (
@@ -373,7 +373,7 @@ def run_validation(
                 debug=ctx.debugger,
                 debug_ctx=debug_ctx,
             )
-            speech_loss = _SCALAR_ZERO
+            speech_loss = SCALAR_ZERO
             if epoch_vad_speech_loss_weight > 0:
                 speech_loss = _compute_speech_band_logmag_loss(
                     clean_real,
@@ -387,13 +387,13 @@ def run_validation(
                     debug_ctx=debug_ctx,
                 )
         else:
-            vad_loss = _SCALAR_ZERO
-            speech_loss = _SCALAR_ZERO
-            p_ref = _SCALAR_ZERO
-            p_out = _SCALAR_ZERO
-            gate = _SCALAR_ZERO
+            vad_loss = SCALAR_ZERO
+            speech_loss = SCALAR_ZERO
+            p_ref = SCALAR_ZERO
+            p_out = SCALAR_ZERO
+            gate = SCALAR_ZERO
 
-        vad_reg_loss = _SCALAR_ZERO
+        vad_reg_loss = SCALAR_ZERO
         if ctx.use_vad_train_reg:
             vad_reg_loss, _, _, _, _, _, _ = _compute_vad_reg_loss(
                 clean_real,

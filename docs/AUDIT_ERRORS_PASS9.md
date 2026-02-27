@@ -1,9 +1,9 @@
 # Pass 9 Error Audit Report — train_dynamic Module Decomposition
 
 **Branch:** `feat/major_refactor_train_dynamic`  
-**Baseline:** 88 passed, 0 failed  
-**Post-audit:** 88 passed, 0 failed (no code fixes — no blockers found)  
-**Scope:** `DeepFilterNet/df_mlx/` — 14-module decomposition of `train_dynamic.py` (4580 → 2846 lines)  
+**Baseline (df_mlx module subset):** 88 passed, 0 failed  
+**Post-audit (df_mlx module subset):** 88 passed, 0 failed (no code fixes — no blockers found)  
+**Scope:** `DeepFilterNet/df_mlx/` — 14-module decomposition of `train_dynamic.py` (4580 → 2846 lines); full CI reports **1007 passed, 11 skipped**  
 **Audit focus:** Behavioral preservation, error handling, state corruption risks, import-time side effects, test regression risks  
 **Commit:** `e8d721a`
 
@@ -82,7 +82,7 @@
 ### REF-5 — Test coverage preservation (INFO — verified)
 
 - **Severity:** INFO
-- **Test suite:** 88 tests, 0 failures, 0 skips
+- **Test suite:** 88 df_mlx-focused tests, 0 failures, 0 skips (1007 total project tests pass)
 - **Test diff analysis:**
   - `test_gan_memory_path.py`: 1 line change (`global_step` → `loop_state.global_step`) — adapts to `TrainingLoopState` extraction.
   - `test_loss_audit_fixes.py`: 16+/-5 lines — source grep assertions now check `training_metrics.py` and `training_diagnostics.py` instead of just `train_dynamic.py`. All assertions are equivalent or stricter.
@@ -139,7 +139,7 @@
 
 ## Coverage Gaps
 
-While all 88 tests pass, the following areas have limited direct test coverage:
+While all 88 df_mlx-focused tests pass, the following areas have limited direct test coverage:
 
 1. **`training_checkpoints.py`** (1098 lines): `reconcile_resume` (220 lines of complex resume logic) is tested only indirectly via integration tests. A dedicated unit test with mock checkpoints would improve confidence.
 2. **`training_setup.py`** (1063 lines): `setup_auxiliary_losses`, `setup_dataset`, `setup_data_pipeline` — tested indirectly via training integration tests. Could benefit from unit tests with mock configs.
@@ -154,7 +154,7 @@ These gaps **predate the refactoring** — the extraction did not reduce coverag
 
 | Criterion | Status |
 |-----------|--------|
-| All tests pass | ✅ 88/88 |
+| All tests pass | ✅ 88/88 (df_mlx subset) |
 | No bare except clauses | ✅ |
 | No swallowed exceptions | ✅ |
 | Re-exports complete | ✅ (3 tests) |

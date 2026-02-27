@@ -23,7 +23,7 @@ Relationship to train_dynamic:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import mlx.core as mx
 
@@ -64,7 +64,7 @@ class TrainingLoopState:
     epoch_vad_speech_loss_weight: float = 0.0
 
     # Mode flags
-    train_mode: str | None = None  # "COMPILED" | "EAGER" | None
+    train_mode: Literal["COMPILED", "EAGER"] | None = None
     gan_active: bool = False
     compiled_gan_correctness_verified: bool = False
 
