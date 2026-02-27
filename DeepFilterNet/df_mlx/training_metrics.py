@@ -44,12 +44,6 @@ from df_mlx.training_waveform import (
     specs_to_wavs,
 )
 
-_GAN_SCORE_ABS_CLIP = 30.0
-
-
-def _clip_gan_scores_default(scores: list[mx.array], clip_value: float = _GAN_SCORE_ABS_CLIP) -> list[mx.array]:
-    return clip_gan_scores(scores=scores, clip_value=clip_value)
-
 
 def create_epoch_accums() -> dict[str, Any]:
     """Return a fresh accumulators dict for one training epoch.
@@ -275,25 +269,34 @@ def collect_sync_metrics(
 
     # ------------------------------------------------------------------
     # Detailed spectral / MRSTFT / GAN metrics (only in detailed sync mode)
+    # Batched into a single _batch_to_float sync to reduce GPU stalls.
     # ------------------------------------------------------------------
     if emit_detailed_metrics and needs_model_out:
+        # Collect lazy MLX arrays, then extract all floats in one sync.
+        _detail_arrays: list[mx.array] = []
+        _detail_keys: list[str] = []
+
         spec_loss = spectral_loss_fn(spec_out, (clean_real, clean_imag))
-        spec_loss_val = float(spec_loss)
-        accums["spec_loss"] += spec_loss_val * epoch_eval_frequency
+        _detail_arrays.append(spec_loss)
+        _detail_keys.append("spec")
+
+        mrstft_arr: mx.array | None = None
         if use_mrstft_loss and mrstft_loss_fn is not None and mrstft_istft is not None:
-            mrstft_loss_val = float(
-                compute_mrstft_loss(
-                    spec_out,
-                    (clean_real, clean_imag),
-                    istft_fn=mrstft_istft,
-                    loss_fn=mrstft_loss_fn,
-                    n_fft=config_fft_size,
-                    hop_length=config_hop_size,
-                    target_len=mrstft_target_len,
-                    force_fp32=True,
-                )
+            mrstft_arr = compute_mrstft_loss(
+                spec_out,
+                (clean_real, clean_imag),
+                istft_fn=mrstft_istft,
+                loss_fn=mrstft_loss_fn,
+                n_fft=config_fft_size,
+                hop_length=config_hop_size,
+                target_len=mrstft_target_len,
+                force_fp32=True,
             )
-            accums["mrstft_loss"] += mrstft_loss_val * epoch_eval_frequency
+            _detail_arrays.append(mrstft_arr)
+            _detail_keys.append("mrstft")
+
+        gan_g_arr: mx.array | None = None
+        gan_fm_arr: mx.array | None = None
         if gan_active and gan_loss_fns is not None and discriminator is not None and gan_istft is not None:
             out_wav, clean_wav = specs_to_wavs(
                 spec_out,
@@ -309,12 +312,30 @@ def collect_sync_metrics(
             gen_loss_fn, _ = gan_loss_fns
             disc_fake, fake_feats = discriminator(out_wav)
             disc_real, real_feats = discriminator(clean_wav)
-            disc_fake = _clip_gan_scores_default(disc_fake)
-            gan_g_loss_val = float(gen_loss_fn(disc_fake))
-            accums["gan_g_loss"] += gan_g_loss_val * epoch_eval_frequency
+            disc_fake = clip_gan_scores(disc_fake)
+            gan_g_arr = gen_loss_fn(disc_fake)
+            _detail_arrays.append(gan_g_arr)
+            _detail_keys.append("gan_g")
             if feature_match_loss is not None and gan_fm_weight > 0:
-                gan_fm_loss_val = float(feature_match_loss(real_feats, fake_feats))
-                accums["gan_fm_loss"] += gan_fm_loss_val * epoch_eval_frequency
+                gan_fm_arr = feature_match_loss(real_feats, fake_feats)
+                _detail_arrays.append(gan_fm_arr)
+                _detail_keys.append("gan_fm")
+
+        # Single sync barrier for all detailed metrics
+        _detail_vals = _batch_to_float(*_detail_arrays)
+        _detail_map = dict(zip(_detail_keys, _detail_vals))
+
+        spec_loss_val = _detail_map["spec"]
+        accums["spec_loss"] += spec_loss_val * epoch_eval_frequency
+        if "mrstft" in _detail_map:
+            mrstft_loss_val = _detail_map["mrstft"]
+            accums["mrstft_loss"] += mrstft_loss_val * epoch_eval_frequency
+        if "gan_g" in _detail_map:
+            gan_g_loss_val = _detail_map["gan_g"]
+            accums["gan_g_loss"] += gan_g_loss_val * epoch_eval_frequency
+        if "gan_fm" in _detail_map:
+            gan_fm_loss_val = _detail_map["gan_fm"]
+            accums["gan_fm_loss"] += gan_fm_loss_val * epoch_eval_frequency
 
     # ------------------------------------------------------------------
     # VAD loss metrics
@@ -379,8 +400,12 @@ def collect_sync_metrics(
             sigma_dbg = mx.sqrt(mx.mean((log_clean_dbg - mu_dbg) ** 2, axis=1, keepdims=True) + _EPS)
             z_ref_dbg = (log_clean_dbg - mu_dbg) / (sigma_dbg + _EPS)
             z_out_dbg = (mx.log10(out_band_dbg + _EPS) - mu_dbg) / (sigma_dbg + _EPS)
-            clip_ref = 100.0 * float(mx.mean(mx.where(mx.abs(z_ref_dbg) > _VAD_LOGIT_CLAMP, 1.0, 0.0)))
-            clip_out = 100.0 * float(mx.mean(mx.where(mx.abs(z_out_dbg) > _VAD_LOGIT_CLAMP, 1.0, 0.0)))
+            # Batched sync: 2 float extractions in one barrier
+            _clip_ref_arr = mx.mean(mx.where(mx.abs(z_ref_dbg) > _VAD_LOGIT_CLAMP, 1.0, 0.0))
+            _clip_out_arr = mx.mean(mx.where(mx.abs(z_out_dbg) > _VAD_LOGIT_CLAMP, 1.0, 0.0))
+            _cr, _co = _batch_to_float(_clip_ref_arr, _clip_out_arr)
+            clip_ref = 100.0 * _cr
+            clip_out = 100.0 * _co
             accums["vad_clip_ref"] += clip_ref
             accums["vad_clip_out"] += clip_out
 
@@ -490,13 +515,18 @@ def collect_sync_metrics(
             mask_logits_raw = awesome_mask_sharpness * (
                 _log1p_mag(clean_real, clean_imag) - _log1p_mag(noise_real_dbg, noise_imag_dbg)
             )
-            mask_logit_min = float(mx.min(mask_logits_raw))
-            mask_logit_max = float(mx.max(mask_logits_raw))
-            mask_clip_rate = 100.0 * float(
-                mx.mean(mx.where(mx.abs(mask_logits_raw) > _AWESOME_MASK_LOGIT_CLAMP, 1.0, 0.0))
-            )
-            clean_eps_rate = 100.0 * float(mx.mean(mx.where(clean_band_dbg <= _EPS, 1.0, 0.0)))
-            noise_eps_rate = 100.0 * float(mx.mean(mx.where(noise_band_dbg <= _EPS, 1.0, 0.0)))
+            # Batched sync: 5 float extractions in one barrier
+            _ml_min = mx.min(mask_logits_raw)
+            _ml_max = mx.max(mask_logits_raw)
+            _mc_rate = mx.mean(mx.where(mx.abs(mask_logits_raw) > _AWESOME_MASK_LOGIT_CLAMP, 1.0, 0.0))
+            _ce_rate = mx.mean(mx.where(clean_band_dbg <= _EPS, 1.0, 0.0))
+            _ne_rate = mx.mean(mx.where(noise_band_dbg <= _EPS, 1.0, 0.0))
+            _ml_min_f, _ml_max_f, _mc_f, _ce_f, _ne_f = _batch_to_float(_ml_min, _ml_max, _mc_rate, _ce_rate, _ne_rate)
+            mask_logit_min = _ml_min_f
+            mask_logit_max = _ml_max_f
+            mask_clip_rate = 100.0 * _mc_f
+            clean_eps_rate = 100.0 * _ce_f
+            noise_eps_rate = 100.0 * _ne_f
             accums["mask_logit_min"] = min(accums["mask_logit_min"], mask_logit_min)
             accums["mask_logit_max"] = max(accums["mask_logit_max"], mask_logit_max)
             accums["mask_clip_rate"] += mask_clip_rate

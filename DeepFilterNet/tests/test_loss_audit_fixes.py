@@ -340,10 +340,8 @@ class TestGANLossCorrectness:
 
         max_score = float(mx.max(clipped[0]))
         min_score = float(mx.min(clipped[0]))
-        from df_mlx.training_metrics import _GAN_SCORE_ABS_CLIP
-
-        assert max_score <= _GAN_SCORE_ABS_CLIP
-        assert min_score >= -_GAN_SCORE_ABS_CLIP
+        assert max_score <= 30.0
+        assert min_score >= -30.0
 
     def test_train_dynamic_gan_score_clipping_can_be_disabled(self):
         import df_mlx.train_dynamic as td
