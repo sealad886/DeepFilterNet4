@@ -39,6 +39,7 @@ Features:
 
 from __future__ import annotations
 
+# ── Standard library + third-party ──────────────────────────────────
 import gc
 import math
 import os
@@ -53,15 +54,81 @@ import mlx.nn as nn
 import mlx.optimizers as optim
 from tqdm.auto import tqdm
 
-from df_mlx.hardware import print_hardware_diagnostics  # noqa: E402, F401
+# ── Imports used locally (also re-exported for backward compat) ──────
+from df_mlx.hardware import print_hardware_diagnostics
 from df_mlx.run_config import SyncMode
-from df_mlx.training_checkpoints import (  # noqa: E402, F401
+from df_mlx.training_checkpoints import (
+    _IN_PROGRESS_KINDS,
+    _TRAIN_MODE_EAGER,
+    _write_epoch_complete_marker,
+    cleanup_checkpoints,
+    maybe_skip_resume_batches,
+    reconcile_resume,
+    resolve_epoch_train_mode,
+    save_checkpoint,
+)
+from df_mlx.training_cli import _resolve_pipeline_stage
+from df_mlx.training_cli_main import main
+from df_mlx.training_diagnostics import DiagnosticContext
+from df_mlx.training_diagnostics import (
+    diagnose_nonfinite as _diagnose_nonfinite_impl,
+)
+from df_mlx.training_helpers import (
+    _resolve_pipeline_stage_by_index,
+    curriculum_schedule,
+    print_compiled_step_eligibility,
+)
+from df_mlx.training_helpers import build_setup_panel_line as _build_setup_panel_line
+from df_mlx.training_helpers import clip_gan_scores as _clip_gan_scores
+from df_mlx.training_losses import (
+    _compute_awesome_losses,
+    _compute_pipeline_awesome_losses,
+    _compute_speech_band_logmag_loss,
+    _compute_vad_loss,
+    _compute_vad_reg_loss,
+    _sync_model_config_with_dataset,
+)
+from df_mlx.training_metrics import (
+    collect_sync_metrics,
+    compute_epoch_averages,
+    create_epoch_accums,
+    update_progress_bar,
+)
+from df_mlx.training_ops import (
+    _tree_all_finite,
+    accumulate_grads,
+    clip_grad_norm,
+    scale_grads,
+)
+from df_mlx.training_setup import (
+    build_train_config,
+    finalize_training,
+    print_epoch_summary,
+    print_training_config,
+    setup_auxiliary_losses,
+    setup_data_pipeline,
+    setup_dataset,
+)
+from df_mlx.training_signals import (
+    _interrupt_state,
+    _register_sigint_handler,
+    _update_interrupt_state,
+)
+from df_mlx.training_validation import ValidationContext
+from df_mlx.training_validation import run_validation as _run_validation
+from df_mlx.training_waveform import (
+    _disc_crop_waveform,
+    _gan_waveform_view,
+    specs_to_wavs,
+)
+
+# isort: split
+# ── Pure re-exports (backward compat — see test_train_dynamic_reexports.py) ──
+from df_mlx.training_checkpoints import (  # noqa: F401
     _CHECKPOINT_KINDS,
     _COMPLETED_KINDS,
     _COUNTER_SEMANTICS_VERSION,
-    _IN_PROGRESS_KINDS,
     _TRAIN_MODE_COMPILED,
-    _TRAIN_MODE_EAGER,
     CheckpointManifest,
     CheckpointRecord,
     ResumeResult,
@@ -69,39 +136,18 @@ from df_mlx.training_checkpoints import (  # noqa: E402, F401
     _is_disc_weights,
     _record_sort_key,
     _validate_checkpoint_pair,
-    _write_epoch_complete_marker,
-    cleanup_checkpoints,
     compute_resume_epoch,
     find_latest_checkpoint,
     load_checkpoint,
-    maybe_skip_resume_batches,
-    reconcile_resume,
-    resolve_epoch_train_mode,
     resolve_resume_batch_count,
-    save_checkpoint,
     validate_checkpoint_dir,
 )
-from df_mlx.training_cli import (  # noqa: E402, F401
+from df_mlx.training_cli import (  # noqa: F401
     _apply_cli_overrides,
     _flag_in_argv,
     _parse_pipeline_stages_cli,
-    _resolve_pipeline_stage,
 )
-from df_mlx.training_cli_main import main  # noqa: E402, F401
-from df_mlx.training_diagnostics import (
-    DiagnosticContext,
-)
-from df_mlx.training_diagnostics import diagnose_nonfinite as _diagnose_nonfinite_impl  # noqa: E402, F401
-from df_mlx.training_helpers import (
-    _resolve_pipeline_stage_by_index,
-)
-from df_mlx.training_helpers import build_setup_panel_line as _build_setup_panel_line  # noqa: E402, F401
-from df_mlx.training_helpers import clip_gan_scores as _clip_gan_scores
-from df_mlx.training_helpers import (
-    curriculum_schedule,
-    print_compiled_step_eligibility,
-)
-from df_mlx.training_losses import (  # noqa: E402, F401
+from df_mlx.training_losses import (  # noqa: F401
     _AWESOME_ENERGY_BOOST_DB,
     _AWESOME_ENERGY_BOOST_WIDTH,
     _AWESOME_LOW_ENERGY_WEIGHT,
@@ -127,70 +173,29 @@ from df_mlx.training_losses import (  # noqa: E402, F401
     _PIPELINE_VOCAL_HARMONIC_THR,
     _VAD_LOGIT_CLAMP,
     _build_speech_band_mask,
-    _compute_awesome_losses,
     _compute_harmonic_ratio,
     _compute_improved_musicness,
     _compute_musicness,
-    _compute_pipeline_awesome_losses,
     _compute_pitch_stability,
     _compute_proxy_gates,
-    _compute_speech_band_logmag_loss,
     _compute_vad_eval_metrics,
-    _compute_vad_loss,
     _compute_vad_probs,
-    _compute_vad_reg_loss,
     _log1p_mag,
     _snr_bucket_name,
-    _sync_model_config_with_dataset,
 )
-from df_mlx.training_metrics import (
-    collect_sync_metrics,
-    compute_epoch_averages,
-    create_epoch_accums,
-    update_progress_bar,
-)
-from df_mlx.training_ops import (  # noqa: E402, F401
+from df_mlx.training_ops import (  # noqa: F401
     NumericDebugConfig,
     NumericDebugger,
     _batch_to_float,
-    _tree_all_finite,
-    accumulate_grads,
-    clip_grad_norm,
-    scale_grads,
 )
-from df_mlx.training_session import (  # noqa: E402, F401
+from df_mlx.training_session import (  # noqa: F401
     _SENTINEL,
     _TRAIN_KWARGS,
     TrainingSession,
     _kwargs_from_run_config,
 )
-from df_mlx.training_setup import (  # noqa: E402
-    build_train_config,
-    finalize_training,
-    print_epoch_summary,
-    print_training_config,
-    setup_auxiliary_losses,
-    setup_data_pipeline,
-    setup_dataset,
-)
-from df_mlx.training_signals import (  # noqa: E402, F401
-    _handle_sigint,
-    _interrupt_state,
-    _register_sigint_handler,
-    _update_interrupt_state,
-)
-from df_mlx.training_validation import (
-    ValidationContext,
-)
-from df_mlx.training_validation import run_validation as _run_validation  # noqa: E402, F401
-from df_mlx.training_waveform import (  # noqa: E402, F401
-    _disc_crop_waveform,
-    _gan_waveform_view,
-    compute_mrstft_loss,
-    specs_to_wavs,
-)
-
-# sys.path.insert(0, str(Path(__file__).parent.parent))
+from df_mlx.training_signals import _handle_sigint  # noqa: F401
+from df_mlx.training_waveform import compute_mrstft_loss  # noqa: F401
 
 
 if TYPE_CHECKING:
