@@ -834,7 +834,6 @@ def finalize_training(
     ckpt_dir_path = ckpt_dir if hasattr(ckpt_dir, "name") else __import__("pathlib").Path(ckpt_dir)
 
     # Final validation to compare against best checkpoint.
-    final_valid_loss = float("inf")
     if last_valid_epoch == final_epoch and last_valid_loss is not None:
         final_valid_loss = last_valid_loss
     else:
