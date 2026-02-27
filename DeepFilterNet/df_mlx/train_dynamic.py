@@ -58,19 +58,23 @@ from df_mlx.training_checkpoints import (
 )
 from df_mlx.training_cli import _resolve_pipeline_stage
 from df_mlx.training_cli_main import main
-from df_mlx.training_diagnostics import DiagnosticContext
 from df_mlx.training_diagnostics import (
-    diagnose_nonfinite as _diagnose_nonfinite_impl,
+    DiagnosticContext,
 )
+from df_mlx.training_diagnostics import diagnose_nonfinite as _diagnose_nonfinite_impl
 from df_mlx.training_helpers import (
     TrainingLoopState,
     _resolve_pipeline_stage_by_index,
-    curriculum_schedule,
-    print_compiled_step_eligibility,
 )
 from df_mlx.training_helpers import build_setup_panel_line as _build_setup_panel_line
 from df_mlx.training_helpers import clip_gan_scores as _clip_gan_scores
-from df_mlx.training_helpers import is_vad_train_reg_enabled as _is_vad_train_reg_enabled
+from df_mlx.training_helpers import (
+    curriculum_schedule,
+)
+from df_mlx.training_helpers import is_vad_train_reg_enabled as _is_vad_train_reg_enabled  # noqa: F401
+from df_mlx.training_helpers import (
+    print_compiled_step_eligibility,
+)
 from df_mlx.training_losses import (
     _compute_awesome_losses,
     _compute_pipeline_awesome_losses,
@@ -187,7 +191,6 @@ from df_mlx.training_session import (  # noqa: F401
 )
 from df_mlx.training_signals import _handle_sigint  # noqa: F401
 from df_mlx.training_waveform import compute_mrstft_loss  # noqa: F401
-
 
 if TYPE_CHECKING:
     from df_mlx.config import ModelParams4
@@ -1660,7 +1663,11 @@ def train(
     )
 
     start_display = f"{start_epoch + 1}/{epochs} (idx {start_epoch})"
-    lc_display = f"{loop_state.last_completed_epoch + 1} (idx {loop_state.last_completed_epoch})" if loop_state.last_completed_epoch >= 0 else "none"
+    lc_display = (
+        f"{loop_state.last_completed_epoch + 1} (idx {loop_state.last_completed_epoch})"
+        if loop_state.last_completed_epoch >= 0
+        else "none"
+    )
     print(f"Starting training at epoch {start_display} | last_completed_epoch={lc_display}")
 
     for epoch in range(start_epoch, epochs):
@@ -2219,7 +2226,8 @@ def train(
                     else:
                         did_optimizer_update = False
                         tqdm.write(
-                            "⚠️  Non-finite grads in eager path; skipping optimizer update " f"(step={loop_state.global_step})"
+                            "⚠️  Non-finite grads in eager path; skipping optimizer update "
+                            f"(step={loop_state.global_step})"
                         )
 
                     # Reset accumulator for next window
@@ -2249,7 +2257,8 @@ def train(
                     loss_finite = bool(loss_finite_arr)
                     if not loss_finite:
                         tqdm.write(
-                            f"⚠️  Non-finite loss detected (step={loop_state.global_step}); " "grads were zeroed by clip_grad_norm"
+                            f"⚠️  Non-finite loss detected (step={loop_state.global_step}); "
+                            "grads were zeroed by clip_grad_norm"
                         )
                         if debugger is not None:
                             _diagnose_nonfinite(
@@ -2387,7 +2396,9 @@ def train(
 
                 # Debug mode: log per-step gradient norm for full observability
                 if sync_mode == "debug" and math.isfinite(grad_norm):
-                    tqdm.write(f"  [debug] step={loop_state.global_step} grad_norm={grad_norm:.4f} " f"loss={loss_val:.6f}")
+                    tqdm.write(
+                        f"  [debug] step={loop_state.global_step} grad_norm={grad_norm:.4f} " f"loss={loss_val:.6f}"
+                    )
 
                 # Profile mode: log step-level timing breakdown
                 if sync_mode == "profile":
