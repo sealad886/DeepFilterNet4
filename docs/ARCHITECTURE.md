@@ -590,10 +590,12 @@ The 8 re-exported modules:
 - `training_waveform`
 - `training_cli_main`
 
-This contract is enforced by `test_train_dynamic_reexports.py` with two checks:
+This contract is enforced by `test_train_dynamic_reexports.py` with three checks:
 1. **Completeness** — every public symbol in the 8 source modules is accessible from
    `train_dynamic`.
 2. **Identity** — re-exported symbols are the same objects, not copies.
+3. **Hardware diagnostics re-export** — verifies that `train_dynamic` correctly re-exports
+   the hardware diagnostics helpers as part of the public training API.
 
 #### Deferred Extraction: Epoch-End Logic
 
