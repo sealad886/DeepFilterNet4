@@ -874,3 +874,230 @@ def find_latest_checkpoint(checkpoint_dir: Path) -> Path | None:
 
     # Fast path: use latest mtime without loading large state JSON files.
     return max(valid_pairs, key=lambda p: p.stat().st_mtime)
+
+
+@dataclass
+class ResumeResult:
+    """Result of checkpoint resume reconciliation."""
+
+    start_epoch: int = 0
+    best_valid_loss: float = float("inf")
+    epochs_without_improvement: int = 0
+    last_completed_epoch: int = -1
+    resume_global_step: int = 0
+    resume_batch_idx: int = 0
+    resume_checkpoint_kind: str = "epoch_end"
+    resume_stage_index: int | None = None
+    resume_stage_name: str | None = None
+    data_resume_progress: dict | None = None
+    should_return_early: bool = False
+
+
+def reconcile_resume(
+    *,
+    model: nn.Module,
+    optimizer: optim.OptimizerBase,
+    discriminator: nn.Module | None,
+    disc_optimizer: optim.OptimizerBase | None,
+    resume_from: Path | str | None,
+    train_stream: Any | None,
+    data_resume_progress: dict | None,
+    data_resume_source: str | None,
+    pipeline_stage_defs: list,
+    epochs: int,
+    optimizer_steps_per_epoch: int,
+    tqdm_setup_panel: Any | None,
+    validation_report: dict | None,
+) -> ResumeResult:
+    """Load checkpoint (if any) and reconcile model/data resume state.
+
+    Returns a :class:`ResumeResult` with all resume-related variables populated.
+    The caller should check :pyattr:`ResumeResult.should_return_early` – when
+    ``True``, training is already complete and the caller should return.
+    """
+    result = ResumeResult(data_resume_progress=data_resume_progress)
+
+    if resume_from:
+        state = load_checkpoint(
+            model,
+            resume_from,
+            optimizer=optimizer,
+            discriminator=discriminator,
+            disc_optimizer=disc_optimizer,
+        )
+        if state:
+            ckpt_epoch = int(state.get("epoch", 0))
+            ckpt_kind = state.get("kind", "epoch_end")
+            result.resume_checkpoint_kind = (
+                ckpt_kind if isinstance(ckpt_kind, str) else "epoch_end"
+            )
+            result.resume_global_step = state.get(
+                "optimizer_steps_completed",
+                state.get("global_step", ckpt_epoch * optimizer_steps_per_epoch),
+            )
+            result.start_epoch = compute_resume_epoch(state)
+            completed_kinds = {"epoch_end", "best", "best_final", "final"}
+            if ckpt_kind in completed_kinds:
+                result.last_completed_epoch = state.get(
+                    "last_completed_epoch", ckpt_epoch
+                )
+            else:
+                result.last_completed_epoch = state.get(
+                    "last_completed_epoch", ckpt_epoch - 1
+                )
+            if ckpt_kind in _IN_PROGRESS_KINDS:
+                result.resume_batch_idx = resolve_resume_batch_count(state)
+            result.best_valid_loss = state.get("best_valid_loss", float("inf"))
+            ckpt_stage_index = state.get("pipeline_stage_index")
+            ckpt_stage_name = state.get("pipeline_stage_name")
+            if isinstance(ckpt_stage_index, int) and ckpt_stage_index >= 0:
+                result.resume_stage_index = ckpt_stage_index
+            if isinstance(ckpt_stage_name, str):
+                result.resume_stage_name = ckpt_stage_name
+
+            # Restore dynamic pipeline stages if present
+            ckpt_config = state.get("config", {})
+            if "pipeline_stages" in ckpt_config and ckpt_config["pipeline_stages"]:
+                pipeline_stage_defs.clear()
+                pipeline_stage_defs.extend(ckpt_config["pipeline_stages"])
+                print("  Restored dynamic pipeline stages from checkpoint.")
+
+            print(
+                "  Resumed from: "
+                f"{resume_from} (epoch {result.start_epoch}, kind={ckpt_kind}, "
+                f"last_completed={result.last_completed_epoch})"
+            )
+            print(
+                "  Resume target: "
+                f"epoch {result.start_epoch + 1} (idx {result.start_epoch}), "
+                f"micro_batch {result.resume_batch_idx}, "
+                f"global_step {result.resume_global_step}"
+            )
+            if result.start_epoch >= epochs:
+                print(
+                    f"\u2705 Training already complete "
+                    f"(checkpoint epoch {ckpt_epoch}/{epochs})."
+                )
+                if tqdm_setup_panel is not None:
+                    tqdm_setup_panel.close()
+                result.should_return_early = True
+                return result
+
+    if (
+        validation_report
+        and validation_report["last_completed_epoch"] > result.last_completed_epoch
+    ):
+        result.last_completed_epoch = validation_report["last_completed_epoch"]
+
+    if train_stream is not None and result.data_resume_progress is not None:
+        data_epoch = result.data_resume_progress.get("epoch")
+        data_batch = result.data_resume_progress.get("batch")
+        data_stage_index = result.data_resume_progress.get("pipeline_stage_index")
+        data_stage_name = result.data_resume_progress.get("pipeline_stage_name")
+        if not isinstance(data_epoch, int) or not isinstance(data_batch, int):
+            raise RuntimeError(
+                "Data checkpoint progress is malformed. "
+                f"source={data_resume_source}, "
+                f"progress={result.data_resume_progress}"
+            )
+        if data_stage_index is not None and (
+            not isinstance(data_stage_index, int) or data_stage_index < 0
+        ):
+            raise RuntimeError(
+                "Data checkpoint stage is malformed. "
+                f"source={data_resume_source}, stage={data_stage_index}"
+            )
+        if data_stage_name is not None and not isinstance(data_stage_name, str):
+            raise RuntimeError(
+                "Data checkpoint stage name is malformed. "
+                f"source={data_resume_source}, stage_name={data_stage_name}"
+            )
+
+        if resume_from is not None and isinstance(data_stage_index, int):
+            if result.resume_stage_index is None:
+                result.resume_stage_index = data_stage_index
+                if isinstance(data_stage_name, str):
+                    result.resume_stage_name = data_stage_name
+            elif data_stage_index > result.resume_stage_index:
+                raise RuntimeError(
+                    "Model checkpoint and data checkpoint disagree on "
+                    "curriculum stage. "
+                    f"model_stage={result.resume_stage_index}, "
+                    f"data_stage={data_stage_index} from "
+                    f"{data_resume_source}. "
+                    "Remediation: remove stale checkpoint artifacts and "
+                    "resume from a consistent pair."
+                )
+            elif data_stage_index < result.resume_stage_index:
+                print(
+                    "\u2139\ufe0f  Auto-correcting data checkpoint stage: "
+                    f"data={data_stage_index} \u2192 "
+                    f"model={result.resume_stage_index}."
+                )
+                train_stream._checkpoint.pipeline_stage_index = (
+                    result.resume_stage_index
+                )
+                if result.resume_stage_name is not None:
+                    train_stream._checkpoint.pipeline_stage_name = (
+                        result.resume_stage_name
+                    )
+
+        resume_requires_mid_epoch = (
+            resume_from is not None
+            and result.resume_checkpoint_kind in _IN_PROGRESS_KINDS
+        )
+        if resume_requires_mid_epoch:
+            if (
+                data_epoch != result.start_epoch
+                or data_batch != result.resume_batch_idx
+            ):
+                batch_delta = abs(data_batch - result.resume_batch_idx)
+                if data_epoch == result.start_epoch and batch_delta <= 1:
+                    print(
+                        f"\u2139\ufe0f  Auto-correcting data checkpoint batch "
+                        f"position: data={data_batch} \u2192 "
+                        f"model={result.resume_batch_idx} "
+                        f"(delta={batch_delta}, "
+                        f"epoch={result.start_epoch})."
+                    )
+                    train_stream.set_resume_position(
+                        epoch=result.start_epoch,
+                        batch_idx=result.resume_batch_idx,
+                    )
+                else:
+                    raise RuntimeError(
+                        "Model checkpoint and data checkpoint disagree on "
+                        "resume position. "
+                        f"model=(epoch={result.start_epoch}, "
+                        f"micro_batch={result.resume_batch_idx}, "
+                        f"kind={result.resume_checkpoint_kind}), "
+                        f"data=(epoch={data_epoch}, "
+                        f"micro_batch={data_batch}) from "
+                        f"{data_resume_source}. "
+                        "Remediation: remove stale data_checkpoint.json "
+                        "or choose matching resume artifacts."
+                    )
+        else:
+            if data_epoch != result.start_epoch or data_batch > 0:
+                print(
+                    "\u2139\ufe0f  Ignoring mid-epoch data checkpoint for "
+                    "epoch-boundary resume: "
+                    f"data=(epoch={data_epoch}, "
+                    f"micro_batch={data_batch}), "
+                    f"resume_epoch={result.start_epoch}."
+                )
+                train_stream.set_epoch(result.start_epoch)
+                result.data_resume_progress = None
+            elif data_batch == 0:
+                result.data_resume_progress = None
+
+    if resume_from:
+        lc_display = (
+            f"{result.last_completed_epoch + 1} "
+            f"(idx {result.last_completed_epoch})"
+            if result.last_completed_epoch >= 0
+            else "none"
+        )
+        print(f"  last_completed_epoch: {lc_display}")
+
+    return result

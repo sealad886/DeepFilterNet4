@@ -66,6 +66,7 @@ from df_mlx.training_checkpoints import (  # noqa: E402, F401
     _TRAIN_MODE_EAGER,
     CheckpointManifest,
     CheckpointRecord,
+    ResumeResult,
     _disc_weights_path,
     _is_disc_weights,
     _record_sort_key,
@@ -76,6 +77,7 @@ from df_mlx.training_checkpoints import (  # noqa: E402, F401
     find_latest_checkpoint,
     load_checkpoint,
     maybe_skip_resume_batches,
+    reconcile_resume,
     resolve_epoch_train_mode,
     resolve_resume_batch_count,
     save_checkpoint,
@@ -1104,152 +1106,33 @@ def train(
     optimizer = optim.AdamW(learning_rate=learning_rate, weight_decay=weight_decay)
 
     # Resume from checkpoint if provided (AFTER optimizer creation)
-    start_epoch = 0
-    best_valid_loss = float("inf")
-    epochs_without_improvement = 0
-    last_completed_epoch = -1
-    resume_global_step = 0
-    resume_batch_idx = 0
-    resume_checkpoint_kind = "epoch_end"
-    resume_stage_index: int | None = None
-    resume_stage_name: str | None = None
-
-    if resume_from:
-        state = load_checkpoint(
-            model,
-            resume_from,
-            optimizer=optimizer,
-            discriminator=discriminator,
-            disc_optimizer=disc_optimizer,
-        )
-        if state:
-            ckpt_epoch = int(state.get("epoch", 0))
-            ckpt_kind = state.get("kind", "epoch_end")
-            resume_checkpoint_kind = ckpt_kind if isinstance(ckpt_kind, str) else "epoch_end"
-            resume_global_step = state.get(
-                "optimizer_steps_completed",
-                state.get("global_step", ckpt_epoch * optimizer_steps_per_epoch),
-            )
-            start_epoch = compute_resume_epoch(state)
-            completed_kinds = {"epoch_end", "best", "best_final", "final"}
-            if ckpt_kind in completed_kinds:
-                last_completed_epoch = state.get("last_completed_epoch", ckpt_epoch)
-            else:
-                last_completed_epoch = state.get("last_completed_epoch", ckpt_epoch - 1)
-            if ckpt_kind in _IN_PROGRESS_KINDS:
-                resume_batch_idx = resolve_resume_batch_count(state)
-            best_valid_loss = state.get("best_valid_loss", float("inf"))
-            ckpt_stage_index = state.get("pipeline_stage_index")
-            ckpt_stage_name = state.get("pipeline_stage_name")
-            if isinstance(ckpt_stage_index, int) and ckpt_stage_index >= 0:
-                resume_stage_index = ckpt_stage_index
-            if isinstance(ckpt_stage_name, str):
-                resume_stage_name = ckpt_stage_name
-
-            # Restore dynamic pipeline stages if present
-            ckpt_config = state.get("config", {})
-            if "pipeline_stages" in ckpt_config and ckpt_config["pipeline_stages"]:
-                pipeline_stage_defs.clear()
-                pipeline_stage_defs.extend(ckpt_config["pipeline_stages"])
-                print("  Restored dynamic pipeline stages from checkpoint.")
-
-            print(
-                "  Resumed from: "
-                f"{resume_from} (epoch {start_epoch}, kind={ckpt_kind}, "
-                f"last_completed={last_completed_epoch})"
-            )
-            print(
-                "  Resume target: "
-                f"epoch {start_epoch + 1} (idx {start_epoch}), "
-                f"micro_batch {resume_batch_idx}, global_step {resume_global_step}"
-            )
-            if start_epoch >= epochs:
-                print(f"✅ Training already complete (checkpoint epoch {ckpt_epoch}/{epochs}).")
-                if tqdm_setup_panel is not None:
-                    tqdm_setup_panel.close()
-                return
-
-    if validation_report and validation_report["last_completed_epoch"] > last_completed_epoch:
-        last_completed_epoch = validation_report["last_completed_epoch"]
-
-    if train_stream is not None and data_resume_progress is not None:
-        data_epoch = data_resume_progress.get("epoch")
-        data_batch = data_resume_progress.get("batch")
-        data_stage_index = data_resume_progress.get("pipeline_stage_index")
-        data_stage_name = data_resume_progress.get("pipeline_stage_name")
-        if not isinstance(data_epoch, int) or not isinstance(data_batch, int):
-            raise RuntimeError(
-                "Data checkpoint progress is malformed. "
-                f"source={data_resume_source}, progress={data_resume_progress}"
-            )
-        if data_stage_index is not None and (not isinstance(data_stage_index, int) or data_stage_index < 0):
-            raise RuntimeError(
-                "Data checkpoint stage is malformed. " f"source={data_resume_source}, stage={data_stage_index}"
-            )
-        if data_stage_name is not None and not isinstance(data_stage_name, str):
-            raise RuntimeError(
-                "Data checkpoint stage name is malformed. " f"source={data_resume_source}, stage_name={data_stage_name}"
-            )
-
-        if resume_from is not None and isinstance(data_stage_index, int):
-            if resume_stage_index is None:
-                resume_stage_index = data_stage_index
-                if isinstance(data_stage_name, str):
-                    resume_stage_name = data_stage_name
-            elif data_stage_index > resume_stage_index:
-                raise RuntimeError(
-                    "Model checkpoint and data checkpoint disagree on curriculum stage. "
-                    f"model_stage={resume_stage_index}, data_stage={data_stage_index} from {data_resume_source}. "
-                    "Remediation: remove stale checkpoint artifacts and resume from a consistent pair."
-                )
-            elif data_stage_index < resume_stage_index:
-                print(
-                    "ℹ️  Auto-correcting data checkpoint stage: "
-                    f"data={data_stage_index} → model={resume_stage_index}."
-                )
-                train_stream._checkpoint.pipeline_stage_index = resume_stage_index
-                if resume_stage_name is not None:
-                    train_stream._checkpoint.pipeline_stage_name = resume_stage_name
-
-        resume_requires_mid_epoch = resume_from is not None and resume_checkpoint_kind in _IN_PROGRESS_KINDS
-        if resume_requires_mid_epoch:
-            if data_epoch != start_epoch or data_batch != resume_batch_idx:
-                # The model checkpoint is authoritative for how many micro-batches
-                # were fully processed.  The data stream's counter can be ±1 ahead
-                # because its iterator pre-increments before yield, so an interrupt
-                # may capture a higher count.  Auto-correct when the epoch matches
-                # and the batch delta is small; reject only on large or cross-epoch
-                # mismatches.
-                batch_delta = abs(data_batch - resume_batch_idx)
-                if data_epoch == start_epoch and batch_delta <= 1:
-                    print(
-                        f"ℹ️  Auto-correcting data checkpoint batch position: "
-                        f"data={data_batch} → model={resume_batch_idx} "
-                        f"(delta={batch_delta}, epoch={start_epoch})."
-                    )
-                    train_stream.set_resume_position(epoch=start_epoch, batch_idx=resume_batch_idx)
-                else:
-                    raise RuntimeError(
-                        "Model checkpoint and data checkpoint disagree on resume position. "
-                        f"model=(epoch={start_epoch}, micro_batch={resume_batch_idx}, kind={resume_checkpoint_kind}), "
-                        f"data=(epoch={data_epoch}, micro_batch={data_batch}) from {data_resume_source}. "
-                        "Remediation: remove stale data_checkpoint.json or choose matching resume artifacts."
-                    )
-        else:
-            # Resuming from an epoch-boundary checkpoint should always restart at batch 0.
-            if data_epoch != start_epoch or data_batch > 0:
-                print(
-                    "ℹ️  Ignoring mid-epoch data checkpoint for epoch-boundary resume: "
-                    f"data=(epoch={data_epoch}, micro_batch={data_batch}), resume_epoch={start_epoch}."
-                )
-                train_stream.set_epoch(start_epoch)
-                data_resume_progress = None
-            elif data_batch == 0:
-                data_resume_progress = None
-
-    if resume_from:
-        lc_display = f"{last_completed_epoch + 1} (idx {last_completed_epoch})" if last_completed_epoch >= 0 else "none"
-        print(f"  last_completed_epoch: {lc_display}")
+    resume_result = reconcile_resume(
+        model=model,
+        optimizer=optimizer,
+        discriminator=discriminator,
+        disc_optimizer=disc_optimizer,
+        resume_from=resume_from,
+        train_stream=train_stream,
+        data_resume_progress=data_resume_progress,
+        data_resume_source=data_resume_source,
+        pipeline_stage_defs=pipeline_stage_defs,
+        epochs=epochs,
+        optimizer_steps_per_epoch=optimizer_steps_per_epoch,
+        tqdm_setup_panel=tqdm_setup_panel,
+        validation_report=validation_report,
+    )
+    start_epoch = resume_result.start_epoch
+    best_valid_loss = resume_result.best_valid_loss
+    epochs_without_improvement = resume_result.epochs_without_improvement
+    last_completed_epoch = resume_result.last_completed_epoch
+    resume_global_step = resume_result.resume_global_step
+    resume_batch_idx = resume_result.resume_batch_idx
+    resume_checkpoint_kind = resume_result.resume_checkpoint_kind
+    resume_stage_index = resume_result.resume_stage_index
+    resume_stage_name = resume_result.resume_stage_name
+    data_resume_progress = resume_result.data_resume_progress
+    if resume_result.should_return_early:
+        return
 
     _interrupt_state["last_completed_epoch"] = last_completed_epoch
 
