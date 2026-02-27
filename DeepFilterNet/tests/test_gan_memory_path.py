@@ -22,7 +22,7 @@ def test_gan_uses_mrstft_precision_policy_for_istft() -> None:
 
 def test_discriminator_update_follows_optimizer_step_cadence() -> None:
     assert "do_disc_update = did_optimizer_update" in TRAIN_SOURCE
-    assert "(global_step % gan_disc_update_freq) == 0" in TRAIN_SOURCE
+    assert "(loop_state.global_step % gan_disc_update_freq) == 0" in TRAIN_SOURCE
 
 
 def test_generator_fm_real_branch_is_stop_grad() -> None:

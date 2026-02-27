@@ -74,12 +74,14 @@ from df_mlx.training_diagnostics import (
     diagnose_nonfinite as _diagnose_nonfinite_impl,
 )
 from df_mlx.training_helpers import (
+    TrainingLoopState,
     _resolve_pipeline_stage_by_index,
     curriculum_schedule,
     print_compiled_step_eligibility,
 )
 from df_mlx.training_helpers import build_setup_panel_line as _build_setup_panel_line
 from df_mlx.training_helpers import clip_gan_scores as _clip_gan_scores
+from df_mlx.training_helpers import is_vad_train_reg_enabled as _is_vad_train_reg_enabled
 from df_mlx.training_losses import (
     _compute_awesome_losses,
     _compute_pipeline_awesome_losses,
@@ -818,6 +820,8 @@ def train(
 
     _interrupt_state["last_completed_epoch"] = last_completed_epoch
 
+    # Bare `gan_active` needed for closure capture (loss_fn, loss_fn_gan, diagnostics).
+    # Will be synced with loop_state.gan_active in the epoch loop.
     gan_active = False
 
     # Mutable holder for late-bound compiled disc inference (GAN-P1).
@@ -1029,7 +1033,6 @@ def train(
     # function ensures the compiled graph always includes generator adversarial
     # loss paths.
     loss_and_grad_gan = None
-    _compiled_gan_correctness_verified = False
 
     if experimental_compiled_gan and gan_enabled:
         print("  [EXPERIMENTAL] Compiled-GAN experiment enabled (gen-only, Variant B)")
@@ -1595,26 +1598,26 @@ def train(
     print(f"  Est. total steps: {total_steps:,}")
     print()
 
-    global_step = resume_global_step if resume_from else start_epoch * optimizer_steps_per_epoch
-    final_epoch = start_epoch
-    last_completed_epoch = max(last_completed_epoch, start_epoch - 1)
-    avg_train_loss = float("nan")
-    last_valid_loss: float | None = None
-    last_valid_epoch: int | None = None
-    train_mode: Literal["COMPILED", "EAGER"] | None = None
-
-    active_stage_name = initial_stage_name
-    active_stage_index = initial_stage_index
+    loop_state = TrainingLoopState(
+        global_step=resume_global_step if resume_from else start_epoch * optimizer_steps_per_epoch,
+        final_epoch=start_epoch,
+        last_completed_epoch=max(last_completed_epoch, start_epoch - 1),
+        best_valid_loss=best_valid_loss,
+        epochs_without_improvement=epochs_without_improvement,
+        active_stage_name=initial_stage_name,
+        active_stage_index=initial_stage_index,
+        epoch_awesome_loss_weight=base_awesome_loss_weight,
+        epoch_vad_loss_weight=base_vad_loss_weight,
+        epoch_vad_speech_loss_weight=base_vad_speech_loss_weight,
+    )
+    # Keep bare `gan_active` for closure capture (loss_fn reads it)
+    gan_active = loop_state.gan_active
 
     def _sync_data_stream_stage(stage_index: int, stage_name: str) -> None:
         if train_stream is None:
             return
         train_stream._checkpoint.pipeline_stage_index = int(stage_index)
         train_stream._checkpoint.pipeline_stage_name = str(stage_name)
-
-    epoch_awesome_loss_weight = base_awesome_loss_weight
-    epoch_vad_loss_weight = base_vad_loss_weight
-    epoch_vad_speech_loss_weight = base_vad_speech_loss_weight
 
     max_train_batches = train_config.get("max_train_batches")
     max_valid_batches = train_config.get("max_valid_batches")
@@ -1668,56 +1671,56 @@ def train(
     )
 
     start_display = f"{start_epoch + 1}/{epochs} (idx {start_epoch})"
-    lc_display = f"{last_completed_epoch + 1} (idx {last_completed_epoch})" if last_completed_epoch >= 0 else "none"
+    lc_display = f"{loop_state.last_completed_epoch + 1} (idx {loop_state.last_completed_epoch})" if loop_state.last_completed_epoch >= 0 else "none"
     print(f"Starting training at epoch {start_display} | last_completed_epoch={lc_display}")
 
     for epoch in range(start_epoch, epochs):
         epoch_start = time.perf_counter()
-        final_epoch = epoch
+        loop_state.final_epoch = epoch
 
         scheduled_stage = _resolve_pipeline_stage(epoch, pipeline_stage_defs)
         scheduled_stage_index = int(scheduled_stage["index"])
-        next_stage_index = max(active_stage_index, scheduled_stage_index)
+        next_stage_index = max(loop_state.active_stage_index, scheduled_stage_index)
 
-        if next_stage_index != active_stage_index:
+        if next_stage_index != loop_state.active_stage_index:
             print(
                 "\n🔄 Pipeline stage advanced "
-                f"({active_stage_index} -> {next_stage_index}) by schedule. Resetting best_valid_loss."
+                f"({loop_state.active_stage_index} -> {next_stage_index}) by schedule. Resetting loop_state.best_valid_loss."
             )
-            best_valid_loss = float("inf")
-            epochs_without_improvement = 0
+            loop_state.best_valid_loss = float("inf")
+            loop_state.epochs_without_improvement = 0
 
-        active_stage_index = next_stage_index
-        active_stage = _resolve_pipeline_stage_by_index(active_stage_index, pipeline_stage_defs)
-        active_stage_name = str(active_stage["name"])
-        epoch_awesome_loss_weight = float(
+        loop_state.active_stage_index = next_stage_index
+        active_stage = _resolve_pipeline_stage_by_index(loop_state.active_stage_index, pipeline_stage_defs)
+        loop_state.active_stage_name = str(active_stage["name"])
+        loop_state.epoch_awesome_loss_weight = float(
             active_stage["awesome_loss_weight"]
             if active_stage["awesome_loss_weight"] is not None
             else base_awesome_loss_weight
         )
-        epoch_vad_loss_weight = float(
+        loop_state.epoch_vad_loss_weight = float(
             active_stage["vad_loss_weight"] if active_stage["vad_loss_weight"] is not None else base_vad_loss_weight
         )
-        epoch_vad_speech_loss_weight = float(
+        loop_state.epoch_vad_speech_loss_weight = float(
             active_stage["vad_speech_loss_weight"]
             if active_stage["vad_speech_loss_weight"] is not None
             else base_vad_speech_loss_weight
         )
         train_config["pipeline_stage_active"] = {
-            "index": active_stage_index,
-            "name": active_stage_name,
+            "index": loop_state.active_stage_index,
+            "name": loop_state.active_stage_name,
             "start_epoch": int(active_stage["start_epoch"]),
-            "awesome_loss_weight": epoch_awesome_loss_weight,
-            "vad_loss_weight": epoch_vad_loss_weight,
-            "vad_speech_loss_weight": epoch_vad_speech_loss_weight,
+            "awesome_loss_weight": loop_state.epoch_awesome_loss_weight,
+            "vad_loss_weight": loop_state.epoch_vad_loss_weight,
+            "vad_speech_loss_weight": loop_state.epoch_vad_speech_loss_weight,
         }
         print(
             "  Stage "
-            f"{active_stage_index} ({active_stage_name}) | "
-            f"awesome_w={epoch_awesome_loss_weight:.4f} "
-            f"vad_w={epoch_vad_loss_weight:.4f} speech_w={epoch_vad_speech_loss_weight:.4f}"
+            f"{loop_state.active_stage_index} ({loop_state.active_stage_name}) | "
+            f"awesome_w={loop_state.epoch_awesome_loss_weight:.4f} "
+            f"vad_w={loop_state.epoch_vad_loss_weight:.4f} speech_w={loop_state.epoch_vad_speech_loss_weight:.4f}"
         )
-        _sync_data_stream_stage(active_stage_index, active_stage_name)
+        _sync_data_stream_stage(loop_state.active_stage_index, loop_state.active_stage_name)
 
         # Set epoch for reproducible shuffling
         dataset.set_split("train")
@@ -1757,6 +1760,7 @@ def train(
         gan_weight_mx = mx.array(gan_weight, dtype=mx.float32)
         fm_weight_mx = mx.array(fm_weight, dtype=mx.float32)
         gan_active = gan_enabled and gan_scale > 0.0
+        loop_state.gan_active = gan_active
 
         # GAN epochs use a tighter eval_frequency to bound lazy-graph
         # accumulation.  With per-step compiled disc and single-eval enabled
@@ -1771,16 +1775,16 @@ def train(
                     f"(gan.eval_frequency={gan_eval_frequency}, training.eval_frequency={eval_frequency})"
                 )
 
-        prev_train_mode = train_mode
-        train_mode, epoch_use_compiled_step = resolve_epoch_train_mode(
+        prev_train_mode = loop_state.train_mode
+        loop_state.train_mode, epoch_use_compiled_step = resolve_epoch_train_mode(
             compiled_step_base_enabled=base_compiled_step_enabled,
             gan_enabled=gan_enabled,
             gan_active=gan_active,
-            previous_mode=train_mode,
+            previous_mode=loop_state.train_mode,
             experimental_compiled_gan=experimental_compiled_gan,
         )
         if not experimental_compiled_gan:
-            if prev_train_mode == _TRAIN_MODE_EAGER and train_mode != _TRAIN_MODE_EAGER:
+            if prev_train_mode == _TRAIN_MODE_EAGER and loop_state.train_mode != _TRAIN_MODE_EAGER:
                 raise RuntimeError(
                     "Invariant violation: training mode switched from EAGER back to COMPILED. "
                     "Mode switches must be one-way to preserve deterministic behavior after GAN activation."
@@ -1796,7 +1800,7 @@ def train(
             experimental_compiled_gan and gan_active and epoch_use_compiled_step and compiled_gan_step is not None
         )
 
-        if train_mode != prev_train_mode:
+        if loop_state.train_mode != prev_train_mode:
             if not base_compiled_step_enabled:
                 mode_reason = "compiled_blocked"
             elif gan_enabled and gan_active and not experimental_compiled_gan:
@@ -1805,7 +1809,7 @@ def train(
                 mode_reason = "experimental_compiled_gan"
             else:
                 mode_reason = "gan_inactive"
-            print(f"  TRAIN_MODE={train_mode} (epoch {epoch + 1}/{epochs}, reason={mode_reason})")
+            print(f"  TRAIN_MODE={loop_state.train_mode} (epoch {epoch + 1}/{epochs}, reason={mode_reason})")
             if use_compiled_gan_step:
                 print(f"  [EXPERIMENTAL] Using compiled-GAN step (gen compiled, disc eager) " f"epoch={epoch + 1}")
 
@@ -1832,12 +1836,12 @@ def train(
         _update_interrupt_state(
             epoch,
             0.0,
-            best_valid_loss,
+            loop_state.best_valid_loss,
             batch_idx=0,
-            global_step=global_step,
-            last_completed_epoch=last_completed_epoch,
-            pipeline_stage_index=active_stage_index,
-            pipeline_stage_name=active_stage_name,
+            global_step=loop_state.global_step,
+            last_completed_epoch=loop_state.last_completed_epoch,
+            pipeline_stage_index=loop_state.active_stage_index,
+            pipeline_stage_name=loop_state.active_stage_name,
         )
 
         # Timing accumulators for verbose diagnostics
@@ -1948,7 +1952,7 @@ def train(
                 "phase": "train",
                 "epoch": epoch,
                 "batch": batch_idx,
-                "global_step": global_step,
+                "global_step": loop_state.global_step,
             }
             if debugger is not None:
                 debugger.check("batch.noisy_real", noisy_real, debug_ctx)
@@ -1973,15 +1977,15 @@ def train(
             current_batch_size = noisy_real.shape[0]
 
             # Update learning rate from schedule (must be done outside compiled step)
-            current_lr = schedule(global_step)
+            current_lr = schedule(loop_state.global_step)
             optimizer.learning_rate = current_lr
 
             warmup_frac = 1.0
             if use_vad_loss and vad_warmup_steps > 0:
-                warmup_frac = min(1.0, global_step / max(vad_warmup_steps, 1))
+                warmup_frac = min(1.0, loop_state.global_step / max(vad_warmup_steps, 1))
 
-            vad_weight = epoch_vad_loss_weight * warmup_frac
-            speech_weight = epoch_vad_speech_loss_weight * warmup_frac
+            vad_weight = loop_state.epoch_vad_loss_weight * warmup_frac
+            speech_weight = loop_state.epoch_vad_speech_loss_weight * warmup_frac
             if vad_weight != _prev_vad_w:
                 _prev_vad_w = vad_weight
                 _prev_vad_w_mx = mx.array(vad_weight, dtype=mx.float32)
@@ -1992,8 +1996,8 @@ def train(
             speech_weight_mx = _prev_speech_w_mx
             awesome_frac = 1.0
             if (use_awesome_loss or use_pipeline_awesome_loss) and awesome_warmup_steps > 0:
-                awesome_frac = min(1.0, global_step / max(awesome_warmup_steps, 1))
-            awesome_weight = epoch_awesome_loss_weight * awesome_frac
+                awesome_frac = min(1.0, loop_state.global_step / max(awesome_warmup_steps, 1))
+            awesome_weight = loop_state.epoch_awesome_loss_weight * awesome_frac
             if awesome_weight != _prev_awesome_w:
                 _prev_awesome_w = awesome_weight
                 _prev_awesome_w_mx = mx.array(awesome_weight, dtype=mx.float32)
@@ -2001,7 +2005,7 @@ def train(
 
             apply_vad_reg = False
             if use_vad_train_reg:
-                if vad_train_every_steps > 0 and global_step % vad_train_every_steps == 0:
+                if vad_train_every_steps > 0 and loop_state.global_step % vad_train_every_steps == 0:
                     apply_vad_reg = True
                 elif vad_train_prob > 0:
                     apply_vad_reg = random.random() < vad_train_prob
@@ -2088,7 +2092,7 @@ def train(
                             did_optimizer_update = False
                             tqdm.write(
                                 "⚠️  Non-finite grads after clipping; skipping optimizer update "
-                                f"(step={global_step})"
+                                f"(step={loop_state.global_step})"
                             )
                         accumulated_grads = None
                         accumulated_loss = _SCALAR_ZERO
@@ -2122,10 +2126,10 @@ def train(
                     # One-time correctness verification for compiled-GAN step
                     if (
                         use_compiled_gan_step
-                        and not _compiled_gan_correctness_verified
+                        and not loop_state.compiled_gan_correctness_verified
                         and loss_and_grad_gan is not None
                     ):
-                        _compiled_gan_correctness_verified = True
+                        loop_state.compiled_gan_correctness_verified = True
                         # Run an eager forward pass for comparison
                         (eager_loss, _, _, _), _ = loss_and_grad_gan(
                             model,
@@ -2226,7 +2230,7 @@ def train(
                     else:
                         did_optimizer_update = False
                         tqdm.write(
-                            "⚠️  Non-finite grads in eager path; skipping optimizer update " f"(step={global_step})"
+                            "⚠️  Non-finite grads in eager path; skipping optimizer update " f"(step={loop_state.global_step})"
                         )
 
                     # Reset accumulator for next window
@@ -2256,7 +2260,7 @@ def train(
                     loss_finite = bool(loss_finite_arr)
                     if not loss_finite:
                         tqdm.write(
-                            f"⚠️  Non-finite loss detected (step={global_step}); " "grads were zeroed by clip_grad_norm"
+                            f"⚠️  Non-finite loss detected (step={loop_state.global_step}); " "grads were zeroed by clip_grad_norm"
                         )
                         if debugger is not None:
                             _diagnose_nonfinite(
@@ -2284,7 +2288,7 @@ def train(
 
             gan_d_loss_val = 0.0
             if gan_active and discriminator is not None and disc_optimizer is not None and gan_loss_fns is not None:
-                do_disc_update = did_optimizer_update and ((global_step % gan_disc_update_freq) == 0)
+                do_disc_update = did_optimizer_update and ((loop_state.global_step % gan_disc_update_freq) == 0)
                 if do_disc_update:
                     _, disc_loss_fn = gan_loss_fns
 
@@ -2345,7 +2349,7 @@ def train(
                                 disc_optimizer.update(discriminator, disc_grads)
                             else:
                                 tqdm.write(
-                                    f"\u26a0\ufe0f  Non-finite disc grads; skipping disc update (step={global_step})"
+                                    f"\u26a0\ufe0f  Non-finite disc grads; skipping disc update (step={loop_state.global_step})"
                                 )
 
                         if should_sync:
@@ -2377,14 +2381,14 @@ def train(
                     train._nonfinite_loss_count = nonfinite_loss_count  # type: ignore[attr-defined]
                     tqdm.write(
                         f"⚠️  Non-finite loss_val at sync point "
-                        f"(epoch={epoch}, batch={batch_idx}, step={global_step}, "
+                        f"(epoch={epoch}, batch={batch_idx}, step={loop_state.global_step}, "
                         f"cumulative_nonfinite={nonfinite_loss_count})"
                     )
                     _MAX_NONFINITE_LOSSES = 50
                     if nonfinite_loss_count >= _MAX_NONFINITE_LOSSES:
                         raise FloatingPointError(
                             f"Aborting: {nonfinite_loss_count} non-finite losses "
-                            f"in this session (epoch={epoch}, step={global_step}). "
+                            f"in this session (epoch={epoch}, step={loop_state.global_step}). "
                             "Model is likely diverged."
                         )
                     loss_val = 0.0
@@ -2394,12 +2398,12 @@ def train(
 
                 # Debug mode: log per-step gradient norm for full observability
                 if sync_mode == "debug" and math.isfinite(grad_norm):
-                    tqdm.write(f"  [debug] step={global_step} grad_norm={grad_norm:.4f} " f"loss={loss_val:.6f}")
+                    tqdm.write(f"  [debug] step={loop_state.global_step} grad_norm={grad_norm:.4f} " f"loss={loss_val:.6f}")
 
                 # Profile mode: log step-level timing breakdown
                 if sync_mode == "profile":
                     tqdm.write(
-                        f"  [profile] step={global_step} "
+                        f"  [profile] step={loop_state.global_step} "
                         f"data={data_time * 1000:.1f}ms "
                         f"fwd={fwd_time * 1000:.1f}ms "
                         f"total={(data_time + fwd_time) * 1000:.1f}ms"
@@ -2407,21 +2411,21 @@ def train(
             num_train_batches += 1
             samples_processed += current_batch_size
             window_samples += current_batch_size
-            # Only increment global_step when optimizer actually updates
+            # Only increment loop_state.global_step when optimizer actually updates
             # (for gradient accumulation > 1, updates happen every N batches)
             if did_optimizer_update:
-                global_step += 1
+                loop_state.global_step += 1
 
             # Track progress for interruption-safe resume metadata
             _update_interrupt_state(
                 epoch,
                 loss_val,
-                best_valid_loss,
+                loop_state.best_valid_loss,
                 batch_idx=num_train_batches,
-                global_step=global_step,
-                last_completed_epoch=last_completed_epoch,
-                pipeline_stage_index=active_stage_index,
-                pipeline_stage_name=active_stage_name,
+                global_step=loop_state.global_step,
+                last_completed_epoch=loop_state.last_completed_epoch,
+                pipeline_stage_index=loop_state.active_stage_index,
+                pipeline_stage_name=loop_state.active_stage_name,
             )
 
             # Stop early for benchmarking if requested
@@ -2430,7 +2434,7 @@ def train(
 
             # Update progress bar with real-time metrics (only on sync)
             if should_sync:
-                lr = float(schedule(global_step))
+                lr = float(schedule(loop_state.global_step))
                 # Throughput: samples processed in this sync window / wall-clock time
                 window_elapsed = time.perf_counter() - window_start
                 samples_per_sec = window_samples / max(window_elapsed, 1e-6)
@@ -2502,7 +2506,7 @@ def train(
                     samples_per_sec=samples_per_sec,
                     data_time=data_time,
                     fwd_time=fwd_time,
-                    global_step=global_step,
+                    global_step=loop_state.global_step,
                     verbose=verbose,
                     use_mrstft_loss=use_mrstft_loss,
                     use_vad_loss=use_vad_loss,
@@ -2515,37 +2519,37 @@ def train(
             # Save data checkpoint periodically (for resume capability)
             if checkpoint_batches > 0 and use_mlx_stream and train_stream is not None:
                 if (batch_idx + 1) % checkpoint_batches == 0:
-                    _sync_data_stream_stage(active_stage_index, active_stage_name)
+                    _sync_data_stream_stage(loop_state.active_stage_index, loop_state.active_stage_name)
                     train_stream.save_checkpoint(data_checkpoint_path)
 
             # Save model checkpoint by steps (HuggingFace-style)
-            if save_strategy == "steps" and save_steps > 0 and global_step % save_steps == 0:
+            if save_strategy == "steps" and save_steps > 0 and loop_state.global_step % save_steps == 0:
                 # Force sync before checkpoint to get accurate loss
                 mx.eval(state)
                 loss_val = float(loss)
 
-                ckpt_path = ckpt_dir / f"step_{global_step:06d}.safetensors"
+                ckpt_path = ckpt_dir / f"step_{loop_state.global_step:06d}.safetensors"
                 step_saved = save_checkpoint(
                     model,
                     ckpt_path,
                     epoch=epoch,
                     batch_idx=num_train_batches,
-                    global_step=global_step,
+                    global_step=loop_state.global_step,
                     loss=train_loss / num_train_batches if num_train_batches > 0 else loss_val,
-                    best_valid_loss=best_valid_loss,
+                    best_valid_loss=loop_state.best_valid_loss,
                     config=train_config,
                     optimizer=optimizer,
                     discriminator=discriminator,
                     disc_optimizer=disc_optimizer,
-                    last_completed_epoch=last_completed_epoch,
-                    pipeline_stage_index=active_stage_index,
-                    pipeline_stage_name=active_stage_name,
+                    last_completed_epoch=loop_state.last_completed_epoch,
+                    pipeline_stage_index=loop_state.active_stage_index,
+                    pipeline_stage_name=loop_state.active_stage_name,
                     kind="step",
                 )
                 if step_saved:
-                    tqdm.write(f"  📦 Checkpoint saved: {ckpt_path.name} (step {global_step})")
+                    tqdm.write(f"  📦 Checkpoint saved: {ckpt_path.name} (step {loop_state.global_step})")
                 else:
-                    tqdm.write(f"  ⚠️  Checkpoint save failed: {ckpt_path.name} (step {global_step})")
+                    tqdm.write(f"  ⚠️  Checkpoint save failed: {ckpt_path.name} (step {loop_state.global_step})")
 
                 # Cleanup old checkpoints if limit is set
                 if save_total_limit is not None:
@@ -2561,11 +2565,11 @@ def train(
 
         # Save data checkpoint at end of epoch (for clean resume at epoch boundary)
         if use_mlx_stream and train_stream is not None:
-            _sync_data_stream_stage(active_stage_index, active_stage_name)
+            _sync_data_stream_stage(loop_state.active_stage_index, loop_state.active_stage_name)
             train_stream.save_checkpoint(data_checkpoint_path)
 
         _n = max(num_train_batches, 1)
-        avg_train_loss = train_loss / _n
+        loop_state.avg_train_loss = train_loss / _n
         epoch_avgs = compute_epoch_averages(
             _epoch_accums,
             train_loss=train_loss,
@@ -2601,23 +2605,23 @@ def train(
             avg_valid_loss = _run_validation(
                 _valid_ctx,
                 epoch=epoch,
-                global_step=global_step,
-                epoch_awesome_loss_weight=epoch_awesome_loss_weight,
-                epoch_vad_loss_weight=epoch_vad_loss_weight,
-                epoch_vad_speech_loss_weight=epoch_vad_speech_loss_weight,
-                active_stage_index=active_stage_index,
-                active_stage_name=active_stage_name,
-                train_mode=train_mode or "EAGER",
+                global_step=loop_state.global_step,
+                epoch_awesome_loss_weight=loop_state.epoch_awesome_loss_weight,
+                epoch_vad_loss_weight=loop_state.epoch_vad_loss_weight,
+                epoch_vad_speech_loss_weight=loop_state.epoch_vad_speech_loss_weight,
+                active_stage_index=loop_state.active_stage_index,
+                active_stage_name=loop_state.active_stage_name,
+                train_mode=loop_state.train_mode or "EAGER",
                 label="  Validating",
                 do_vad_eval=do_vad_eval,
             )
-            last_valid_loss = avg_valid_loss
-            last_valid_epoch = epoch
+            loop_state.last_valid_loss = avg_valid_loss
+            loop_state.last_valid_epoch = epoch
 
             # Early stopping check
-            if avg_valid_loss < best_valid_loss:
-                best_valid_loss = avg_valid_loss
-                epochs_without_improvement = 0
+            if avg_valid_loss < loop_state.best_valid_loss:
+                loop_state.best_valid_loss = avg_valid_loss
+                loop_state.epochs_without_improvement = 0
 
                 # Save best model
                 best_path = ckpt_dir / "best.safetensors"
@@ -2626,34 +2630,34 @@ def train(
                     best_path,
                     epoch=epoch,
                     batch_idx=None,
-                    global_step=global_step,
-                    loss=avg_train_loss,
-                    best_valid_loss=best_valid_loss,
+                    global_step=loop_state.global_step,
+                    loss=loop_state.avg_train_loss,
+                    best_valid_loss=loop_state.best_valid_loss,
                     config=train_config,
                     optimizer=optimizer,
                     discriminator=discriminator,
                     disc_optimizer=disc_optimizer,
                     last_completed_epoch=epoch,
-                    pipeline_stage_index=active_stage_index,
-                    pipeline_stage_name=active_stage_name,
+                    pipeline_stage_index=loop_state.active_stage_index,
+                    pipeline_stage_name=loop_state.active_stage_name,
                     kind="best",
                 )
                 if best_saved:
-                    last_completed_epoch = max(last_completed_epoch, epoch)
+                    loop_state.last_completed_epoch = max(loop_state.last_completed_epoch, epoch)
                     _update_interrupt_state(
                         epoch,
-                        avg_train_loss,
-                        best_valid_loss,
+                        loop_state.avg_train_loss,
+                        loop_state.best_valid_loss,
                         batch_idx=num_train_batches,
-                        global_step=global_step,
-                        last_completed_epoch=last_completed_epoch,
-                        pipeline_stage_index=active_stage_index,
-                        pipeline_stage_name=active_stage_name,
+                        global_step=loop_state.global_step,
+                        last_completed_epoch=loop_state.last_completed_epoch,
+                        pipeline_stage_index=loop_state.active_stage_index,
+                        pipeline_stage_name=loop_state.active_stage_name,
                     )
                 else:
                     print("⚠️  Best checkpoint save failed; epoch completion not updated.")
             else:
-                epochs_without_improvement += 1
+                loop_state.epochs_without_improvement += 1
 
         # ====== Epoch Summary ======
         epoch_time = time.perf_counter() - epoch_start
@@ -2661,13 +2665,13 @@ def train(
         # Update interrupt state with final epoch metrics
         _update_interrupt_state(
             epoch,
-            avg_train_loss,
-            best_valid_loss,
+            loop_state.avg_train_loss,
+            loop_state.best_valid_loss,
             batch_idx=num_train_batches,
-            global_step=global_step,
-            last_completed_epoch=last_completed_epoch,
-            pipeline_stage_index=active_stage_index,
-            pipeline_stage_name=active_stage_name,
+            global_step=loop_state.global_step,
+            last_completed_epoch=loop_state.last_completed_epoch,
+            pipeline_stage_index=loop_state.active_stage_index,
+            pipeline_stage_name=loop_state.active_stage_name,
         )
 
         print_epoch_summary(
@@ -2675,7 +2679,7 @@ def train(
             epoch=epoch,
             epochs=epochs,
             avg_valid_loss=avg_valid_loss,
-            best_valid_loss=best_valid_loss,
+            best_valid_loss=loop_state.best_valid_loss,
             samples_processed=samples_processed,
             epoch_time=epoch_time,
             use_vad_loss=use_vad_loss,
@@ -2700,22 +2704,22 @@ def train(
 
         # ====== Early Stopping / Curriculum Advance ======
         should_stop = False
-        if patience > 0 and epochs_without_improvement >= patience:
-            if active_stage_index + 1 < len(pipeline_stage_defs):
-                prev_stage_index = active_stage_index
-                active_stage_index += 1
-                next_stage = _resolve_pipeline_stage_by_index(active_stage_index, pipeline_stage_defs)
-                active_stage_name = str(next_stage["name"])
+        if patience > 0 and loop_state.epochs_without_improvement >= patience:
+            if loop_state.active_stage_index + 1 < len(pipeline_stage_defs):
+                prev_stage_index = loop_state.active_stage_index
+                loop_state.active_stage_index += 1
+                next_stage = _resolve_pipeline_stage_by_index(loop_state.active_stage_index, pipeline_stage_defs)
+                loop_state.active_stage_name = str(next_stage["name"])
                 print(f"\nEarly stopping triggered after {patience} epochs without improvement.")
                 print(
                     "Moving to next pipeline stage "
-                    f"'{active_stage_name}' early ({prev_stage_index} -> {active_stage_index})."
+                    f"'{loop_state.active_stage_name}' early ({prev_stage_index} -> {loop_state.active_stage_index})."
                 )
-                best_valid_loss = float("inf")
-                epochs_without_improvement = 0
+                loop_state.best_valid_loss = float("inf")
+                loop_state.epochs_without_improvement = 0
                 train_config["pipeline_stage_active"] = {
-                    "index": active_stage_index,
-                    "name": active_stage_name,
+                    "index": loop_state.active_stage_index,
+                    "name": loop_state.active_stage_name,
                     "start_epoch": int(next_stage["start_epoch"]),
                     "awesome_loss_weight": (
                         float(next_stage["awesome_loss_weight"])
@@ -2733,16 +2737,16 @@ def train(
                         else base_vad_speech_loss_weight
                     ),
                 }
-                _sync_data_stream_stage(active_stage_index, active_stage_name)
+                _sync_data_stream_stage(loop_state.active_stage_index, loop_state.active_stage_name)
                 _update_interrupt_state(
                     epoch,
-                    avg_train_loss,
-                    best_valid_loss,
+                    loop_state.avg_train_loss,
+                    loop_state.best_valid_loss,
                     batch_idx=num_train_batches,
-                    global_step=global_step,
-                    last_completed_epoch=last_completed_epoch,
-                    pipeline_stage_index=active_stage_index,
-                    pipeline_stage_name=active_stage_name,
+                    global_step=loop_state.global_step,
+                    last_completed_epoch=loop_state.last_completed_epoch,
+                    pipeline_stage_index=loop_state.active_stage_index,
+                    pipeline_stage_name=loop_state.active_stage_name,
                 )
             else:
                 should_stop = True
@@ -2754,30 +2758,30 @@ def train(
             ckpt_path,
             epoch=epoch,
             batch_idx=None,
-            global_step=global_step,
-            loss=avg_train_loss,
-            best_valid_loss=best_valid_loss,
+            global_step=loop_state.global_step,
+            loss=loop_state.avg_train_loss,
+            best_valid_loss=loop_state.best_valid_loss,
             config=train_config,
             optimizer=optimizer,
             discriminator=discriminator,
             disc_optimizer=disc_optimizer,
             last_completed_epoch=epoch,
-            pipeline_stage_index=active_stage_index,
-            pipeline_stage_name=active_stage_name,
+            pipeline_stage_index=loop_state.active_stage_index,
+            pipeline_stage_name=loop_state.active_stage_name,
             kind="epoch_end",
         )
         epoch_completed = epoch_saved or best_saved
         if epoch_saved:
-            last_completed_epoch = epoch
+            loop_state.last_completed_epoch = epoch
             _update_interrupt_state(
                 epoch,
-                avg_train_loss,
-                best_valid_loss,
+                loop_state.avg_train_loss,
+                loop_state.best_valid_loss,
                 batch_idx=num_train_batches,
-                global_step=global_step,
-                last_completed_epoch=last_completed_epoch,
-                pipeline_stage_index=active_stage_index,
-                pipeline_stage_name=active_stage_name,
+                global_step=loop_state.global_step,
+                last_completed_epoch=loop_state.last_completed_epoch,
+                pipeline_stage_index=loop_state.active_stage_index,
+                pipeline_stage_name=loop_state.active_stage_name,
             )
             _write_epoch_complete_marker(ckpt_dir, epoch, ckpt_path)
             print(f"  📦 Checkpoint saved: {ckpt_path.name}")
@@ -2801,26 +2805,26 @@ def train(
     def _run_final_validation() -> float:
         return _run_validation(
             _valid_ctx,
-            epoch=final_epoch,
-            global_step=global_step,
-            epoch_awesome_loss_weight=epoch_awesome_loss_weight,
-            epoch_vad_loss_weight=epoch_vad_loss_weight,
-            epoch_vad_speech_loss_weight=epoch_vad_speech_loss_weight,
-            active_stage_index=active_stage_index,
-            active_stage_name=active_stage_name,
-            train_mode=train_mode or "EAGER",
+            epoch=loop_state.final_epoch,
+            global_step=loop_state.global_step,
+            epoch_awesome_loss_weight=loop_state.epoch_awesome_loss_weight,
+            epoch_vad_loss_weight=loop_state.epoch_vad_loss_weight,
+            epoch_vad_speech_loss_weight=loop_state.epoch_vad_speech_loss_weight,
+            active_stage_index=loop_state.active_stage_index,
+            active_stage_name=loop_state.active_stage_name,
+            train_mode=loop_state.train_mode or "EAGER",
             label="  Final validation",
             do_vad_eval=vad_eval_enabled,
         )
 
     finalize_training(
-        final_epoch=final_epoch,
-        global_step=global_step,
-        avg_train_loss=avg_train_loss,
-        best_valid_loss=best_valid_loss,
-        last_completed_epoch=last_completed_epoch,
-        last_valid_epoch=last_valid_epoch,
-        last_valid_loss=last_valid_loss,
+        final_epoch=loop_state.final_epoch,
+        global_step=loop_state.global_step,
+        avg_train_loss=loop_state.avg_train_loss,
+        best_valid_loss=loop_state.best_valid_loss,
+        last_completed_epoch=loop_state.last_completed_epoch,
+        last_valid_epoch=loop_state.last_valid_epoch,
+        last_valid_loss=loop_state.last_valid_loss,
         model=model,
         optimizer=optimizer,
         state=state,
@@ -2828,8 +2832,8 @@ def train(
         disc_optimizer=disc_optimizer,
         ckpt_dir=ckpt_dir,
         train_config=train_config,
-        active_stage_index=active_stage_index,
-        active_stage_name=active_stage_name,
+        active_stage_index=loop_state.active_stage_index,
+        active_stage_name=loop_state.active_stage_name,
         tqdm_setup_panel=tqdm_setup_panel,
         run_validation_fn=_run_final_validation,
     )

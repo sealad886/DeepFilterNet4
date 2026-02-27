@@ -2,9 +2,46 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import mlx.core as mx
+
+
+@dataclass
+class TrainingLoopState:
+    """Mutable state that evolves during the training loop.
+
+    Unlike TrainingSession (which holds session-level setup),
+    this dataclass tracks variables that change during epoch iteration:
+    counters, best-loss tracking, stage management, and mode flags.
+    """
+
+    # Counters
+    global_step: int = 0
+    final_epoch: int = 0
+    last_completed_epoch: int = -1
+
+    # Validation / early-stopping
+    best_valid_loss: float = float("inf")
+    epochs_without_improvement: int = 0
+    avg_train_loss: float = float("nan")
+    last_valid_loss: float | None = None
+    last_valid_epoch: int | None = None
+
+    # Pipeline stage
+    active_stage_name: str = ""
+    active_stage_index: int = 0
+
+    # Per-epoch weights (from pipeline stage)
+    epoch_awesome_loss_weight: float = 0.0
+    epoch_vad_loss_weight: float = 0.0
+    epoch_vad_speech_loss_weight: float = 0.0
+
+    # Mode flags
+    train_mode: str | None = None  # "COMPILED" | "EAGER" | None
+    gan_active: bool = False
+    compiled_gan_correctness_verified: bool = False
 
 
 def build_setup_panel_line(
