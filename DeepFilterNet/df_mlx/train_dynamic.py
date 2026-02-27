@@ -171,9 +171,11 @@ from df_mlx.training_diagnostics import (  # noqa: E402, F401
     diagnose_nonfinite as _diagnose_nonfinite_impl,
 )
 from df_mlx.training_setup import (  # noqa: E402
+    DatasetSetupResult,
     build_train_config,
     print_epoch_summary,
     print_training_config,
+    setup_dataset,
     setup_gan,
 )
 from df_mlx.training_validation import (  # noqa: E402, F401
@@ -539,118 +541,40 @@ def train(
     if verbose:
         print_hardware_diagnostics()
 
-    # Load or create config
-    if cache_dir:
-        if str(cache_dir).startswith("hf://"):
-            import json
-
-            from huggingface_hub import HfFileSystem
-
-            fs = HfFileSystem()
-            normalized_cache_dir = normalize_hf_dataset_cache_dir(str(cache_dir))
-            hf_path = hf_dataset_fsspec_path(normalized_cache_dir)
-            config_file = f"{hf_path}/config.json"
-            if fs.exists(config_file):
-                with fs.open(config_file, "r") as f:
-                    data = json.load(f)
-                if "cache_dir" in data:
-                    data["cache_dir"] = data["cache_dir"]
-                config = DatasetConfig(
-                    **{k: v for k, v in data.items() if hasattr(DatasetConfig, k) or k == "cache_dir"}
-                )
-                config.cache_dir = normalized_cache_dir
-                print(f"Loaded config from HF cache: {normalized_cache_dir}")
-            else:
-                raise ValueError(f"Cache config not found in HF repo: {config_file}")
-        else:
-            # Load config from pre-built audio cache
-            cache_path = Path(cache_dir).expanduser().resolve()
-            config_file = cache_path / "config.json"
-            if config_file.exists():
-                config = DatasetConfig.from_json(str(config_file))
-                config.cache_dir = cache_dir
-                print(f"Loaded config from cache: {cache_dir}")
-            else:
-                raise ValueError(f"Cache config not found: {config_file}")
-    elif config_path:
-        config = DatasetConfig.from_json(config_path)
-        print(f"Loaded config from: {config_path}")
-    else:
-        if not speech_list:
-            raise ValueError("Either --cache-dir, --config, or --speech-list required")
-
-        speech_files = read_file_list(speech_list)
-        noise_files = read_file_list(noise_list) if noise_list else []
-        rir_files = read_file_list(rir_list) if rir_list else []
-
-        config = DatasetConfig(
-            speech_files=speech_files,
-            noise_files=noise_files,
-            rir_files=rir_files,
-            p_reverb=p_reverb,
-            p_clipping=p_clipping,
-            num_workers=num_workers,
-        )
-
-    # Apply train-config dataset overrides before CLI/runtime overrides
-    if dataset_overrides:
-        for key, value in dataset_overrides.items():
-            if hasattr(config, key):
-                setattr(config, key, value)
-            else:
-                print(f"Warning: train-config dataset override ignored: {key}")
-
-    if snr_range is not None:
-        config.snr_range = snr_range
-    if snr_range_extreme is not None:
-        config.snr_range_extreme = snr_range_extreme
-    if snr_range_very_low is not None:
-        config.snr_range_very_low = snr_range_very_low
-    if p_extreme_snr is not None:
-        config.p_extreme_snr = p_extreme_snr
-    if p_very_low_snr is not None:
-        config.p_very_low_snr = p_very_low_snr
-    if p_interfer_speech is not None:
-        config.p_interfer_speech = p_interfer_speech
-    if speech_gain_range is not None:
-        config.speech_gain_range = speech_gain_range
-    if noise_gain_range is not None:
-        config.noise_gain_range = noise_gain_range
-
-    # Numeric debug mode overrides (deterministic, short runs)
-    if debug_numerics:
-        # NOTE: do NOT override epochs here.  The max_train_batches cap
-        # already limits per-epoch work, and forcing epochs=1 breaks
-        # checkpoint resume when start_epoch > 0.
-        if max_train_batches is None:
-            max_train_batches = 50
-        if max_valid_batches is None:
-            max_valid_batches = 10
-        if eval_frequency != 1:
-            print(f"  Debug numerics: overriding eval_frequency {eval_frequency} -> 1")
-            eval_frequency = 1
-        if num_workers != 0:
-            print(f"  Debug numerics: overriding num_workers {num_workers} -> 0")
-            num_workers = 0
-        if prefetch_size != 1:
-            print(f"  Debug numerics: overriding prefetch_size {prefetch_size} -> 1")
-            prefetch_size = 1
-        if use_mlx_data:
-            print("  Debug numerics: disabling mlx-data for deterministic loading")
-            use_mlx_data = False
-
-    # RNG seeding (optional, default only in debug mode)
-    if seed is None and debug_numerics:
-        seed = getattr(config, "seed", 42)
-    if seed is not None:
-        config.seed = seed
-        random.seed(seed)
-        np.random.seed(seed)
-        mx.random.seed(seed)
-        print(f"  RNG seed set to {seed}")
-
-    # Keep dataset config aligned with CLI worker setting
-    config.num_workers = num_workers
+    ds_result = setup_dataset(
+        cache_dir=cache_dir,
+        config_path=config_path,
+        speech_list=speech_list,
+        noise_list=noise_list,
+        rir_list=rir_list,
+        p_reverb=p_reverb,
+        p_clipping=p_clipping,
+        num_workers=num_workers,
+        dataset_overrides=dataset_overrides,
+        snr_range=snr_range,
+        snr_range_extreme=snr_range_extreme,
+        snr_range_very_low=snr_range_very_low,
+        p_extreme_snr=p_extreme_snr,
+        p_very_low_snr=p_very_low_snr,
+        p_interfer_speech=p_interfer_speech,
+        speech_gain_range=speech_gain_range,
+        noise_gain_range=noise_gain_range,
+        debug_numerics=debug_numerics,
+        max_train_batches=max_train_batches,
+        max_valid_batches=max_valid_batches,
+        eval_frequency=eval_frequency,
+        prefetch_size=prefetch_size,
+        use_mlx_data=use_mlx_data,
+        seed=seed,
+    )
+    config = ds_result.config
+    seed = ds_result.seed
+    max_train_batches = ds_result.max_train_batches
+    max_valid_batches = ds_result.max_valid_batches
+    eval_frequency = ds_result.eval_frequency
+    num_workers = ds_result.num_workers
+    prefetch_size = ds_result.prefetch_size
+    use_mlx_data = ds_result.use_mlx_data
 
     # Create dataset (this populates config.*_files from cache index if using cache)
     print("\nInitializing dynamic dataset...")
