@@ -21,10 +21,11 @@ import pytest
 # ---------------------------------------------------------------------------
 
 TRAIN_DYNAMIC_PATH = Path(__file__).parent.parent / "df_mlx" / "train_dynamic.py"
+TRAINING_METRICS_PATH = Path(__file__).parent.parent / "df_mlx" / "training_metrics.py"
 
 
 def _read_source() -> str:
-    return TRAIN_DYNAMIC_PATH.read_text()
+    return TRAIN_DYNAMIC_PATH.read_text() + "\n" + TRAINING_METRICS_PATH.read_text()
 
 
 def _parse_module() -> ast.Module:

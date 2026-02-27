@@ -92,6 +92,7 @@ from df_mlx.training_cli import (  # noqa: E402, F401
 from df_mlx.training_cli_main import main  # noqa: E402, F401
 from df_mlx.training_helpers import build_setup_panel_line as _build_setup_panel_line_impl  # noqa: E402, F401
 from df_mlx.training_helpers import clip_gan_scores as _clip_gan_scores_impl
+from df_mlx.training_metrics import collect_sync_metrics, create_epoch_accums, update_progress_bar
 from df_mlx.training_helpers import curriculum_schedule as _curriculum_schedule_impl
 from df_mlx.training_helpers import is_vad_train_reg_enabled as _is_vad_train_reg_enabled_impl
 from df_mlx.training_helpers import (  # noqa: E402
@@ -1994,44 +1995,9 @@ def train(
         # ====== Training ======
         model.train()
         train_loss = 0.0
-        train_spec_loss = 0.0
-        train_mrstft_loss = 0.0
-        train_gan_g_loss = 0.0
         train_gan_d_loss = 0.0
-        train_gan_fm_loss = 0.0
         train_gan_d_updates = 0
-        train_vad_loss = 0.0
-        train_speech_loss = 0.0
-        train_awesome_loss = 0.0
-        train_awesome_speech = 0.0
-        train_awesome_noise = 0.0
-        train_awesome_smooth = 0.0
-        train_music_supp_loss = 0.0
-        train_mask_sat_loss = 0.0
-        train_vad_reg_loss = 0.0
-        train_mask_mean = 0.0
-        train_mask_high = 0.0
-        train_mask_low = 0.0
-        train_proxy_mean = 0.0
-        train_speech_ratio = 0.0
-        train_music_gate = 0.0
-        train_musicness = 0.0
-        train_mod_energy = 0.0
-        train_energy_boost = 0.0
-        train_snr_boost = 0.0
-        train_p_ref = 0.0
-        train_p_out = 0.0
-        train_gate_pct = 0.0
-        train_mask_logit_min = float("inf")
-        train_mask_logit_max = float("-inf")
-        train_mask_clip_rate = 0.0
-        train_eps_clean_rate = 0.0
-        train_eps_noise_rate = 0.0
-        train_vad_clip_ref = 0.0
-        train_vad_clip_out = 0.0
-        num_debug_logs = 0
-        num_vad_logs = 0
-        num_awesome_logs = 0
+        _epoch_accums = create_epoch_accums()
         partial_batch_fallbacks = 0
         partial_batch_warning_emitted = False
         num_train_batches = 0
@@ -2647,459 +2613,80 @@ def train(
                 window_samples = 0
                 window_start = time.perf_counter()
 
-                # Defaults for logging
-                spec_loss_val = loss_val
-                mrstft_loss_val = 0.0
-                gan_g_loss_val = 0.0
-                gan_fm_loss_val = 0.0
-                vad_loss_val = 0.0
-                speech_loss_val = 0.0
-                p_ref_mean = 0.0
-                p_out_mean = 0.0
-                gate_pct = 0.0
-                awesome_loss_val = 0.0
-                awesome_speech_val = 0.0
-                awesome_noise_val = 0.0
-                awesome_smooth_val = 0.0
-                mask_mean = 0.0
-                mask_high = 0.0
-                mask_low = 0.0
-                proxy_mean = 0.0
-                speech_ratio_mean = 0.0
-                music_gate_mean = 0.0
-                musicness_mean = 0.0
-                mod_energy_mean = 0.0
-                energy_boost_mean = 0.0
-                snr_boost_mean = 0.0
-                vad_reg_loss_val = 0.0
-
-                # Compute model output for any metric block that needs it.
-                # This must be outside the emit_detailed_metrics guard because
-                # use_vad_loss / use_awesome_loss / use_pipeline_awesome_loss
-                # reference out[0]/out[1] regardless of sync mode.
-                # Skip entirely when the loss was non-finite — model output
-                # contains NaN so all metric computations would be garbage
-                # and debug checks would crash with fail_fast=True.
-                needs_model_out = not _loss_was_nonfinite and (
-                    use_vad_loss
-                    or use_awesome_loss
-                    or use_pipeline_awesome_loss
-                    or use_vad_train_reg
-                    or (emit_detailed_metrics and (use_mrstft_loss or gan_active))
+                _display = collect_sync_metrics(
+                    noisy_real=noisy_real,
+                    noisy_imag=noisy_imag,
+                    clean_real=clean_real,
+                    clean_imag=clean_imag,
+                    snr=snr,
+                    model=model,
+                    feat_erb=feat_erb,
+                    feat_spec=feat_spec,
+                    pred_spec_for_logging=pred_spec_for_logging,
+                    loss_val=loss_val,
+                    loss_was_nonfinite=_loss_was_nonfinite,
+                    epoch_eval_frequency=epoch_eval_frequency,
+                    use_mrstft_loss=use_mrstft_loss,
+                    use_vad_loss=use_vad_loss,
+                    use_awesome_loss=use_awesome_loss,
+                    use_pipeline_awesome_loss=use_pipeline_awesome_loss,
+                    use_vad_train_reg=use_vad_train_reg,
+                    use_fp16=use_fp16,
+                    gan_active=gan_active,
+                    emit_detailed_metrics=emit_detailed_metrics,
+                    apply_vad_reg=apply_vad_reg,
+                    debug_numerics=debug_numerics,
+                    speech_weight=speech_weight,
+                    spectral_loss_fn=spectral_loss,
+                    mrstft_loss_fn=mrstft_loss_fn,
+                    mrstft_istft=mrstft_istft,
+                    mrstft_target_len=mrstft_target_len,
+                    discriminator=discriminator,
+                    feature_match_loss=feature_match_loss,
+                    gan_loss_fns=gan_loss_fns,
+                    gan_istft=gan_istft,
+                    gan_fm_weight=gan_fm_weight,
+                    gan_disc_max_samples=gan_disc_max_samples,
+                    gan_target_len=gan_target_len,
+                    config_fft_size=config.fft_size,
+                    config_hop_size=config.hop_size,
+                    config_sample_rate=config.sample_rate,
+                    vad_band_mask=vad_band_mask,
+                    vad_band_bins=vad_band_bins,
+                    vad_threshold=vad_threshold,
+                    vad_margin=vad_margin,
+                    vad_snr_gate_db=vad_snr_gate_db,
+                    vad_snr_gate_width=vad_snr_gate_width,
+                    vad_z_threshold=vad_z_threshold,
+                    vad_z_slope=vad_z_slope,
+                    awesome_mask_sharpness=awesome_mask_sharpness,
+                    vad_proxy_enabled=vad_proxy_enabled,
+                    debugger=debugger,
+                    debug_ctx=debug_ctx,
+                    accums=_epoch_accums,
                 )
-                if needs_model_out:
-                    out = pred_spec_for_logging
-                    if out is None:
-                        out = model((noisy_real, noisy_imag), feat_erb, feat_spec, return_vad=True)
-                        if isinstance(out, tuple) and len(out) == 2 and isinstance(out[0], tuple):
-                            spec_out, _vad_logits = out
-                        else:
-                            spec_out = out
-                        out = (
-                            mx.stop_gradient(spec_out[0]),
-                            mx.stop_gradient(spec_out[1]),
-                        )
-                    else:
-                        spec_out = out
-                    if debugger is not None:
-                        debugger.check("model.out_real", spec_out[0], debug_ctx)
-                        debugger.check("model.out_imag", spec_out[1], debug_ctx)
 
-                if emit_detailed_metrics and needs_model_out:
-                    spec_loss = spectral_loss(spec_out, (clean_real, clean_imag))
-                    spec_loss_val = float(spec_loss)
-                    train_spec_loss += spec_loss_val * epoch_eval_frequency
-                    if use_mrstft_loss and mrstft_loss_fn is not None and mrstft_istft is not None:
-                        mrstft_loss_val = float(
-                            compute_mrstft_loss(
-                                spec_out,
-                                (clean_real, clean_imag),
-                                istft_fn=mrstft_istft,
-                                loss_fn=mrstft_loss_fn,
-                                n_fft=config.fft_size,
-                                hop_length=config.hop_size,
-                                target_len=mrstft_target_len,
-                                force_fp32=True,
-                            )
-                        )
-                        train_mrstft_loss += mrstft_loss_val * epoch_eval_frequency
-                    if gan_active and gan_loss_fns is not None and discriminator is not None and gan_istft is not None:
-                        out_wav, clean_wav = specs_to_wavs(
-                            spec_out,
-                            (clean_real, clean_imag),
-                            istft_fn=gan_istft,
-                            n_fft=config.fft_size,
-                            hop_length=config.hop_size,
-                            target_len=gan_target_len,
-                            force_fp32=use_mrstft_loss,
-                        )
-                        out_wav = _gan_waveform_view(out_wav, use_fp16=bool(use_fp16))
-                        clean_wav = _gan_waveform_view(clean_wav, use_fp16=bool(use_fp16))
-                        gen_loss_fn, _ = gan_loss_fns
-                        disc_fake, fake_feats = discriminator(out_wav)
-                        disc_real, real_feats = discriminator(clean_wav)
-                        disc_fake = _clip_gan_scores(disc_fake)
-                        gan_g_loss_val = float(gen_loss_fn(disc_fake))
-                        train_gan_g_loss += gan_g_loss_val * epoch_eval_frequency
-                        if feature_match_loss is not None and gan_fm_weight > 0:
-                            gan_fm_loss_val = float(feature_match_loss(real_feats, fake_feats))
-                            train_gan_fm_loss += gan_fm_loss_val * epoch_eval_frequency
-
-                if use_vad_loss and needs_model_out:
-                    vad_loss, p_ref, p_out, gate = _compute_vad_loss(
-                        clean_real,
-                        clean_imag,
-                        spec_out[0],
-                        spec_out[1],
-                        snr,
-                        vad_band_mask,
-                        vad_band_bins,
-                        vad_threshold,
-                        vad_margin,
-                        vad_snr_gate_db,
-                        vad_snr_gate_width,
-                        vad_z_threshold,
-                        vad_z_slope,
-                        debug=debugger,
-                        debug_ctx=debug_ctx,
-                    )
-                    speech_loss = _SCALAR_ZERO
-                    if speech_weight > 0:
-                        speech_loss = _compute_speech_band_logmag_loss(
-                            clean_real,
-                            clean_imag,
-                            spec_out[0],
-                            spec_out[1],
-                            vad_band_mask,
-                            vad_band_bins,
-                            gate,
-                            debug=debugger,
-                            debug_ctx=debug_ctx,
-                        )
-                    _p_ref_m = mx.mean(p_ref)
-                    _p_out_m = mx.mean(p_out)
-                    _gate_m = mx.mean(mx.where(gate > 0.0, 1.0, 0.0))
-                    (
-                        vad_loss_val,
-                        speech_loss_val,
-                        p_ref_mean,
-                        p_out_mean,
-                        _gate_f,
-                    ) = _batch_to_float(vad_loss, speech_loss, _p_ref_m, _p_out_m, _gate_m)
-                    gate_pct = 100.0 * _gate_f
-
-                    train_vad_loss += vad_loss_val * epoch_eval_frequency
-                    train_speech_loss += speech_loss_val * epoch_eval_frequency
-                    train_p_ref += p_ref_mean
-                    train_p_out += p_out_mean
-                    train_gate_pct += gate_pct
-                    num_vad_logs += 1
-
-                    if debug_numerics:
-                        clean_power_dbg = clean_real.astype(mx.float32) ** 2 + clean_imag.astype(mx.float32) ** 2
-                        out_power_dbg = spec_out[0].astype(mx.float32) ** 2 + spec_out[1].astype(mx.float32) ** 2
-                        clean_band_dbg = mx.sum(clean_power_dbg * vad_band_mask, axis=-1) / (vad_band_bins + _EPS)
-                        out_band_dbg = mx.sum(out_power_dbg * vad_band_mask, axis=-1) / (vad_band_bins + _EPS)
-                        log_clean_dbg = mx.log10(clean_band_dbg + _EPS)
-                        mu_dbg = mx.mean(log_clean_dbg, axis=1, keepdims=True)
-                        sigma_dbg = mx.sqrt(mx.mean((log_clean_dbg - mu_dbg) ** 2, axis=1, keepdims=True) + _EPS)
-                        z_ref_dbg = (log_clean_dbg - mu_dbg) / (sigma_dbg + _EPS)
-                        z_out_dbg = (mx.log10(out_band_dbg + _EPS) - mu_dbg) / (sigma_dbg + _EPS)
-                        clip_ref = 100.0 * float(mx.mean(mx.where(mx.abs(z_ref_dbg) > _VAD_LOGIT_CLAMP, 1.0, 0.0)))
-                        clip_out = 100.0 * float(mx.mean(mx.where(mx.abs(z_out_dbg) > _VAD_LOGIT_CLAMP, 1.0, 0.0)))
-                        train_vad_clip_ref += clip_ref
-                        train_vad_clip_out += clip_out
-
-                if use_awesome_loss and needs_model_out:
-                    (
-                        awesome_loss,
-                        awesome_speech,
-                        awesome_noise,
-                        awesome_smooth,
-                        mask,
-                        proxy_frame,
-                        speech_ratio,
-                        music_gate,
-                        musicness,
-                        mod_energy,
-                        energy_boost,
-                        snr_boost,
-                    ) = _compute_awesome_losses(
-                        noisy_real,
-                        noisy_imag,
-                        clean_real,
-                        clean_imag,
-                        spec_out[0],
-                        spec_out[1],
-                        snr,
-                        vad_band_mask,
-                        vad_band_bins,
-                        awesome_mask_sharpness,
-                        vad_z_threshold,
-                        vad_z_slope,
-                        vad_snr_gate_db,
-                        vad_snr_gate_width,
-                        vad_proxy_enabled,
-                        debug=debugger,
-                        debug_ctx=debug_ctx,
-                    )
-                    _mask_m = mx.mean(mask)
-                    _mask_hi = mx.mean(mx.where(mask > 0.8, 1.0, 0.0))
-                    _mask_lo = mx.mean(mx.where(mask < 0.2, 1.0, 0.0))
-                    _proxy_m = mx.mean(proxy_frame)
-                    _sr_m = mx.mean(speech_ratio)
-                    _mg_m = mx.mean(music_gate)
-                    _mu_m = mx.mean(musicness)
-                    _me_m = mx.mean(mod_energy)
-                    _eb_m = mx.mean(energy_boost)
-                    _sb_m = mx.mean(snr_boost)
-                    (
-                        awesome_loss_val,
-                        awesome_speech_val,
-                        awesome_noise_val,
-                        awesome_smooth_val,
-                        mask_mean,
-                        mask_high,
-                        mask_low,
-                        proxy_mean,
-                        speech_ratio_mean,
-                        music_gate_mean,
-                        musicness_mean,
-                        mod_energy_mean,
-                        energy_boost_mean,
-                        snr_boost_mean,
-                    ) = _batch_to_float(
-                        awesome_loss,
-                        awesome_speech,
-                        awesome_noise,
-                        awesome_smooth,
-                        _mask_m,
-                        _mask_hi,
-                        _mask_lo,
-                        _proxy_m,
-                        _sr_m,
-                        _mg_m,
-                        _mu_m,
-                        _me_m,
-                        _eb_m,
-                        _sb_m,
-                    )
-                    mask_high *= 100.0
-                    mask_low *= 100.0
-
-                    train_awesome_loss += awesome_loss_val * epoch_eval_frequency
-                    train_awesome_speech += awesome_speech_val * epoch_eval_frequency
-                    train_awesome_noise += awesome_noise_val * epoch_eval_frequency
-                    train_awesome_smooth += awesome_smooth_val * epoch_eval_frequency
-                    train_mask_mean += mask_mean
-                    train_mask_high += mask_high
-                    train_mask_low += mask_low
-                    train_proxy_mean += proxy_mean
-                    train_speech_ratio += speech_ratio_mean
-                    train_music_gate += music_gate_mean
-                    train_musicness += musicness_mean
-                    train_mod_energy += mod_energy_mean
-                    train_energy_boost += energy_boost_mean
-                    train_snr_boost += snr_boost_mean
-                    num_awesome_logs += 1
-
-                    if debug_numerics:
-                        clean_power_dbg = clean_real.astype(mx.float32) ** 2 + clean_imag.astype(mx.float32) ** 2
-                        noise_real_dbg = noisy_real.astype(mx.float32) - clean_real.astype(mx.float32)
-                        noise_imag_dbg = noisy_imag.astype(mx.float32) - clean_imag.astype(mx.float32)
-                        noise_power_dbg = noise_real_dbg**2 + noise_imag_dbg**2
-                        clean_band_dbg = mx.sum(clean_power_dbg * vad_band_mask, axis=-1) / (vad_band_bins + _EPS)
-                        noise_band_dbg = mx.sum(noise_power_dbg * vad_band_mask, axis=-1) / (vad_band_bins + _EPS)
-                        mask_logits_raw = awesome_mask_sharpness * (
-                            _log1p_mag(clean_real, clean_imag) - _log1p_mag(noise_real_dbg, noise_imag_dbg)
-                        )
-                        mask_logit_min = float(mx.min(mask_logits_raw))
-                        mask_logit_max = float(mx.max(mask_logits_raw))
-                        mask_clip_rate = 100.0 * float(
-                            mx.mean(mx.where(mx.abs(mask_logits_raw) > _AWESOME_MASK_LOGIT_CLAMP, 1.0, 0.0))
-                        )
-                        clean_eps_rate = 100.0 * float(mx.mean(mx.where(clean_band_dbg <= _EPS, 1.0, 0.0)))
-                        noise_eps_rate = 100.0 * float(mx.mean(mx.where(noise_band_dbg <= _EPS, 1.0, 0.0)))
-                        train_mask_logit_min = min(train_mask_logit_min, mask_logit_min)
-                        train_mask_logit_max = max(train_mask_logit_max, mask_logit_max)
-                        train_mask_clip_rate += mask_clip_rate
-                        train_eps_clean_rate += clean_eps_rate
-                        train_eps_noise_rate += noise_eps_rate
-                        num_debug_logs += 1
-
-                if use_pipeline_awesome_loss and needs_model_out:
-                    (
-                        awesome_loss,
-                        awesome_speech,
-                        awesome_noise,
-                        awesome_smooth,
-                        music_supp_loss,
-                        mask_sat_loss,
-                        mask,
-                        proxy_frame,
-                        speech_ratio,
-                        music_gate,
-                        musicness,
-                        vocal_gate,
-                        instrument_gate,
-                        mod_energy,
-                        energy_boost,
-                        snr_boost,
-                    ) = _compute_pipeline_awesome_losses(
-                        noisy_real,
-                        noisy_imag,
-                        clean_real,
-                        clean_imag,
-                        out[0],
-                        out[1],
-                        snr,
-                        vad_band_mask,
-                        vad_band_bins,
-                        awesome_mask_sharpness,
-                        vad_z_threshold,
-                        vad_z_slope,
-                        vad_snr_gate_db,
-                        vad_snr_gate_width,
-                        vad_proxy_enabled,
-                        debug=debugger,
-                        debug_ctx=debug_ctx,
-                    )
-                    _mask_m = mx.mean(mask)
-                    _mask_hi = mx.mean(mx.where(mask > 0.8, 1.0, 0.0))
-                    _mask_lo = mx.mean(mx.where(mask < 0.2, 1.0, 0.0))
-                    _proxy_m = mx.mean(proxy_frame)
-                    _sr_m = mx.mean(speech_ratio)
-                    _mg_m = mx.mean(music_gate)
-                    _mu_m = mx.mean(musicness)
-                    _me_m = mx.mean(mod_energy)
-                    _eb_m = mx.mean(energy_boost)
-                    _sb_m = mx.mean(snr_boost)
-                    (
-                        awesome_loss_val,
-                        awesome_speech_val,
-                        awesome_noise_val,
-                        awesome_smooth_val,
-                        music_supp_loss_val,
-                        mask_sat_loss_val,
-                        mask_mean,
-                        mask_high,
-                        mask_low,
-                        proxy_mean,
-                        speech_ratio_mean,
-                        music_gate_mean,
-                        musicness_mean,
-                        mod_energy_mean,
-                        energy_boost_mean,
-                        snr_boost_mean,
-                    ) = _batch_to_float(
-                        awesome_loss,
-                        awesome_speech,
-                        awesome_noise,
-                        awesome_smooth,
-                        music_supp_loss,
-                        mask_sat_loss,
-                        _mask_m,
-                        _mask_hi,
-                        _mask_lo,
-                        _proxy_m,
-                        _sr_m,
-                        _mg_m,
-                        _mu_m,
-                        _me_m,
-                        _eb_m,
-                        _sb_m,
-                    )
-                    mask_high *= 100.0
-                    mask_low *= 100.0
-
-                    train_awesome_loss += awesome_loss_val * epoch_eval_frequency
-                    train_awesome_speech += awesome_speech_val * epoch_eval_frequency
-                    train_awesome_noise += awesome_noise_val * epoch_eval_frequency
-                    train_awesome_smooth += awesome_smooth_val * epoch_eval_frequency
-                    train_music_supp_loss += music_supp_loss_val * epoch_eval_frequency
-                    train_mask_sat_loss += mask_sat_loss_val * epoch_eval_frequency
-                    train_mask_mean += mask_mean
-                    train_mask_high += mask_high
-                    train_mask_low += mask_low
-                    train_proxy_mean += proxy_mean
-                    train_speech_ratio += speech_ratio_mean
-                    train_music_gate += music_gate_mean
-                    train_musicness += musicness_mean
-                    train_mod_energy += mod_energy_mean
-                    train_energy_boost += energy_boost_mean
-                    train_snr_boost += snr_boost_mean
-                    num_awesome_logs += 1
-
-                if use_vad_train_reg and apply_vad_reg and needs_model_out:
-                    vad_reg_loss, vad_dec, gate, _, _, _, _ = _compute_vad_reg_loss(
-                        clean_real,
-                        clean_imag,
-                        noisy_real,
-                        noisy_imag,
-                        out[0],
-                        out[1],
-                        snr,
-                        vad_band_mask,
-                        vad_band_bins,
-                        vad_threshold,
-                        vad_margin,
-                        vad_z_threshold,
-                        vad_z_slope,
-                        vad_snr_gate_db,
-                        vad_snr_gate_width,
-                        debug=debugger,
-                        debug_ctx=debug_ctx,
-                    )
-                    vad_reg_loss_val = float(vad_reg_loss)
-                    train_vad_reg_loss += vad_reg_loss_val * epoch_eval_frequency
-
-                if verbose:
-                    train_pbar.set_postfix(
-                        loss=f"{loss_val:.4f}",
-                        spec=(
-                            f"{spec_loss_val:.4f}"
-                            if (use_vad_loss or use_awesome_loss or use_pipeline_awesome_loss or use_vad_train_reg)
-                            else f"{loss_val:.4f}"
-                        ),
-                        mrstft=f"{mrstft_loss_val:.4f}" if use_mrstft_loss else "0.0000",
-                        gan_g=f"{gan_g_loss_val:.4f}" if gan_active else "0.0000",
-                        gan_d=f"{gan_d_loss_val:.4f}" if gan_active else "0.0000",
-                        fm=f"{gan_fm_loss_val:.4f}" if gan_active else "0.0000",
-                        vad=f"{vad_loss_val:.4f}" if use_vad_loss else "0.0000",
-                        speech=f"{speech_loss_val:.4f}" if use_vad_loss else "0.0000",
-                        awesome=(
-                            f"{awesome_loss_val:.4f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.0000"
-                        ),
-                        mask=(f"{mask_mean:.2f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.00"),
-                        lr=f"{lr:.1e}",
-                        data=f"{data_time * 1000:.0f}ms",
-                        fwd=f"{fwd_time * 1000:.0f}ms",
-                        spd=f"{samples_per_sec:.0f}/s",
-                        gstep=global_step,
-                    )
-                else:
-                    grad_display = f"{grad_norm:.2f}" if math.isfinite(grad_norm) else "n/a"
-                    train_pbar.set_postfix(
-                        loss=f"{loss_val:.4f}",
-                        avg=f"{train_loss / num_train_batches:.4f}",
-                        gan_g=f"{gan_g_loss_val:.4f}" if gan_active else "0.0000",
-                        gan_d=f"{gan_d_loss_val:.4f}" if gan_active else "0.0000",
-                        fm=f"{gan_fm_loss_val:.4f}" if gan_active else "0.0000",
-                        vad=f"{vad_loss_val:.4f}" if use_vad_loss else "0.0000",
-                        speech=f"{speech_loss_val:.4f}" if use_vad_loss else "0.0000",
-                        awesome=(
-                            f"{awesome_loss_val:.4f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.0000"
-                        ),
-                        mask=(f"{mask_mean:.2f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.00"),
-                        p_ref=f"{p_ref_mean:.2f}" if use_vad_loss else "0.00",
-                        p_out=f"{p_out_mean:.2f}" if use_vad_loss else "0.00",
-                        gate=f"{gate_pct:.0f}%" if use_vad_loss else "0%",
-                        vad_reg=f"{vad_reg_loss_val:.4f}" if use_vad_train_reg else "0.0000",
-                        lr=f"{lr:.1e}",
-                        grad=grad_display,
-                        spd=f"{samples_per_sec:.0f}/s",
-                        gstep=global_step,
-                    )
+                update_progress_bar(
+                    train_pbar,
+                    _display,
+                    loss_val=loss_val,
+                    train_loss=train_loss,
+                    num_train_batches=num_train_batches,
+                    gan_d_loss_val=gan_d_loss_val,
+                    lr=lr,
+                    grad_norm=grad_norm,
+                    samples_per_sec=samples_per_sec,
+                    data_time=data_time,
+                    fwd_time=fwd_time,
+                    global_step=global_step,
+                    verbose=verbose,
+                    use_mrstft_loss=use_mrstft_loss,
+                    use_vad_loss=use_vad_loss,
+                    use_awesome_loss=use_awesome_loss,
+                    use_pipeline_awesome_loss=use_pipeline_awesome_loss,
+                    use_vad_train_reg=use_vad_train_reg,
+                    gan_active=gan_active,
+                )
 
             # Save data checkpoint periodically (for resume capability)
             if checkpoint_batches > 0 and use_mlx_stream and train_stream is not None:
@@ -3155,38 +2742,38 @@ def train(
 
         _n = max(num_train_batches, 1)
         _n_d = max(train_gan_d_updates, 1)
-        _n_v = max(num_vad_logs, 1)
-        _n_a = max(num_awesome_logs, 1)
+        _n_v = max(_epoch_accums["num_vad_logs"], 1)
+        _n_a = max(_epoch_accums["num_awesome_logs"], 1)
         avg_train_loss = train_loss / _n
         epoch_avgs: dict[str, float] = {
             "loss": avg_train_loss,
-            "spec_loss": train_spec_loss / _n,
-            "mrstft_loss": train_mrstft_loss / _n,
-            "gan_g_loss": train_gan_g_loss / _n,
-            "gan_fm_loss": train_gan_fm_loss / _n,
+            "spec_loss": _epoch_accums["spec_loss"] / _n,
+            "mrstft_loss": _epoch_accums["mrstft_loss"] / _n,
+            "gan_g_loss": _epoch_accums["gan_g_loss"] / _n,
+            "gan_fm_loss": _epoch_accums["gan_fm_loss"] / _n,
             "gan_d_loss": train_gan_d_loss / _n_d,
-            "vad_loss": train_vad_loss / _n,
-            "speech_loss": train_speech_loss / _n,
-            "awesome_loss": train_awesome_loss / _n,
-            "awesome_speech": train_awesome_speech / _n,
-            "awesome_noise": train_awesome_noise / _n,
-            "awesome_smooth": train_awesome_smooth / _n,
-            "music_supp": train_music_supp_loss / _n,
-            "mask_sat": train_mask_sat_loss / _n,
-            "vad_reg_loss": train_vad_reg_loss / _n,
-            "p_ref": train_p_ref / _n_v,
-            "p_out": train_p_out / _n_v,
-            "gate": train_gate_pct / _n_v,
-            "mask_mean": train_mask_mean / _n_a,
-            "mask_high": train_mask_high / _n_a,
-            "mask_low": train_mask_low / _n_a,
-            "proxy": train_proxy_mean / _n_a,
-            "speech_ratio": train_speech_ratio / _n_a,
-            "music_gate": train_music_gate / _n_a,
-            "musicness": train_musicness / _n_a,
-            "mod": train_mod_energy / _n_a,
-            "energy_boost": train_energy_boost / _n_a,
-            "snr_boost": train_snr_boost / _n_a,
+            "vad_loss": _epoch_accums["vad_loss"] / _n,
+            "speech_loss": _epoch_accums["speech_loss"] / _n,
+            "awesome_loss": _epoch_accums["awesome_loss"] / _n,
+            "awesome_speech": _epoch_accums["awesome_speech"] / _n,
+            "awesome_noise": _epoch_accums["awesome_noise"] / _n,
+            "awesome_smooth": _epoch_accums["awesome_smooth"] / _n,
+            "music_supp": _epoch_accums["music_supp_loss"] / _n,
+            "mask_sat": _epoch_accums["mask_sat_loss"] / _n,
+            "vad_reg_loss": _epoch_accums["vad_reg_loss"] / _n,
+            "p_ref": _epoch_accums["p_ref"] / _n_v,
+            "p_out": _epoch_accums["p_out"] / _n_v,
+            "gate": _epoch_accums["gate_pct"] / _n_v,
+            "mask_mean": _epoch_accums["mask_mean"] / _n_a,
+            "mask_high": _epoch_accums["mask_high"] / _n_a,
+            "mask_low": _epoch_accums["mask_low"] / _n_a,
+            "proxy": _epoch_accums["proxy_mean"] / _n_a,
+            "speech_ratio": _epoch_accums["speech_ratio"] / _n_a,
+            "music_gate": _epoch_accums["music_gate"] / _n_a,
+            "musicness": _epoch_accums["musicness"] / _n_a,
+            "mod": _epoch_accums["mod_energy"] / _n_a,
+            "energy_boost": _epoch_accums["energy_boost"] / _n_a,
+            "snr_boost": _epoch_accums["snr_boost"] / _n_a,
         }
 
         # Print detailed timing breakdown in verbose mode
@@ -3302,15 +2889,15 @@ def train(
             gan_fm_weight=gan_fm_weight,
             verbose=verbose,
             debug_numerics=debug_numerics,
-            num_debug_logs=num_debug_logs,
-            train_mask_clip_rate=train_mask_clip_rate,
-            train_eps_clean_rate=train_eps_clean_rate,
-            train_eps_noise_rate=train_eps_noise_rate,
-            train_mask_logit_min=train_mask_logit_min,
-            train_mask_logit_max=train_mask_logit_max,
-            num_vad_logs=num_vad_logs,
-            train_vad_clip_ref=train_vad_clip_ref,
-            train_vad_clip_out=train_vad_clip_out,
+            num_debug_logs=_epoch_accums["num_debug_logs"],
+            train_mask_clip_rate=_epoch_accums["mask_clip_rate"],
+            train_eps_clean_rate=_epoch_accums["eps_clean_rate"],
+            train_eps_noise_rate=_epoch_accums["eps_noise_rate"],
+            train_mask_logit_min=_epoch_accums["mask_logit_min"],
+            train_mask_logit_max=_epoch_accums["mask_logit_max"],
+            num_vad_logs=_epoch_accums["num_vad_logs"],
+            train_vad_clip_ref=_epoch_accums["vad_clip_ref"],
+            train_vad_clip_out=_epoch_accums["vad_clip_out"],
         )
 
         # ====== Early Stopping / Curriculum Advance ======

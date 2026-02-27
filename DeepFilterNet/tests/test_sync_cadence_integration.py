@@ -18,9 +18,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 _DF_MLX_DIR = Path(__file__).resolve().parents[1] / "df_mlx"
 _train_src = (_DF_MLX_DIR / "train_dynamic.py").read_text()
 _cli_main_src = (_DF_MLX_DIR / "training_cli_main.py").read_text()
-# Combine both files so source-level grep tests cover the train() definition
-# AND the main() caller that was extracted to training_cli_main.py.
-TRAIN_SOURCE: str = _train_src + "\n" + _cli_main_src
+_metrics_src = (_DF_MLX_DIR / "training_metrics.py").read_text()
+# Combine all files so source-level grep tests cover the train() definition,
+# the main() caller (training_cli_main.py), and the extracted sync-window
+# metrics collection (training_metrics.py).
+TRAIN_SOURCE: str = _train_src + "\n" + _cli_main_src + "\n" + _metrics_src
 RUN_CONFIG_SOURCE: str = (_DF_MLX_DIR / "run_config.py").read_text()
 
 

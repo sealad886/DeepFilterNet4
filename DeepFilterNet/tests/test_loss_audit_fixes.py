@@ -416,12 +416,12 @@ class TestTrainDynamicRegularizerGates:
     def test_stage_speech_loss_uses_runtime_weight_gate_in_eager_metrics(self):
         import inspect
 
-        import df_mlx.train_dynamic as td
+        import df_mlx.training_metrics as tm
 
-        train_source = inspect.getsource(td.train)
+        metrics_source = inspect.getsource(tm.collect_sync_metrics)
         # Eager-side detailed metric logging may skip this expensive metric when
-        # speech weight is zero.
-        assert train_source.count("if speech_weight > 0:") == 1
+        # speech weight is zero.  The gate moved to training_metrics.collect_sync_metrics.
+        assert metrics_source.count("if speech_weight > 0:") == 1
         # The diagnostic check for vad_speech_loss_weight > 0 was moved to
         # training_diagnostics.py (DiagnosticContext pattern).  Verify it
         # exists there instead.
