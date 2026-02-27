@@ -53,7 +53,6 @@ import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
 import numpy as np
-from tqdm.auto import tqdm
 
 from df_mlx.hardware import print_hardware_diagnostics  # noqa: E402, F401
 from df_mlx.run_config import SyncMode
@@ -88,6 +87,7 @@ from df_mlx.training_cli import (  # noqa: E402, F401
     _resolve_pipeline_stage,
 )
 from df_mlx.training_cli_main import main  # noqa: E402, F401
+from df_mlx.training_dashboard import TrainingDashboard
 from df_mlx.training_losses import (  # noqa: E402, F401
     _AWESOME_ENERGY_BOOST_DB,
     _AWESOME_ENERGY_BOOST_WIDTH,
@@ -175,36 +175,19 @@ _SCALAR_ZERO = mx.array(0.0)
 _GAN_SCORE_ABS_CLIP = 30.0
 
 # =============================================================================
-# tqdm configuration
+# Dashboard configuration
 # =============================================================================
 # Write progress bars to stderr so stdout can be redirected to a log file without
-# capturing the progress bar spam. Also auto-disable tqdm when stderr isn't a TTY
+# capturing the progress bar spam. Also auto-disable dashboard when stderr isn't a TTY
 # (e.g., when piping/redirecting), which prevents log files from being flooded.
-_tqdm_env = os.getenv("DFNET_TQDM", "").strip().lower()
-if _tqdm_env in {"1", "true", "yes", "on"}:
-    _tqdm_disable = False
-elif _tqdm_env in {"0", "false", "no", "off"}:
-    _tqdm_disable = True
+_dashboard_env = os.getenv("DFNET_DASHBOARD", "").strip().lower()
+if _dashboard_env in {"1", "true", "yes", "on"}:
+    _dashboard_disable = False
+elif _dashboard_env in {"0", "false", "no", "off"}:
+    _dashboard_disable = True
 else:
     # Default: disable when stderr isn't interactive (prevents log spam when piped).
-    _tqdm_disable = not sys.stderr.isatty()
-
-_TQDM_KWARGS = {
-    "file": sys.stderr,
-    "disable": _tqdm_disable,
-    "mininterval": 1.0,
-    "maxinterval": 10.0,
-    "dynamic_ncols": True,
-}
-
-_tqdm_panels_env = os.getenv("DFNET_TQDM_PANELS", "").strip().lower()
-if _tqdm_panels_env in {"1", "true", "yes", "on"}:
-    _tqdm_panels = True
-elif _tqdm_panels_env in {"0", "false", "no", "off"}:
-    _tqdm_panels = False
-else:
-    # Default on interactive terminals only.
-    _tqdm_panels = not _tqdm_disable
+    _dashboard_disable = not sys.stderr.isatty()
 
 
 def _build_setup_panel_line(
@@ -874,31 +857,19 @@ def train(
             print("    - " + ", ".join(stage_parts))
     print("=" * 60)
 
-    tqdm_setup_panel = None
-    tqdm_train_position = 0
-    tqdm_valid_position = 0
-    if _tqdm_panels:
-        setup_line = _build_setup_panel_line(
-            epochs=epochs,
-            batch_size=batch_size,
-            learning_rate=learning_rate,
-            dynamic_loss=dynamic_loss,
-            gan_enabled=gan_enabled,
-            vad_enabled=vad_enabled,
-            checkpoint_dir=checkpoint_dir,
-            use_fp16=bool(use_fp16),
-        )
-        tqdm_setup_panel = tqdm(
-            total=1,
-            desc=setup_line,
-            bar_format="{desc}",
-            position=0,
-            leave=True,
-            **_TQDM_KWARGS,
-        )
-        tqdm_setup_panel.update(1)
-        tqdm_train_position = 1
-        tqdm_valid_position = 2
+    dashboard = TrainingDashboard(disable=_dashboard_disable)
+    setup_line = _build_setup_panel_line(
+        epochs=epochs,
+        batch_size=batch_size,
+        learning_rate=learning_rate,
+        dynamic_loss=dynamic_loss,
+        gan_enabled=gan_enabled,
+        vad_enabled=vad_enabled,
+        checkpoint_dir=checkpoint_dir,
+        use_fp16=bool(use_fp16),
+    )
+    dashboard.update_setup(setup_line)
+    dashboard.start()
 
     train_config = {
         **config.__dict__,
@@ -965,11 +936,11 @@ def train(
 
     dataset.set_split("train")
 
-    print(f"  Train samples: {len(dataset):,}")
+    dashboard.write(f"  Train samples: {len(dataset):,}")
 
     # Create validation dataset (with reproducible indices)
     dataset.set_split("valid")
-    print(f"  Valid samples: {len(dataset):,}")
+    dashboard.write(f"  Valid samples: {len(dataset):,}")
 
     # Reset to training
     dataset.set_split("train")
@@ -993,7 +964,7 @@ def train(
             check_grads=True,
         )
         debugger = NumericDebugger(debug_cfg)
-        print(
+        dashboard.write(
             "  Debug numerics: enabled "
             f"(fail_fast={'on' if debug_cfg.fail_fast else 'off'}, "
             f"every={debug_cfg.every}, dump_dir={debug_dump_dir})"
@@ -1004,14 +975,14 @@ def train(
     validation_report = None
     if check_chkpts:
         validation_report = validate_checkpoint_dir(ckpt_dir, strict=True, validate_load=True)
-        print(
+        dashboard.write(
             f"Checkpoint validation: total={validation_report['total']} "
             f"valid={validation_report['valid']} invalid={len(validation_report['invalid'])}"
         )
         if validation_report["latest_path"]:
-            print(f"  Latest valid checkpoint: {validation_report['latest_path']}")
+            dashboard.write(f"  Latest valid checkpoint: {validation_report['latest_path']}")
         if validation_report["latest_state"]:
-            print(
+            dashboard.write(
                 f"  last_completed_epoch={validation_report['last_completed_epoch']}, "
                 f"resume_epoch={validation_report['resume_epoch']}, "
                 f"resume_batch={validation_report['resume_batch']}, "
@@ -1023,9 +994,9 @@ def train(
     # Determine which data loader to use
     use_mlx_stream = use_mlx_data and HAS_MLX_DATA
     if use_mlx_data and not HAS_MLX_DATA:
-        print("  Note: mlx-data not available, using PrefetchDataLoader")
+        dashboard.write("  Note: mlx-data not available, using PrefetchDataLoader")
     elif use_mlx_stream:
-        print(f"  Using MLXDataStream (workers={num_workers}, prefetch={prefetch_size})")
+        dashboard.write(f"  Using MLXDataStream (workers={num_workers}, prefetch={prefetch_size})")
 
     # Create data stream/loader
     data_checkpoint_path = ckpt_dir / "data_checkpoint.json"
@@ -1043,10 +1014,10 @@ def train(
                 prefetch_size=prefetch_size,
                 num_workers=num_workers,
             )
-            print(f"  Resuming data from: {resume_data_from}")
+            dashboard.write(f"  Resuming data from: {resume_data_from}")
             data_resume_progress = train_stream.get_progress()
             data_resume_source = resume_data_from
-            print(
+            dashboard.write(
                 f"  Data checkpoint: epoch {data_resume_progress['epoch']}, " f"batch {data_resume_progress['batch']}"
             )
         elif data_checkpoint_path.exists():
@@ -1061,12 +1032,12 @@ def train(
                 )
                 data_resume_progress = train_stream.get_progress()
                 data_resume_source = str(data_checkpoint_path)
-                print(
+                dashboard.write(
                     "  Auto-resuming from data checkpoint: "
                     f"epoch {data_resume_progress['epoch']}, batch {data_resume_progress['batch']}"
                 )
             except Exception as e:
-                print(f"  Warning: Could not load data checkpoint: {e}")
+                dashboard.write(f"  Warning: Could not load data checkpoint: {e}")
                 train_stream = None
 
         if train_stream is None:
@@ -1082,15 +1053,15 @@ def train(
         _interrupt_state["train_stream"] = train_stream
 
     # Initialize model with config
-    print("\nInitializing model...")
+    dashboard.write("\nInitializing model...")
     if model_config is None:
         model_config = get_default_config()
     _sync_model_config_with_dataset(model_config, config)
     model_config.backbone.backbone_type = backbone_type  # type: ignore[assignment]
-    print(f"  Backbone type: {backbone_type} | Variant: {model_variant}")
+    dashboard.write(f"  Backbone type: {backbone_type} | Variant: {model_variant}")
     model = init_model(config=model_config, variant=model_variant)
     num_params = count_parameters(model)
-    print(f"  Parameters: {num_params:,}")
+    dashboard.write(f"  Parameters: {num_params:,}")
 
     # Counter semantics:
     # - micro_batches_per_epoch: number of dataloader micro-batches consumed per epoch
@@ -1107,7 +1078,7 @@ def train(
     optimizer_steps_per_epoch = micro_batches_per_epoch // grad_accumulation_steps
     if optimizer_steps_per_epoch < 1:
         optimizer_steps_per_epoch = 1
-        print(
+        dashboard.write(
             "Warning: "
             f"grad_accumulation_steps={grad_accumulation_steps} >= "
             f"micro_batches_per_epoch={micro_batches_per_epoch}; "
@@ -1178,22 +1149,21 @@ def train(
             if "pipeline_stages" in ckpt_config and ckpt_config["pipeline_stages"]:
                 pipeline_stage_defs.clear()
                 pipeline_stage_defs.extend(ckpt_config["pipeline_stages"])
-                print("  Restored dynamic pipeline stages from checkpoint.")
+                dashboard.write("  Restored dynamic pipeline stages from checkpoint.")
 
-            print(
+            dashboard.write(
                 "  Resumed from: "
                 f"{resume_from} (epoch {start_epoch}, kind={ckpt_kind}, "
                 f"last_completed={last_completed_epoch})"
             )
-            print(
+            dashboard.write(
                 "  Resume target: "
                 f"epoch {start_epoch + 1} (idx {start_epoch}), "
                 f"micro_batch {resume_batch_idx}, global_step {resume_global_step}"
             )
             if start_epoch >= epochs:
-                print(f"✅ Training already complete (checkpoint epoch {ckpt_epoch}/{epochs}).")
-                if tqdm_setup_panel is not None:
-                    tqdm_setup_panel.close()
+                dashboard.write(f"✅ Training already complete (checkpoint epoch {ckpt_epoch}/{epochs}).")
+                dashboard.stop()
                 return
 
     if validation_report and validation_report["last_completed_epoch"] > last_completed_epoch:
@@ -1230,7 +1200,7 @@ def train(
                     "Remediation: remove stale checkpoint artifacts and resume from a consistent pair."
                 )
             elif data_stage_index < resume_stage_index:
-                print(
+                dashboard.write(
                     "ℹ️  Auto-correcting data checkpoint stage: "
                     f"data={data_stage_index} → model={resume_stage_index}."
                 )
@@ -1249,7 +1219,7 @@ def train(
                 # mismatches.
                 batch_delta = abs(data_batch - resume_batch_idx)
                 if data_epoch == start_epoch and batch_delta <= 1:
-                    print(
+                    dashboard.write(
                         f"ℹ️  Auto-correcting data checkpoint batch position: "
                         f"data={data_batch} → model={resume_batch_idx} "
                         f"(delta={batch_delta}, epoch={start_epoch})."
@@ -1265,7 +1235,7 @@ def train(
         else:
             # Resuming from an epoch-boundary checkpoint should always restart at batch 0.
             if data_epoch != start_epoch or data_batch > 0:
-                print(
+                dashboard.write(
                     "ℹ️  Ignoring mid-epoch data checkpoint for epoch-boundary resume: "
                     f"data=(epoch={data_epoch}, micro_batch={data_batch}), resume_epoch={start_epoch}."
                 )
@@ -1276,7 +1246,7 @@ def train(
 
     if resume_from:
         lc_display = f"{last_completed_epoch + 1} (idx {last_completed_epoch})" if last_completed_epoch >= 0 else "none"
-        print(f"  last_completed_epoch: {lc_display}")
+        dashboard.write(f"  last_completed_epoch: {lc_display}")
 
     _interrupt_state["last_completed_epoch"] = last_completed_epoch
 
@@ -1494,7 +1464,7 @@ def train(
     _compiled_gan_correctness_verified = False
 
     if experimental_compiled_gan and gan_enabled:
-        print("  [EXPERIMENTAL] Compiled-GAN experiment enabled (gen-only, Variant B)")
+        dashboard.write("  [EXPERIMENTAL] Compiled-GAN experiment enabled (gen-only, Variant B)")
 
         def loss_fn_gan(
             model,
@@ -1700,7 +1670,7 @@ def train(
 
         diag_cfg = _dc_replace(debugger.config, fail_fast=False)
         diag = NumericDebugger(diag_cfg)
-        tqdm.write("  [diagnose] Running non-finite diagnostic pass...")
+        dashboard.write("  [diagnose] Running non-finite diagnostic pass...")
         findings: list[str] = []
 
         def _diag_check(name: str, tensor: mx.array) -> None:
@@ -1845,9 +1815,9 @@ def train(
             )
 
         if findings:
-            tqdm.write(f"  [diagnose] Non-finite in: {', '.join(findings)}")
+            dashboard.write(f"  [diagnose] Non-finite in: {', '.join(findings)}")
         else:
-            tqdm.write("  [diagnose] All individual components finite — NaN likely in backward pass")
+            dashboard.write("  [diagnose] All individual components finite — NaN likely in backward pass")
 
     # -- Compile-boundary shape guardrails ----------------------------------
     def _assert_compile_boundary_shapes(
@@ -1885,7 +1855,7 @@ def train(
         nonlocal _compile_retrace_count
         _compile_retrace_count += 1
         msg = f"[RETRACE WARNING #{_compile_retrace_count}] " f"Compiled function retrace detected. {context}"
-        tqdm.write(msg)
+        dashboard.write(msg)
 
     # Compiled training step for performance optimization
     # Captures model and optimizer state for graph tracing
@@ -2182,18 +2152,7 @@ def train(
                 prefetch_factor=2,
             )
 
-        valid_tqdm_kwargs = dict(_TQDM_KWARGS)
-        if _tqdm_panels:
-            valid_tqdm_kwargs["position"] = tqdm_valid_position
-
-        valid_pbar = tqdm(
-            valid_loader,
-            total=valid_steps,
-            desc=label,
-            unit="batch",
-            leave=False,
-            **valid_tqdm_kwargs,
-        )
+        dashboard.start_valid(total=valid_steps, description=label)
 
         sisdr_fn = None
         if eval_sisdr:
@@ -2208,7 +2167,7 @@ def train(
 
             silero_istft = istft
 
-        for batch_idx, batch in enumerate(valid_pbar):
+        for batch_idx, batch in enumerate(valid_loader):
             noisy_real = batch["noisy_real"]
             noisy_imag = batch["noisy_imag"]
             clean_real = batch["clean_real"]
@@ -2616,17 +2575,15 @@ def train(
                 if math.isfinite(sisdr_val):
                     valid_sisdr += sisdr_val
                 else:
-                    print("⚠️  SI-SDR non-finite; skipping metric for this batch")
+                    dashboard.write("⚠️  SI-SDR non-finite; skipping metric for this batch")
 
-            valid_pbar.set_postfix(
-                loss=f"{loss_val:.4f}",
-                avg=f"{valid_loss / num_valid_batches:.4f}",
+            dashboard.update_valid(
+                advance=1,
+                metrics=f"loss={loss_val:.4f} avg={valid_loss / num_valid_batches:.4f}",
             )
 
             if max_valid_batches is not None and (batch_idx + 1) >= max_valid_batches:
                 break
-
-        valid_pbar.close()
 
         if num_valid_batches > 0:
             avg_spec = valid_spec_loss / num_valid_batches
@@ -2728,7 +2685,7 @@ def train(
                         extras.append(f"vad_eval_clips={vad_eval_clips_total}")
                 if avg_sisdr is not None:
                     extras.append(f"si-sdr={avg_sisdr:.2f}dB")
-                print(f"{label} metrics: " + " | ".join(extras))
+                dashboard.write(f"{label} metrics: " + " | ".join(extras))
 
             if bucket_metrics:
                 bucket_parts = []
@@ -2748,7 +2705,7 @@ def train(
                     bucket_parts.append(
                         f"{bucket_name}:n={int(count)} resid={residual_mean:.4f} vadΔ={vad_delta_mean:.4f} mus={musicness_mean:.3f}"
                     )
-                print(f"{label} buckets: " + " | ".join(bucket_parts))
+                dashboard.write(f"{label} buckets: " + " | ".join(bucket_parts))
 
                 ablation_row = {
                     "epoch": int(epoch + 1),
@@ -2768,7 +2725,7 @@ def train(
                     with open(ablation_path, "a", encoding="utf-8") as f:
                         f.write(json.dumps(ablation_row) + "\n")
                 except OSError as exc:
-                    tqdm.write(f"\u26a0\ufe0f  Failed to write ablation metrics: {exc}")
+                    dashboard.write(f"\u26a0\ufe0f  Failed to write ablation metrics: {exc}")
 
         return valid_loss / max(num_valid_batches, 1)
 
@@ -2781,40 +2738,42 @@ def train(
     if nan_skip_batch:
         compiled_disable_reasons.append("nan_skip_batch")
 
-    print(f"  Compiled-step base eligibility: {base_compiled_step_enabled}")
+    dashboard.write(f"  Compiled-step base eligibility: {base_compiled_step_enabled}")
     if base_compiled_step_enabled:
         if gan_enabled and gan_start_epoch <= 0 and not experimental_compiled_gan:
-            print("  GAN starts at epoch 1: training will run eager from the first epoch")
+            dashboard.write("  GAN starts at epoch 1: training will run eager from the first epoch")
         elif gan_enabled and gan_start_epoch <= 0 and experimental_compiled_gan:
-            print("  [EXPERIMENTAL] GAN starts at epoch 1: compiled-GAN experiment keeps compiled mode")
+            dashboard.write("  [EXPERIMENTAL] GAN starts at epoch 1: compiled-GAN experiment keeps compiled mode")
         elif gan_enabled and not experimental_compiled_gan:
-            print(
+            dashboard.write(
                 "  GAN delayed start: training will use compiled mode until GAN activation "
                 f"(gan_start_epoch={gan_start_epoch + 1})"
             )
         elif gan_enabled and experimental_compiled_gan:
-            print(
+            dashboard.write(
                 "  [EXPERIMENTAL] GAN delayed start: compiled-GAN experiment will keep compiled "
                 f"mode through GAN activation (gan_start_epoch={gan_start_epoch + 1})"
             )
     else:
         joined = ", ".join(compiled_disable_reasons) if compiled_disable_reasons else "unknown"
-        print(f"  Compiled-step disabled by: {joined}")
+        dashboard.write(f"  Compiled-step disabled by: {joined}")
         if experimental_compiled_gan:
-            print(
+            dashboard.write(
                 "  [EXPERIMENTAL] WARNING: compiled-GAN experiment requested but compiled mode "
                 f"is globally disabled ({joined}). Experiment will not activate."
             )
     if grad_accumulation_steps > 1:
-        print(
+        dashboard.write(
             f"  Gradient accumulation: {grad_accumulation_steps} steps (effective batch = {batch_size * grad_accumulation_steps})"
         )
         if base_compiled_step_enabled:
-            print("  Gradient accumulation: compiled forward/backward enabled; optimizer updates remain accumulated")
+            dashboard.write(
+                "  Gradient accumulation: compiled forward/backward enabled; optimizer updates remain accumulated"
+            )
         else:
-            print("  Gradient accumulation: compiled training step disabled")
+            dashboard.write("  Gradient accumulation: compiled training step disabled")
     if nan_skip_batch:
-        print("  nan-skip-batch: enabled (will skip updates on non-finite loss/grads)")
+        dashboard.write("  nan-skip-batch: enabled (will skip updates on non-finite loss/grads)")
 
     scheduled_start_stage = _resolve_pipeline_stage(start_epoch, pipeline_stage_defs)
     scheduled_start_stage_index = int(scheduled_start_stage["index"])
@@ -2822,7 +2781,7 @@ def train(
         initial_stage_index = scheduled_start_stage_index
     else:
         if resume_stage_index < scheduled_start_stage_index:
-            print(
+            dashboard.write(
                 "ℹ️  Clamping resume stage to scheduled stage floor: "
                 f"resume_stage={resume_stage_index} → scheduled_stage={scheduled_start_stage_index}."
             )
@@ -2830,7 +2789,7 @@ def train(
     initial_stage = _resolve_pipeline_stage_by_index(initial_stage_index)
     initial_stage_name = str(initial_stage["name"])
     if resume_stage_name and resume_stage_name != initial_stage_name:
-        print(
+        dashboard.write(
             "ℹ️  Resume stage name normalized from checkpoint metadata: " f"{resume_stage_name} → {initial_stage_name}."
         )
 
@@ -2846,17 +2805,17 @@ def train(
         pipeline_stage_index=initial_stage_index,
         pipeline_stage_name=initial_stage_name,
     )
-    print("  SIGINT handler registered (CTRL+C will save checkpoint before exit)")
+    dashboard.write("  SIGINT handler registered (CTRL+C will save checkpoint before exit)")
 
     # Training loop
     # Sync cadence derived from sync_mode (see docs/SYNC_BARRIER_POLICY.md)
     mode = SyncMode(sync_mode)
     emit_detailed_metrics = mode.emit_detailed_metrics
-    print(f"\nStarting training (epoch {start_epoch + 1} to {epochs})...")
-    print(f"  Sync mode: {sync_mode} (eval_frequency={eval_frequency})")
-    print(f"  Warmup steps: {warmup_steps:,}")
-    print(f"  Est. total steps: {total_steps:,}")
-    print()
+    dashboard.write(f"\nStarting training (epoch {start_epoch + 1} to {epochs})...")
+    dashboard.write(f"  Sync mode: {sync_mode} (eval_frequency={eval_frequency})")
+    dashboard.write(f"  Warmup steps: {warmup_steps:,}")
+    dashboard.write(f"  Est. total steps: {total_steps:,}")
+    dashboard.write()
 
     global_step = resume_global_step if resume_from else start_epoch * optimizer_steps_per_epoch
     final_epoch = start_epoch
@@ -2887,9 +2846,10 @@ def train(
 
     start_display = f"{start_epoch + 1}/{epochs} (idx {start_epoch})"
     lc_display = f"{last_completed_epoch + 1} (idx {last_completed_epoch})" if last_completed_epoch >= 0 else "none"
-    print(f"Starting training at epoch {start_display} | last_completed_epoch={lc_display}")
+    dashboard.write(f"Starting training at epoch {start_display} | last_completed_epoch={lc_display}")
 
     for epoch in range(start_epoch, epochs):
+        dashboard.start_epoch(epoch, epochs)
         epoch_start = time.perf_counter()
         final_epoch = epoch
 
@@ -2898,7 +2858,7 @@ def train(
         next_stage_index = max(active_stage_index, scheduled_stage_index)
 
         if next_stage_index != active_stage_index:
-            print(
+            dashboard.write(
                 "\n🔄 Pipeline stage advanced "
                 f"({active_stage_index} -> {next_stage_index}) by schedule. Resetting best_valid_loss."
             )
@@ -2929,7 +2889,7 @@ def train(
             "vad_loss_weight": epoch_vad_loss_weight,
             "vad_speech_loss_weight": epoch_vad_speech_loss_weight,
         }
-        print(
+        dashboard.write(
             "  Stage "
             f"{active_stage_index} ({active_stage_name}) | "
             f"awesome_w={epoch_awesome_loss_weight:.4f} "
@@ -2959,7 +2919,7 @@ def train(
             dataset.config.p_very_low_snr = cur_p_very_low
             dataset.config.p_interfer_speech = cur_p_interfer
             if epoch < curriculum_warmup_epochs or (epoch == curriculum_warmup_epochs and verbose):
-                print(
+                dashboard.write(
                     f"  Curriculum (epoch {epoch + 1}/{curriculum_warmup_epochs}): "
                     f"p_extreme={cur_p_extreme:.3f}, p_very_low={cur_p_very_low:.3f}, p_interfer={cur_p_interfer:.3f}"
                 )
@@ -2984,7 +2944,7 @@ def train(
         if gan_active and gan_eval_frequency > 0:
             epoch_eval_frequency = min(eval_frequency, gan_eval_frequency)
             if epoch == gan_start_epoch:
-                print(
+                dashboard.write(
                     f"  GAN active: eval_frequency capped to {epoch_eval_frequency} "
                     f"(gan.eval_frequency={gan_eval_frequency}, training.eval_frequency={eval_frequency})"
                 )
@@ -3023,12 +2983,14 @@ def train(
                 mode_reason = "experimental_compiled_gan"
             else:
                 mode_reason = "gan_inactive"
-            print(f"  TRAIN_MODE={train_mode} (epoch {epoch + 1}/{epochs}, reason={mode_reason})")
+            dashboard.write(f"  TRAIN_MODE={train_mode} (epoch {epoch + 1}/{epochs}, reason={mode_reason})")
             if use_compiled_gan_step:
-                print(f"  [EXPERIMENTAL] Using compiled-GAN step (gen compiled, disc eager) " f"epoch={epoch + 1}")
+                dashboard.write(
+                    f"  [EXPERIMENTAL] Using compiled-GAN step (gen compiled, disc eager) " f"epoch={epoch + 1}"
+                )
 
         if gan_enabled and verbose:
-            print(
+            dashboard.write(
                 f"  GAN schedule (epoch {epoch + 1}/{epochs}): "
                 f"scale={gan_scale:.3f}, adv={gan_weight:.4f}, fm={fm_weight:.4f}"
             )
@@ -3140,12 +3102,12 @@ def train(
                         f"data={progress['batch']}, model={resume_batches_for_epoch}."
                     )
                 if resume_batches_for_epoch > 0:
-                    print(f"  Resuming epoch {epoch + 1} from micro-batch {progress['batch']}")
+                    dashboard.write(f"  Resuming epoch {epoch + 1} from micro-batch {progress['batch']}")
                 data_resume_progress = None
             elif resume_batches_for_epoch > 0:
                 train_stream.set_resume_position(epoch=epoch, batch_idx=resume_batches_for_epoch, split="train")
                 data_iterator = train_stream
-                print(f"  Resuming epoch {epoch + 1} from micro-batch {resume_batches_for_epoch}")
+                dashboard.write(f"  Resuming epoch {epoch + 1} from micro-batch {resume_batches_for_epoch}")
             else:
                 train_stream.set_epoch(epoch)
                 data_iterator = train_stream
@@ -3164,27 +3126,16 @@ def train(
                 resume_batch_idx=resume_batches_for_epoch,
             )
             if did_skip:
-                print(f"  Resuming epoch {epoch + 1} from micro-batch {resume_batches_for_epoch}")
+                dashboard.write(f"  Resuming epoch {epoch + 1} from micro-batch {resume_batches_for_epoch}")
 
-        train_tqdm_kwargs = dict(_TQDM_KWARGS)
-        if _tqdm_panels:
-            train_tqdm_kwargs["position"] = tqdm_train_position
-
-        train_pbar = tqdm(
-            enumerate(islice(data_iterator, train_total)),
-            total=train_total,
-            desc=f"Epoch {epoch + 1}/{epochs}",
-            unit="batch",
-            leave=True,
-            **train_tqdm_kwargs,
-        )
+        dashboard.start_train(total=train_total, description=f"Epoch {epoch + 1}/{epochs}")
 
         # Throughput tracking: accumulate samples and wall-clock time over sync windows
         window_samples = 0
         window_start = time.perf_counter()
 
         data_start = time.perf_counter()
-        for batch_idx, batch in train_pbar:
+        for batch_idx, batch in enumerate(islice(data_iterator, train_total)):
             data_time = time.perf_counter() - data_start
             total_data_time += data_time
 
@@ -3339,7 +3290,7 @@ def train(
                             optimizer.update(model, final_grads)
                         else:
                             did_optimizer_update = False
-                            tqdm.write(
+                            dashboard.write(
                                 "⚠️  Non-finite grads after clipping; skipping optimizer update "
                                 f"(step={global_step})"
                             )
@@ -3400,13 +3351,13 @@ def train(
                         compiled_val = float(loss)
                         eager_val = float(eager_loss)
                         if abs(compiled_val - eager_val) > 1e-5 + 1e-4 * abs(eager_val):
-                            tqdm.write(
+                            dashboard.write(
                                 f"  [EXPERIMENTAL] WARNING: compiled-GAN correctness check FAILED. "
                                 f"compiled_loss={compiled_val:.6f}, eager_loss={eager_val:.6f}, "
                                 f"diff={abs(compiled_val - eager_val):.2e}"
                             )
                         else:
-                            tqdm.write(
+                            dashboard.write(
                                 f"  [EXPERIMENTAL] Compiled-GAN correctness check PASSED. "
                                 f"compiled_loss={compiled_val:.6f}, eager_loss={eager_val:.6f}"
                             )
@@ -3478,7 +3429,7 @@ def train(
                         optimizer.update(model, final_grads)
                     else:
                         did_optimizer_update = False
-                        tqdm.write(
+                        dashboard.write(
                             "⚠️  Non-finite grads in eager path; skipping optimizer update " f"(step={global_step})"
                         )
 
@@ -3508,7 +3459,7 @@ def train(
                     # Extract deferred scalars (free — already eval'd)
                     loss_finite = bool(loss_finite_arr)
                     if not loss_finite:
-                        tqdm.write(
+                        dashboard.write(
                             f"⚠️  Non-finite loss detected (step={global_step}); " "grads were zeroed by clip_grad_norm"
                         )
                         if debugger is not None:
@@ -3597,7 +3548,7 @@ def train(
                             if _tree_all_finite(disc_grads):
                                 disc_optimizer.update(discriminator, disc_grads)
                             else:
-                                tqdm.write(
+                                dashboard.write(
                                     f"\u26a0\ufe0f  Non-finite disc grads; skipping disc update (step={global_step})"
                                 )
 
@@ -3628,7 +3579,7 @@ def train(
                     # count it so we can abort if too many accumulate.
                     nonfinite_loss_count = getattr(train, "_nonfinite_loss_count", 0) + 1
                     train._nonfinite_loss_count = nonfinite_loss_count  # type: ignore[attr-defined]
-                    tqdm.write(
+                    dashboard.write(
                         f"⚠️  Non-finite loss_val at sync point "
                         f"(epoch={epoch}, batch={batch_idx}, step={global_step}, "
                         f"cumulative_nonfinite={nonfinite_loss_count})"
@@ -3647,11 +3598,11 @@ def train(
 
                 # Debug mode: log per-step gradient norm for full observability
                 if sync_mode == "debug" and math.isfinite(grad_norm):
-                    tqdm.write(f"  [debug] step={global_step} grad_norm={grad_norm:.4f} " f"loss={loss_val:.6f}")
+                    dashboard.write(f"  [debug] step={global_step} grad_norm={grad_norm:.4f} " f"loss={loss_val:.6f}")
 
                 # Profile mode: log step-level timing breakdown
                 if sync_mode == "profile":
-                    tqdm.write(
+                    dashboard.write(
                         f"  [profile] step={global_step} "
                         f"data={data_time * 1000:.1f}ms "
                         f"fwd={fwd_time * 1000:.1f}ms "
@@ -4097,51 +4048,45 @@ def train(
                     train_vad_reg_loss += vad_reg_loss_val * epoch_eval_frequency
 
                 if verbose:
-                    train_pbar.set_postfix(
-                        loss=f"{loss_val:.4f}",
-                        spec=(
-                            f"{spec_loss_val:.4f}"
-                            if (use_vad_loss or use_awesome_loss or use_pipeline_awesome_loss or use_vad_train_reg)
-                            else f"{loss_val:.4f}"
-                        ),
-                        mrstft=f"{mrstft_loss_val:.4f}" if use_mrstft_loss else "0.0000",
-                        gan_g=f"{gan_g_loss_val:.4f}" if gan_active else "0.0000",
-                        gan_d=f"{gan_d_loss_val:.4f}" if gan_active else "0.0000",
-                        fm=f"{gan_fm_loss_val:.4f}" if gan_active else "0.0000",
-                        vad=f"{vad_loss_val:.4f}" if use_vad_loss else "0.0000",
-                        speech=f"{speech_loss_val:.4f}" if use_vad_loss else "0.0000",
-                        awesome=(
-                            f"{awesome_loss_val:.4f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.0000"
-                        ),
-                        mask=(f"{mask_mean:.2f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.00"),
-                        lr=f"{lr:.1e}",
-                        data=f"{data_time * 1000:.0f}ms",
-                        fwd=f"{fwd_time * 1000:.0f}ms",
-                        spd=f"{samples_per_sec:.0f}/s",
-                        gstep=global_step,
+                    dashboard.update_train(
+                        advance=1,
+                        metrics=f"loss={loss_val:.4f} "
+                        f"spec={(f'{spec_loss_val:.4f}' if (use_vad_loss or use_awesome_loss or use_pipeline_awesome_loss or use_vad_train_reg) else f'{loss_val:.4f}')} "
+                        f"mrstft={f'{mrstft_loss_val:.4f}' if use_mrstft_loss else '0.0000'} "
+                        f"gan_g={f'{gan_g_loss_val:.4f}' if gan_active else '0.0000'} "
+                        f"gan_d={f'{gan_d_loss_val:.4f}' if gan_active else '0.0000'} "
+                        f"fm={f'{gan_fm_loss_val:.4f}' if gan_active else '0.0000'} "
+                        f"vad={f'{vad_loss_val:.4f}' if use_vad_loss else '0.0000'} "
+                        f"speech={f'{speech_loss_val:.4f}' if use_vad_loss else '0.0000'} "
+                        f"awesome={(f'{awesome_loss_val:.4f}' if (use_awesome_loss or use_pipeline_awesome_loss) else '0.0000')} "
+                        f"mask={(f'{mask_mean:.2f}' if (use_awesome_loss or use_pipeline_awesome_loss) else '0.00')} "
+                        f"lr={lr:.1e} "
+                        f"data={data_time * 1000:.0f}ms "
+                        f"fwd={fwd_time * 1000:.0f}ms "
+                        f"spd={samples_per_sec:.0f}/s "
+                        f"gstep={global_step}",
                     )
                 else:
                     grad_display = f"{grad_norm:.2f}" if math.isfinite(grad_norm) else "n/a"
-                    train_pbar.set_postfix(
-                        loss=f"{loss_val:.4f}",
-                        avg=f"{train_loss / num_train_batches:.4f}",
-                        gan_g=f"{gan_g_loss_val:.4f}" if gan_active else "0.0000",
-                        gan_d=f"{gan_d_loss_val:.4f}" if gan_active else "0.0000",
-                        fm=f"{gan_fm_loss_val:.4f}" if gan_active else "0.0000",
-                        vad=f"{vad_loss_val:.4f}" if use_vad_loss else "0.0000",
-                        speech=f"{speech_loss_val:.4f}" if use_vad_loss else "0.0000",
-                        awesome=(
-                            f"{awesome_loss_val:.4f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.0000"
-                        ),
-                        mask=(f"{mask_mean:.2f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.00"),
-                        p_ref=f"{p_ref_mean:.2f}" if use_vad_loss else "0.00",
-                        p_out=f"{p_out_mean:.2f}" if use_vad_loss else "0.00",
-                        gate=f"{gate_pct:.0f}%" if use_vad_loss else "0%",
-                        vad_reg=f"{vad_reg_loss_val:.4f}" if use_vad_train_reg else "0.0000",
-                        lr=f"{lr:.1e}",
-                        grad=grad_display,
-                        spd=f"{samples_per_sec:.0f}/s",
-                        gstep=global_step,
+                    dashboard.update_train(
+                        advance=1,
+                        metrics=f"loss={loss_val:.4f} "
+                        f"avg={train_loss / num_train_batches:.4f} "
+                        f"gan_g={f'{gan_g_loss_val:.4f}' if gan_active else '0.0000'} "
+                        f"gan_d={f'{gan_d_loss_val:.4f}' if gan_active else '0.0000'} "
+                        f"fm={f'{gan_fm_loss_val:.4f}' if gan_active else '0.0000'} "
+                        f"vad={f'{vad_loss_val:.4f}' if use_vad_loss else '0.0000'} "
+                        f"speech={f'{speech_loss_val:.4f}' if use_vad_loss else '0.0000'} "
+                        f"awesome={(f'{awesome_loss_val:.4f}' if (use_awesome_loss or use_pipeline_awesome_loss) else '0.0000')} "
+                        f"mask={(f'{mask_mean:.2f}' if (use_awesome_loss or use_pipeline_awesome_loss) else '0.00')} "
+                        f"p_ref={f'{p_ref_mean:.2f}' if use_vad_loss else '0.00'} "
+                        f"p_out={f'{p_out_mean:.2f}' if use_vad_loss else '0.00'} "
+                        f"gate={f'{gate_pct:.0f}%' if use_vad_loss else '0%'} "
+                        f"vad_reg={f'{vad_reg_loss_val:.4f}' if use_vad_train_reg else '0.0000'} "
+                        f"lr={lr:.1e} "
+                        f"grad={grad_display} "
+                        f"spd={samples_per_sec:.0f}/s "
+                        f"gstep={global_step}",
                     )
 
             # Save data checkpoint periodically (for resume capability)
@@ -4175,9 +4120,9 @@ def train(
                     kind="step",
                 )
                 if step_saved:
-                    tqdm.write(f"  📦 Checkpoint saved: {ckpt_path.name} (step {global_step})")
+                    dashboard.write(f"  📦 Checkpoint saved: {ckpt_path.name} (step {global_step})")
                 else:
-                    tqdm.write(f"  ⚠️  Checkpoint save failed: {ckpt_path.name} (step {global_step})")
+                    dashboard.write(f"  ⚠️  Checkpoint save failed: {ckpt_path.name} (step {global_step})")
 
                 # Cleanup old checkpoints if limit is set
                 if save_total_limit is not None:
@@ -4185,8 +4130,6 @@ def train(
 
             # Start timing for next data fetch
             data_start = time.perf_counter()
-
-        train_pbar.close()
 
         # Force sync at epoch end to ensure accurate loss
         mx.eval(state)
@@ -4228,18 +4171,20 @@ def train(
         # Print detailed timing breakdown in verbose mode
         if verbose and num_train_batches > 0:
             total_time = total_data_time + total_forward_time
-            print(f"\n  [Timing Breakdown - Epoch {epoch + 1}]")
-            print(f"    Data loading:       {total_data_time:6.1f}s ({100 * total_data_time / total_time:5.1f}%)")
-            print(
+            dashboard.write(f"\n  [Timing Breakdown - Epoch {epoch + 1}]")
+            dashboard.write(
+                f"    Data loading:       {total_data_time:6.1f}s ({100 * total_data_time / total_time:5.1f}%)"
+            )
+            dashboard.write(
                 f"    Train step (fwd+bwd+upd): {total_forward_time:6.1f}s ({100 * total_forward_time / total_time:5.1f}%)"
             )
-            print(f"    TOTAL:              {total_time:6.1f}s")
-            print(f"    Compiled training:  {'enabled' if epoch_use_compiled_step else 'disabled'}")
+            dashboard.write(f"    TOTAL:              {total_time:6.1f}s")
+            dashboard.write(f"    Compiled training:  {'enabled' if epoch_use_compiled_step else 'disabled'}")
             if total_data_time > total_forward_time:
-                print("    ⚠️  DATA LOADING IS BOTTLENECK - consider more workers or faster storage")
+                dashboard.write("    ⚠️  DATA LOADING IS BOTTLENECK - consider more workers or faster storage")
 
         if partial_batch_fallbacks > 0:
-            print(
+            dashboard.write(
                 "  Compile boundary fallback: "
                 f"{partial_batch_fallbacks} batch(es) ran eager due to non-canonical batch size"
             )
@@ -4290,7 +4235,7 @@ def train(
                         pipeline_stage_name=active_stage_name,
                     )
                 else:
-                    print("⚠️  Best checkpoint save failed; epoch completion not updated.")
+                    dashboard.write("⚠️  Best checkpoint save failed; epoch completion not updated.")
             else:
                 epochs_without_improvement += 1
 
@@ -4356,7 +4301,7 @@ def train(
                 loss_parts.append(f"VADreg: {avg_train_vad_reg_loss:.4f}")
             loss_summary = " | " + " | ".join(loss_parts)
 
-        print(
+        dashboard.write(
             f"✓ Epoch {epoch + 1}/{epochs} complete | "
             f"Train: {avg_train_loss:.4f}{loss_summary} | "
             f"Valid: {avg_valid_loss:.4f} {improvement_marker}| "
@@ -4364,14 +4309,20 @@ def train(
             f"{samples_processed:,} samples @ {epoch_throughput:.0f}/s | "
             f"{epoch_time:.1f}s"
         )
+        dashboard.update_metrics(
+            f"Epoch {epoch + 1}/{epochs} | "
+            f"Train: {avg_train_loss:.4f} | "
+            f"Valid: {avg_valid_loss:.4f} {improvement_marker}| "
+            f"Best: {best_valid_loss:.4f}"
+        )
 
         if use_vad_loss and verbose:
-            print(
+            dashboard.write(
                 f"  VAD stats: p_ref={avg_train_p_ref:.2f} | "
                 f"p_out={avg_train_p_out:.2f} | gate={avg_train_gate:.0f}%"
             )
         if (use_awesome_loss or use_pipeline_awesome_loss) and verbose:
-            print(
+            dashboard.write(
                 "  Awesome stats: "
                 f"mask={avg_train_mask_mean:.2f} (hi {avg_train_mask_high:.0f}%, lo {avg_train_mask_low:.0f}%) | "
                 f"proxy={avg_train_proxy:.2f} ratio={avg_train_speech_ratio:.2f} | "
@@ -4393,7 +4344,7 @@ def train(
                 avg_vad_clip_out = train_vad_clip_out / num_vad_logs
                 parts.append(f"vad_clip_ref={avg_vad_clip_ref:.1f}% vad_clip_out={avg_vad_clip_out:.1f}%")
             if parts:
-                print("  Debug numerics: " + " | ".join(parts))
+                dashboard.write("  Debug numerics: " + " | ".join(parts))
 
         # ====== Early Stopping / Curriculum Advance ======
         should_stop = False
@@ -4403,8 +4354,8 @@ def train(
                 active_stage_index += 1
                 next_stage = _resolve_pipeline_stage_by_index(active_stage_index)
                 active_stage_name = str(next_stage["name"])
-                print(f"\nEarly stopping triggered after {patience} epochs without improvement.")
-                print(
+                dashboard.write(f"\nEarly stopping triggered after {patience} epochs without improvement.")
+                dashboard.write(
                     "Moving to next pipeline stage "
                     f"'{active_stage_name}' early ({prev_stage_index} -> {active_stage_index})."
                 )
@@ -4477,17 +4428,17 @@ def train(
                 pipeline_stage_name=active_stage_name,
             )
             _write_epoch_complete_marker(ckpt_dir, epoch, ckpt_path)
-            print(f"  📦 Checkpoint saved: {ckpt_path.name}")
+            dashboard.write(f"  📦 Checkpoint saved: {ckpt_path.name}")
             if save_total_limit is not None:
                 cleanup_checkpoints(ckpt_dir, save_total_limit)
         else:
             if epoch_completed:
-                print("⚠️  End-of-epoch checkpoint failed; relying on best checkpoint for completion.")
+                dashboard.write("⚠️  End-of-epoch checkpoint failed; relying on best checkpoint for completion.")
             else:
-                print("⚠️  End-of-epoch checkpoint failed; epoch not marked as complete.")
+                dashboard.write("⚠️  End-of-epoch checkpoint failed; epoch not marked as complete.")
 
         if should_stop:
-            print(f"\nEarly stopping after {patience} epochs without improvement")
+            dashboard.write(f"\nEarly stopping after {patience} epochs without improvement")
             break
 
         # Clear memory periodically
@@ -4524,9 +4475,9 @@ def train(
             kind="best_final",
         )
         if best_final_saved:
-            print(f"  ✅ Final weights set new best: {best_valid_loss:.4f}")
+            dashboard.write(f"  ✅ Final weights set new best: {best_valid_loss:.4f}")
         else:
-            print("  ⚠️  Failed to save final best checkpoint.")
+            dashboard.write("  ⚠️  Failed to save final best checkpoint.")
 
     # Save final weights (even if not aligned to checkpoint interval).
     mx.eval(state)
@@ -4549,9 +4500,9 @@ def train(
         kind="final",
     )
     if final_saved:
-        print(f"  📦 Final checkpoint saved: {final_path.name}")
+        dashboard.write(f"  📦 Final checkpoint saved: {final_path.name}")
     else:
-        print("  ⚠️  Final checkpoint save failed.")
+        dashboard.write("  ⚠️  Final checkpoint save failed.")
 
     # ====== Final Summary ======
     print("\n" + "=" * 60)
@@ -4567,8 +4518,7 @@ def train(
     print(f"Best checkpoint: {ckpt_dir / 'best.safetensors'}")
     print(f"Checkpoints:     {ckpt_dir}")
 
-    if tqdm_setup_panel is not None:
-        tqdm_setup_panel.close()
+    dashboard.stop()
 
 
 # main() is now in df_mlx.training_cli_main (re-exported above).

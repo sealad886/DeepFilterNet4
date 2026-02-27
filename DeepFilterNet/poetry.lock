@@ -71,7 +71,7 @@ description = "LTS Port of Python audioop"
 optional = false
 python-versions = ">=3.13"
 groups = ["main"]
-markers = "python_version >= \"3.13\" and (sys_platform == \"darwin\" or sys_platform == \"win32\" or sys_platform == \"emscripten\") or sys_platform != \"win32\" and sys_platform != \"emscripten\" and sys_platform != \"darwin\" and python_version >= \"3.13\" or platform_machine != \"arm64\" and sys_platform != \"win32\" and sys_platform != \"emscripten\" and python_version >= \"3.13\""
+markers = "sys_platform == \"darwin\" and platform_machine == \"arm64\" and python_version >= \"3.13\" or (sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\" and sys_platform != \"darwin\" or platform_machine != \"arm64\") and (sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\") and python_version >= \"3.13\""
 files = [
     {file = "audioop_lts-0.2.2-cp313-abi3-macosx_10_13_universal2.whl", hash = "sha256:fd3d4602dc64914d462924a08c1a9816435a2155d74f325853c1f1ac3b2d9800"},
     {file = "audioop_lts-0.2.2-cp313-abi3-macosx_10_13_x86_64.whl", hash = "sha256:550c114a8df0aafe9a05442a1162dfc8fec37e9af1d625ae6060fed6e756f303"},
@@ -436,7 +436,7 @@ description = "Python library for calculating contours of 2D quadrilateral grids
 optional = false
 python-versions = ">=3.10"
 groups = ["main", "dev"]
-markers = "python_version < \"3.11\" and (sys_platform == \"darwin\" or sys_platform == \"win32\" or sys_platform == \"emscripten\") or sys_platform != \"win32\" and sys_platform != \"emscripten\" and sys_platform != \"darwin\" and python_version < \"3.11\" or platform_machine != \"arm64\" and python_version < \"3.11\" and sys_platform != \"win32\" and sys_platform != \"emscripten\""
+markers = "sys_platform == \"darwin\" and platform_machine == \"arm64\" and python_version < \"3.11\" or (sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\" and sys_platform != \"darwin\" or platform_machine != \"arm64\") and python_version < \"3.11\" and (sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\")"
 files = [
     {file = "contourpy-1.3.2-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:ba38e3f9f330af820c4b27ceb4b9c7feee5fe0493ea53a8720f4792667465934"},
     {file = "contourpy-1.3.2-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:dc41ba0714aa2968d1f8674ec97504a8f7e334f48eeacebcaa6256213acb0989"},
@@ -514,7 +514,7 @@ description = "Python library for calculating contours of 2D quadrilateral grids
 optional = false
 python-versions = ">=3.11"
 groups = ["main", "dev"]
-markers = "python_version >= \"3.11\" and (sys_platform == \"darwin\" or sys_platform == \"win32\" or sys_platform == \"emscripten\") or sys_platform != \"win32\" and sys_platform != \"emscripten\" and python_version >= \"3.11\""
+markers = "sys_platform == \"darwin\" and platform_machine == \"arm64\" and python_version >= \"3.11\" or (sys_platform != \"darwin\" or platform_machine != \"arm64\") and (sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\") and python_version >= \"3.11\""
 files = [
     {file = "contourpy-1.3.3-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:709a48ef9a690e1343202916450bc48b9e51c049b089c7f79a267b46cffcdaa1"},
     {file = "contourpy-1.3.3-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:23416f38bfd74d5d28ab8429cc4d63fa67d5068bd711a85edb1c3fb0c3e2f381"},
@@ -727,7 +727,7 @@ description = "Backport of PEP 654 (exception groups)"
 optional = false
 python-versions = ">=3.7"
 groups = ["main", "dev"]
-markers = "python_version < \"3.11\" and (sys_platform == \"darwin\" or sys_platform == \"win32\" or sys_platform == \"emscripten\") or python_version < \"3.11\" and sys_platform != \"win32\" and sys_platform != \"emscripten\""
+markers = "python_version < \"3.11\" and (sys_platform == \"darwin\" or sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\") and (platform_machine == \"arm64\" or sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\")"
 files = [
     {file = "exceptiongroup-1.3.1-py3-none-any.whl", hash = "sha256:a7a39a3bd276781e98394987d3a5701d0c4edffb633bb7a5144577f82c773598"},
     {file = "exceptiongroup-1.3.1.tar.gz", hash = "sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219"},
@@ -1832,7 +1832,7 @@ description = "Python package for creating and manipulating graphs and networks"
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
-markers = "python_version < \"3.11\" and (sys_platform == \"darwin\" or sys_platform == \"win32\" or sys_platform == \"emscripten\") or sys_platform != \"win32\" and sys_platform != \"emscripten\" and sys_platform != \"darwin\" and python_version < \"3.11\" or platform_machine != \"arm64\" and python_version < \"3.11\" and sys_platform != \"win32\" and sys_platform != \"emscripten\""
+markers = "sys_platform == \"darwin\" and platform_machine == \"arm64\" and python_version < \"3.11\" or (sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\" and sys_platform != \"darwin\" or platform_machine != \"arm64\") and python_version < \"3.11\" and (sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\")"
 files = [
     {file = "networkx-3.4.2-py3-none-any.whl", hash = "sha256:df5d4365b724cf81b8c6a7312509d0c22386097011ad1abe274afd5e9d3bbc5f"},
     {file = "networkx-3.4.2.tar.gz", hash = "sha256:307c3669428c5362aab27c8a1260aa8f47c4e91d3891f48be0141738d8d053e1"},
@@ -1853,7 +1853,7 @@ description = "Python package for creating and manipulating graphs and networks"
 optional = false
 python-versions = ">=3.11"
 groups = ["main"]
-markers = "python_version >= \"3.14\" and (sys_platform == \"darwin\" or sys_platform == \"win32\" or sys_platform == \"emscripten\") or python_version >= \"3.14\" and sys_platform != \"win32\" and sys_platform != \"emscripten\""
+markers = "sys_platform == \"darwin\" and platform_machine == \"arm64\" and python_version >= \"3.14\" or (sys_platform != \"darwin\" or platform_machine != \"arm64\") and python_version >= \"3.14\" and (sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\")"
 files = [
     {file = "networkx-3.6-py3-none-any.whl", hash = "sha256:cdb395b105806062473d3be36458d8f1459a4e4b98e236a66c3a48996e07684f"},
     {file = "networkx-3.6.tar.gz", hash = "sha256:285276002ad1f7f7da0f7b42f004bcba70d381e936559166363707fdad3d72ad"},
@@ -1877,7 +1877,7 @@ description = "Python package for creating and manipulating graphs and networks"
 optional = false
 python-versions = "!=3.14.1,>=3.11"
 groups = ["main"]
-markers = "python_version < \"3.14\" and python_version >= \"3.11\" and (sys_platform == \"darwin\" or sys_platform == \"win32\" or sys_platform == \"emscripten\") or python_version < \"3.14\" and sys_platform != \"win32\" and sys_platform != \"emscripten\" and python_version >= \"3.11\""
+markers = "python_version < \"3.14\" and (sys_platform == \"darwin\" or sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\") and python_version >= \"3.11\" and (platform_machine == \"arm64\" or sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\")"
 files = [
     {file = "networkx-3.6.1-py3-none-any.whl", hash = "sha256:d47fbf302e7d9cbbb9e2555a0d267983d2aa476bac30e90dfbe5669bd57f3762"},
     {file = "networkx-3.6.1.tar.gz", hash = "sha256:26b7c357accc0c8cde558ad486283728b65b6a95d85ee1cd66bafab4c8168509"},
@@ -2383,7 +2383,7 @@ description = "Powerful data structures for data analysis, time series, and stat
 optional = false
 python-versions = ">=3.11"
 groups = ["main"]
-markers = "python_version < \"3.14\" and python_version >= \"3.11\" and (sys_platform == \"darwin\" or sys_platform == \"win32\" or sys_platform == \"emscripten\") or python_version < \"3.14\" and sys_platform != \"win32\" and sys_platform != \"emscripten\" and python_version >= \"3.11\""
+markers = "python_version < \"3.14\" and (sys_platform == \"darwin\" or sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\") and python_version >= \"3.11\" and (platform_machine == \"arm64\" or sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\")"
 files = [
     {file = "pandas-3.0.1-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:de09668c1bf3b925c07e5762291602f0d789eca1b3a781f99c1c78f6cac0e7ea"},
     {file = "pandas-3.0.1-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:24ba315ba3d6e5806063ac6eb717504e499ce30bd8c236d8693a5fd3f084c796"},
@@ -2486,7 +2486,7 @@ description = "Python Wrapper for PESQ Score (narrow band and wide band)"
 optional = true
 python-versions = "*"
 groups = ["main"]
-markers = "extra == \"eval\" and platform_system != \"Windows\" and (sys_platform == \"darwin\" or sys_platform == \"win32\" or sys_platform == \"emscripten\") or sys_platform != \"win32\" and sys_platform != \"emscripten\" and extra == \"eval\" and platform_system != \"Windows\""
+markers = "(sys_platform == \"darwin\" or sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\") and extra == \"eval\" and platform_system != \"Windows\" and (platform_machine == \"arm64\" or sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\")"
 files = [
     {file = "pesq-0.0.4.tar.gz", hash = "sha256:b724b28f73fb638522982bd68e8c3c0957e2f45210639a460233b17aa7fc890b"},
 ]
@@ -2749,7 +2749,7 @@ description = "C parser in Python"
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
-markers = "implementation_name != \"PyPy\" and (sys_platform == \"darwin\" or sys_platform == \"win32\" or sys_platform == \"emscripten\") or sys_platform != \"win32\" and sys_platform != \"emscripten\" and implementation_name != \"PyPy\""
+markers = "sys_platform == \"darwin\" and platform_machine == \"arm64\" and implementation_name != \"PyPy\" or (sys_platform != \"darwin\" or platform_machine != \"arm64\") and (sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\") and implementation_name != \"PyPy\""
 files = [
     {file = "pycparser-3.0-py3-none-any.whl", hash = "sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992"},
     {file = "pycparser-3.0.tar.gz", hash = "sha256:600f49d217304a5902ac3c37e1281c9fe94e4d0489de643a9504c5cdfdfc6b29"},
@@ -3133,7 +3133,7 @@ description = "A set of python modules for machine learning and data mining"
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
-markers = "python_version < \"3.11\" and (sys_platform == \"darwin\" or sys_platform == \"win32\" or sys_platform == \"emscripten\") or sys_platform != \"win32\" and sys_platform != \"emscripten\" and sys_platform != \"darwin\" and python_version < \"3.11\" or platform_machine != \"arm64\" and python_version < \"3.11\" and sys_platform != \"win32\" and sys_platform != \"emscripten\""
+markers = "sys_platform == \"darwin\" and platform_machine == \"arm64\" and python_version < \"3.11\" or (sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\" and sys_platform != \"darwin\" or platform_machine != \"arm64\") and python_version < \"3.11\" and (sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\")"
 files = [
     {file = "scikit_learn-1.7.2-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:6b33579c10a3081d076ab403df4a4190da4f4432d443521674637677dc91e61f"},
     {file = "scikit_learn-1.7.2-cp310-cp310-macosx_12_0_arm64.whl", hash = "sha256:36749fb62b3d961b1ce4fedf08fa57a1986cd409eff2d783bca5d4b9b5fce51c"},
@@ -3190,7 +3190,7 @@ description = "A set of python modules for machine learning and data mining"
 optional = false
 python-versions = ">=3.11"
 groups = ["main"]
-markers = "python_version >= \"3.11\" and (sys_platform == \"darwin\" or sys_platform == \"win32\" or sys_platform == \"emscripten\") or sys_platform != \"win32\" and sys_platform != \"emscripten\" and python_version >= \"3.11\""
+markers = "sys_platform == \"darwin\" and platform_machine == \"arm64\" and python_version >= \"3.11\" or (sys_platform != \"darwin\" or platform_machine != \"arm64\") and (sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\") and python_version >= \"3.11\""
 files = [
     {file = "scikit_learn-1.8.0-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:146b4d36f800c013d267b29168813f7a03a43ecd2895d04861f1240b564421da"},
     {file = "scikit_learn-1.8.0-cp311-cp311-macosx_12_0_arm64.whl", hash = "sha256:f984ca4b14914e6b4094c5d52a32ea16b49832c03bd17a110f004db3c223e8e1"},
@@ -3253,7 +3253,7 @@ description = "Fundamental algorithms for scientific computing in Python"
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
-markers = "python_version < \"3.11\" and (sys_platform == \"darwin\" or sys_platform == \"win32\" or sys_platform == \"emscripten\") or sys_platform != \"win32\" and sys_platform != \"emscripten\" and sys_platform != \"darwin\" and python_version < \"3.11\" or platform_machine != \"arm64\" and python_version < \"3.11\" and sys_platform != \"win32\" and sys_platform != \"emscripten\""
+markers = "sys_platform == \"darwin\" and platform_machine == \"arm64\" and python_version < \"3.11\" or (sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\" and sys_platform != \"darwin\" or platform_machine != \"arm64\") and python_version < \"3.11\" and (sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\")"
 files = [
     {file = "scipy-1.15.3-cp310-cp310-macosx_10_13_x86_64.whl", hash = "sha256:a345928c86d535060c9c2b25e71e87c39ab2f22fc96e9636bd74d1dbf9de448c"},
     {file = "scipy-1.15.3-cp310-cp310-macosx_12_0_arm64.whl", hash = "sha256:ad3432cb0f9ed87477a8d97f03b763fd1d57709f1bbde3c9369b1dff5503b253"},
@@ -3318,7 +3318,7 @@ description = "Fundamental algorithms for scientific computing in Python"
 optional = false
 python-versions = ">=3.11"
 groups = ["main"]
-markers = "python_version >= \"3.11\" and (sys_platform == \"darwin\" or sys_platform == \"win32\" or sys_platform == \"emscripten\") or sys_platform != \"win32\" and sys_platform != \"emscripten\" and python_version >= \"3.11\""
+markers = "sys_platform == \"darwin\" and platform_machine == \"arm64\" and python_version >= \"3.11\" or (sys_platform != \"darwin\" or platform_machine != \"arm64\") and (sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\") and python_version >= \"3.11\""
 files = [
     {file = "scipy-1.17.1-cp311-cp311-macosx_10_14_x86_64.whl", hash = "sha256:1f95b894f13729334fb990162e911c9e5dc1ab390c58aa6cbecb389c5b5e28ec"},
     {file = "scipy-1.17.1-cp311-cp311-macosx_12_0_arm64.whl", hash = "sha256:e18f12c6b0bc5a592ed23d3f7b891f68fd7f8241d69b7883769eb5d5dfb52696"},
@@ -3398,7 +3398,7 @@ description = "Easily download, build, install, upgrade, and uninstall Python pa
 optional = false
 python-versions = ">=3.9"
 groups = ["main"]
-markers = "python_version >= \"3.12\" and (sys_platform == \"darwin\" or sys_platform == \"win32\" or sys_platform == \"emscripten\") or sys_platform != \"win32\" and sys_platform != \"emscripten\" and python_version >= \"3.12\""
+markers = "sys_platform == \"darwin\" and platform_machine == \"arm64\" and python_version >= \"3.12\" or (sys_platform != \"darwin\" or platform_machine != \"arm64\") and (sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\") and python_version >= \"3.12\""
 files = [
     {file = "setuptools-82.0.0-py3-none-any.whl", hash = "sha256:70b18734b607bd1da571d097d236cfcfacaf01de45717d59e6e04b96877532e0"},
     {file = "setuptools-82.0.0.tar.gz", hash = "sha256:22e0a2d69474c6ae4feb01951cb69d515ed23728cf96d05513d36e42b62b37cb"},
@@ -3513,7 +3513,7 @@ description = "Standard library aifc redistribution. \"dead battery\"."
 optional = false
 python-versions = "*"
 groups = ["main"]
-markers = "python_version >= \"3.13\" and (sys_platform == \"darwin\" or sys_platform == \"win32\" or sys_platform == \"emscripten\") or sys_platform != \"win32\" and sys_platform != \"emscripten\" and sys_platform != \"darwin\" and python_version >= \"3.13\" or platform_machine != \"arm64\" and sys_platform != \"win32\" and sys_platform != \"emscripten\" and python_version >= \"3.13\""
+markers = "sys_platform == \"darwin\" and platform_machine == \"arm64\" and python_version >= \"3.13\" or (sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\" and sys_platform != \"darwin\" or platform_machine != \"arm64\") and (sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\") and python_version >= \"3.13\""
 files = [
     {file = "standard_aifc-3.13.0-py3-none-any.whl", hash = "sha256:f7ae09cc57de1224a0dd8e3eb8f73830be7c3d0bc485de4c1f82b4a7f645ac66"},
     {file = "standard_aifc-3.13.0.tar.gz", hash = "sha256:64e249c7cb4b3daf2fdba4e95721f811bde8bdfc43ad9f936589b7bb2fae2e43"},
@@ -3530,7 +3530,7 @@ description = "Standard library chunk redistribution. \"dead battery\"."
 optional = false
 python-versions = "*"
 groups = ["main"]
-markers = "python_version >= \"3.13\" and (sys_platform == \"darwin\" or sys_platform == \"win32\" or sys_platform == \"emscripten\") or sys_platform != \"win32\" and sys_platform != \"emscripten\" and sys_platform != \"darwin\" and python_version >= \"3.13\" or platform_machine != \"arm64\" and sys_platform != \"win32\" and sys_platform != \"emscripten\" and python_version >= \"3.13\""
+markers = "sys_platform == \"darwin\" and platform_machine == \"arm64\" and python_version >= \"3.13\" or (sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\" and sys_platform != \"darwin\" or platform_machine != \"arm64\") and (sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\") and python_version >= \"3.13\""
 files = [
     {file = "standard_chunk-3.13.0-py3-none-any.whl", hash = "sha256:17880a26c285189c644bd5bd8f8ed2bdb795d216e3293e6dbe55bbd848e2982c"},
     {file = "standard_chunk-3.13.0.tar.gz", hash = "sha256:4ac345d37d7e686d2755e01836b8d98eda0d1a3ee90375e597ae43aaf064d654"},
@@ -3543,7 +3543,7 @@ description = "Standard library sunau redistribution. \"dead battery\"."
 optional = false
 python-versions = "*"
 groups = ["main"]
-markers = "python_version >= \"3.13\" and (sys_platform == \"darwin\" or sys_platform == \"win32\" or sys_platform == \"emscripten\") or sys_platform != \"win32\" and sys_platform != \"emscripten\" and sys_platform != \"darwin\" and python_version >= \"3.13\" or platform_machine != \"arm64\" and sys_platform != \"win32\" and sys_platform != \"emscripten\" and python_version >= \"3.13\""
+markers = "sys_platform == \"darwin\" and platform_machine == \"arm64\" and python_version >= \"3.13\" or (sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\" and sys_platform != \"darwin\" or platform_machine != \"arm64\") and (sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\") and python_version >= \"3.13\""
 files = [
     {file = "standard_sunau-3.13.0-py3-none-any.whl", hash = "sha256:53af624a9529c41062f4c2fd33837f297f3baa196b0cfceffea6555654602622"},
     {file = "standard_sunau-3.13.0.tar.gz", hash = "sha256:b319a1ac95a09a2378a8442f403c66f4fd4b36616d6df6ae82b8e536ee790908"},
@@ -3715,7 +3715,7 @@ files = [
     {file = "tomli-2.4.0-py3-none-any.whl", hash = "sha256:1f776e7d669ebceb01dee46484485f43a4048746235e683bcdffacdf1fb4785a"},
     {file = "tomli-2.4.0.tar.gz", hash = "sha256:aa89c3f6c277dd275d8e243ad24f3b5e701491a860d5121f2cdd399fbb31fc9c"},
 ]
-markers = {main = "python_version < \"3.11\" and (sys_platform == \"darwin\" or sys_platform == \"win32\" or sys_platform == \"emscripten\") or python_version < \"3.11\" and sys_platform != \"win32\" and sys_platform != \"emscripten\"", dev = "sys_platform == \"darwin\" and platform_machine == \"arm64\" or (sys_platform != \"darwin\" or platform_machine != \"arm64\") and (sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\")"}
+markers = {main = "sys_platform == \"darwin\" and platform_machine == \"arm64\" and python_version < \"3.11\" or (sys_platform != \"darwin\" or platform_machine != \"arm64\") and python_version < \"3.11\" and (sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\")", dev = "sys_platform == \"darwin\" and platform_machine == \"arm64\" or (sys_platform != \"darwin\" or platform_machine != \"arm64\") and (sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\")"}
 
 [[package]]
 name = "torch"
@@ -3932,7 +3932,7 @@ files = [
     {file = "typing_extensions-4.15.0-py3-none-any.whl", hash = "sha256:f0fa19c6845758ab08074a0cfa8b7aecb71c999ca73d62883bc25cc018c4e548"},
     {file = "typing_extensions-4.15.0.tar.gz", hash = "sha256:0cea48d173cc12fa28ecabc3b837ea3cf6f38c6d1136f85cbaaf598984861466"},
 ]
-markers = {main = "sys_platform == \"darwin\" and platform_machine == \"arm64\" or sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\" and sys_platform != \"darwin\" or platform_machine != \"arm64\" and sys_platform != \"win32\" and sys_platform != \"emscripten\"", dev = "python_version < \"3.11\" and (sys_platform == \"darwin\" or sys_platform == \"win32\" or sys_platform == \"emscripten\") or python_version < \"3.11\" and sys_platform != \"win32\" and sys_platform != \"emscripten\""}
+markers = {main = "sys_platform == \"darwin\" and platform_machine == \"arm64\" or sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\" and sys_platform != \"darwin\" or platform_machine != \"arm64\" and sys_platform != \"win32\" and sys_platform != \"emscripten\"", dev = "python_version < \"3.11\" and (sys_platform == \"darwin\" or sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\") and (platform_machine == \"arm64\" or sys_platform == \"win32\" or sys_platform == \"emscripten\" or sys_platform != \"win32\" and sys_platform != \"emscripten\")"}
 
 [[package]]
 name = "tzdata"
@@ -3995,4 +3995,4 @@ train = ["deepfilterdataloader", "icecream"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.15"
-content-hash = "ef2d8a019501a3d613777890407e524fce34ea98ba702e81ff88687f7a3a632a"
+content-hash = "74df3635f0b754cdd7d2dda906f302e0c30be4d315ab950555f528874d87da78"
