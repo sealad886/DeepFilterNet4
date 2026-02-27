@@ -26,6 +26,13 @@ from typing import Any
 from df_mlx.hf_paths import normalize_hf_dataset_cache_dir
 from df_mlx.run_config import RunConfig, set_by_path
 
+__all__ = [
+    "_apply_cli_overrides",
+    "_flag_in_argv",
+    "_parse_pipeline_stages_cli",
+    "_resolve_pipeline_stage",
+]
+
 
 def _flag_in_argv(flags: list[str], argv: list[str]) -> bool:
     for arg in argv:

@@ -26,6 +26,8 @@ from pathlib import Path
 
 from df_mlx.training_checkpoints import save_checkpoint
 
+__all__ = ["_handle_sigint"]
+
 # Global state for signal handler
 _interrupt_state = {
     "checkpoint_dir": None,

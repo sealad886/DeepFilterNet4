@@ -81,7 +81,6 @@ from df_mlx.training_losses import (
     _compute_speech_band_logmag_loss,
     _compute_vad_loss,
     _compute_vad_reg_loss,
-    _sync_model_config_with_dataset,
 )
 from df_mlx.training_metrics import (
     collect_sync_metrics,
@@ -96,6 +95,7 @@ from df_mlx.training_ops import (
     scale_grads,
 )
 from df_mlx.training_setup import (
+    _sync_model_config_with_dataset,
     build_train_config,
     finalize_training,
     print_epoch_summary,
@@ -196,11 +196,8 @@ if TYPE_CHECKING:
     from df_mlx.config import ModelParams4
     from df_mlx.run_config import MultiResSpecLossConfig
 
-# Cached scalar zero — reused for default loss placeholders in validation and
-# accumulated-loss resets.  Avoids repeated micro-allocations.  MLX arrays are
-# value-immutable, so sharing a single instance is safe.
-_SCALAR_ZERO = mx.array(0.0)
-
+# Canonical definition lives in training_helpers; alias here for local use.
+from df_mlx.training_helpers import SCALAR_ZERO as _SCALAR_ZERO  # noqa: E402
 
 # =============================================================================
 # tqdm configuration

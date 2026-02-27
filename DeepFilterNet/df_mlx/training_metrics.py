@@ -24,6 +24,7 @@ from typing import Any
 
 import mlx.core as mx
 
+from df_mlx.training_helpers import SCALAR_ZERO as _SCALAR_ZERO
 from df_mlx.training_helpers import clip_gan_scores
 from df_mlx.training_losses import (
     _AWESOME_MASK_LOGIT_CLAMP,
@@ -43,7 +44,6 @@ from df_mlx.training_waveform import (
     specs_to_wavs,
 )
 
-_SCALAR_ZERO = mx.array(0.0)
 _GAN_SCORE_ABS_CLIP = 30.0
 
 

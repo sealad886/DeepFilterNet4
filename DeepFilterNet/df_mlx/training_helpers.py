@@ -5,6 +5,7 @@ Small, self-contained helpers used across multiple training modules, plus the
 (counters, best-loss, stage tracking, mode flags) throughout the epoch loop.
 
 Key exports:
+    - SCALAR_ZERO: Cached ``mx.array(0.0)`` sentinel for loss placeholders.
     - TrainingLoopState: Mutable dataclass for loop-iteration bookkeeping.
     - build_setup_panel_line: Format a key/value pair for the config panel.
     - curriculum_schedule: Compute curriculum learning schedule values.
@@ -25,6 +26,11 @@ from dataclasses import dataclass
 from typing import Any
 
 import mlx.core as mx
+
+# Cached scalar zero — reused for default loss placeholders in validation and
+# accumulated-loss resets.  Avoids repeated micro-allocations.  MLX arrays are
+# value-immutable, so sharing a single instance is safe.
+SCALAR_ZERO = mx.array(0.0)
 
 
 @dataclass

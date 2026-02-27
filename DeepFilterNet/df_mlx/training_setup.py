@@ -6,6 +6,7 @@ auxiliary-loss wiring, console config printing, train-config dict assembly,
 epoch-summary logging, and post-training finalisation.
 
 Key exports:
+    - _sync_model_config_with_dataset: Align model config with dataset params.
     - DatasetSetupResult / setup_dataset: Build and validate the DatasetConfig.
     - DataPipelineResult / setup_data_pipeline: Construct train/valid iterators.
     - AuxLossSetupResult / setup_auxiliary_losses: Wire VAD, awesome, pipeline losses.
@@ -24,6 +25,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+
+
+def _sync_model_config_with_dataset(model_cfg: Any, dataset_cfg: Any) -> None:
+    """Align MLX model config with dataset audio parameters."""
+    model_cfg.audio.sr = dataset_cfg.sample_rate
+    model_cfg.audio.fft_size = dataset_cfg.fft_size
+    model_cfg.audio.hop_size = dataset_cfg.hop_size
+    n_freqs = dataset_cfg.fft_size // 2 + 1
+    model_cfg.audio.nb_freqs = n_freqs
+    model_cfg.audio.n_freqs = n_freqs
+    model_cfg.erb.nb_erb = dataset_cfg.nb_erb
+    model_cfg.df.nb_df = dataset_cfg.nb_df
 
 
 @dataclass
@@ -742,7 +755,7 @@ def setup_auxiliary_losses(
         max_stage_vad_weight=stage_max_vad_weight,
     )
 
-    _SCALAR_ZERO = mx.array(0.0)
+    scalar_zero = mx.array(0.0)
     need_band_mask = (
         use_vad_loss or use_awesome_loss or use_pipeline_awesome_loss or vad_eval_enabled or use_vad_train_reg
     )
@@ -755,7 +768,7 @@ def setup_auxiliary_losses(
             vad_band_high_hz,
         )
     else:
-        vad_band_mask = _SCALAR_ZERO
+        vad_band_mask = scalar_zero
         vad_band_bins = 1.0
 
     return AuxLossSetupResult(

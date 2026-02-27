@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     from df_mlx.training_ops import NumericDebugger
 
 
-_SCALAR_ZERO = mx.array(0.0)
+from df_mlx.training_helpers import SCALAR_ZERO as _SCALAR_ZERO
 
 
 @dataclass
