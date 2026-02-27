@@ -559,6 +559,349 @@ def setup_gan(
 
 
 @dataclass
+class AuxLossSetupResult:
+    """Result from auxiliary loss configuration."""
+
+    use_awesome_loss: bool
+    use_pipeline_awesome_loss: bool
+    use_vad_loss: bool
+    use_vad_train_reg: bool
+    use_mrstft_loss: bool
+    pipeline_stage_defs: list[dict[str, Any]]
+    base_awesome_loss_weight: float
+    base_vad_loss_weight: float
+    base_vad_speech_loss_weight: float
+    stage_max_vad_weight: float
+    stage_max_vad_speech_weight: float
+    mrstft_cfg: Any | None
+    mrstft_loss_fn: Any | None
+    mrstft_istft: Any | None
+    mrstft_target_len: int | None
+    mrstft_hop_sizes: tuple | None
+    gan_enabled: bool
+    gan_target_len: int
+    gan_istft: Any | None
+    gan_disc_type: str
+    gan_disc_update_freq: int
+    discriminator: Any | None
+    disc_optimizer: Any | None
+    feature_match_loss: Any | None
+    gan_loss_fns: tuple | None
+    vad_eval_enabled: bool
+    vad_eval_mode: str
+    silero_vad: Any | None
+    vad_band_mask: Any  # mx.array
+    vad_band_bins: float
+
+
+def setup_auxiliary_losses(
+    *,
+    config: Any,
+    dynamic_loss: str,
+    pipeline_stages: list[dict[str, Any]] | None,
+    awesome_loss_weight: float,
+    vad_loss_weight: float,
+    vad_speech_loss_weight: float,
+    mrstft_config: Any | None,
+    # GAN params
+    gan_enabled: bool,
+    gan_adv_weight: float,
+    gan_fm_weight: float,
+    gan_disc_type: str,
+    gan_mpd_periods: tuple | None,
+    gan_mpd_channels: int,
+    gan_msd_scales: int,
+    gan_msd_channels: int,
+    gan_disc_lr: float,
+    gan_disc_weight_decay: float,
+    gan_disc_update_freq: int,
+    # VAD eval params
+    vad_eval_mode: str,
+    vad_silero_model_path: str | None,
+    vad_silero_sample_rate: int,
+    vad_eval_max_seconds: float,
+    vad_band_low_hz: float,
+    vad_band_high_hz: float,
+    vad_train_prob: float,
+    vad_train_every_steps: int,
+) -> AuxLossSetupResult:
+    """Configure auxiliary losses: MRSTFT, GAN, VAD eval, and band mask.
+
+    Returns an :class:`AuxLossSetupResult` bundling all computed artefacts so
+    the caller can unpack them without dozens of local variables.
+    """
+    import mlx.core as mx
+
+    from df_mlx.training_helpers import is_vad_train_reg_enabled as _is_vad_train_reg_enabled
+    from df_mlx.training_losses import _build_speech_band_mask
+
+    use_awesome_loss = dynamic_loss == "awesome"
+    use_pipeline_awesome_loss = dynamic_loss == "pipeline_awesome"
+    pipeline_stage_defs = sorted(
+        (pipeline_stages or []), key=lambda s: int(s.get("start_epoch", 0))
+    )
+
+    base_awesome_loss_weight = awesome_loss_weight
+    base_vad_loss_weight = vad_loss_weight
+    base_vad_speech_loss_weight = vad_speech_loss_weight
+    stage_max_vad_weight = max(
+        [
+            base_vad_loss_weight,
+            *[
+                float(s.get("vad_loss_weight", 0.0))
+                for s in pipeline_stage_defs
+                if s.get("vad_loss_weight") is not None
+            ],
+        ]
+    )
+    stage_max_vad_speech_weight = max(
+        [
+            base_vad_speech_loss_weight,
+            *[
+                float(s.get("vad_speech_loss_weight", 0.0))
+                for s in pipeline_stage_defs
+                if s.get("vad_speech_loss_weight") is not None
+            ],
+        ]
+    )
+
+    mrstft_cfg = mrstft_config
+    use_mrstft_loss = mrstft_cfg is not None and mrstft_cfg.factor > 0
+    mrstft_loss_fn = None
+    mrstft_hop_sizes = None
+    mrstft_istft = None
+    mrstft_target_len = None
+    if use_mrstft_loss:
+        if not mrstft_cfg or not mrstft_cfg.fft_sizes:
+            print("Warning: mrstft enabled but fft_sizes is empty; disabling MRSTFT loss.")
+            use_mrstft_loss = False
+        else:
+            from functools import partial
+
+            from df_mlx.ops import istft
+            from df_mlx.train import MultiResolutionSTFTLoss
+
+            mrstft_istft = partial(istft)
+            mrstft_hop_sizes = (
+                tuple(mrstft_cfg.hop_sizes) if mrstft_cfg.hop_sizes is not None else None
+            )
+            mrstft_loss_fn = MultiResolutionSTFTLoss(
+                fft_sizes=tuple(mrstft_cfg.fft_sizes),
+                hop_sizes=mrstft_hop_sizes,
+                gamma=mrstft_cfg.gamma,
+                factor=mrstft_cfg.factor,
+                f_complex=mrstft_cfg.f_complex,
+            )
+            mrstft_target_len = int(round(config.segment_length * config.sample_rate))
+
+    # GAN configuration (adversarial + feature matching)
+    gan_enabled = bool(gan_enabled or gan_adv_weight > 0 or gan_fm_weight > 0)
+    gan_disc_type = gan_disc_type.lower()
+    if gan_disc_type not in {"combined", "mpd", "msd"}:
+        print(f"Warning: unsupported gan_disc_type={gan_disc_type}; using combined.")
+        gan_disc_type = "combined"
+    gan_disc_update_freq = max(int(gan_disc_update_freq), 1)
+    gan_target_len = int(round(config.segment_length * config.sample_rate))
+    gan_istft = mrstft_istft
+
+    discriminator, disc_optimizer, feature_match_loss, gan_loss_fns = setup_gan(
+        gan_enabled=gan_enabled,
+        gan_disc_type=gan_disc_type,
+        gan_mpd_periods=gan_mpd_periods,
+        gan_mpd_channels=gan_mpd_channels,
+        gan_msd_scales=gan_msd_scales,
+        gan_msd_channels=gan_msd_channels,
+        gan_disc_lr=gan_disc_lr,
+        gan_disc_weight_decay=gan_disc_weight_decay,
+    )
+    if gan_enabled and gan_istft is None:
+        from functools import partial
+
+        from df_mlx.ops import istft
+
+        gan_istft = partial(istft)
+
+    if vad_eval_mode == "auto":
+        vad_eval_mode = "proxy" if (use_awesome_loss or use_pipeline_awesome_loss) else "off"
+    vad_eval_enabled = vad_eval_mode != "off"
+    silero_vad = None
+    if vad_eval_mode == "silero":
+        from df_mlx.vad_silero import SileroVAD, SileroVADConfig
+
+        silero_vad = SileroVAD(
+            SileroVADConfig(
+                sample_rate=vad_silero_sample_rate,
+                model_path=vad_silero_model_path,
+                max_seconds=vad_eval_max_seconds if vad_eval_max_seconds > 0 else None,
+                force_cpu=True,
+            )
+        )
+
+    use_vad_loss = stage_max_vad_weight > 0 or stage_max_vad_speech_weight > 0
+    use_vad_train_reg = _is_vad_train_reg_enabled(
+        vad_train_prob=vad_train_prob,
+        vad_train_every_steps=vad_train_every_steps,
+        max_stage_vad_weight=stage_max_vad_weight,
+    )
+
+    _SCALAR_ZERO = mx.array(0.0)
+    need_band_mask = (
+        use_vad_loss
+        or use_awesome_loss
+        or use_pipeline_awesome_loss
+        or vad_eval_enabled
+        or use_vad_train_reg
+    )
+    if need_band_mask:
+        n_freqs = config.fft_size // 2 + 1
+        vad_band_mask, vad_band_bins = _build_speech_band_mask(
+            n_freqs,
+            config.sample_rate,
+            vad_band_low_hz,
+            vad_band_high_hz,
+        )
+    else:
+        vad_band_mask = _SCALAR_ZERO
+        vad_band_bins = 1.0
+
+    return AuxLossSetupResult(
+        use_awesome_loss=use_awesome_loss,
+        use_pipeline_awesome_loss=use_pipeline_awesome_loss,
+        use_vad_loss=use_vad_loss,
+        use_vad_train_reg=use_vad_train_reg,
+        use_mrstft_loss=use_mrstft_loss,
+        pipeline_stage_defs=pipeline_stage_defs,
+        base_awesome_loss_weight=base_awesome_loss_weight,
+        base_vad_loss_weight=base_vad_loss_weight,
+        base_vad_speech_loss_weight=base_vad_speech_loss_weight,
+        stage_max_vad_weight=stage_max_vad_weight,
+        stage_max_vad_speech_weight=stage_max_vad_speech_weight,
+        mrstft_cfg=mrstft_cfg,
+        mrstft_loss_fn=mrstft_loss_fn,
+        mrstft_istft=mrstft_istft,
+        mrstft_target_len=mrstft_target_len,
+        mrstft_hop_sizes=mrstft_hop_sizes,
+        gan_enabled=gan_enabled,
+        gan_target_len=gan_target_len,
+        gan_istft=gan_istft,
+        gan_disc_type=gan_disc_type,
+        gan_disc_update_freq=gan_disc_update_freq,
+        discriminator=discriminator,
+        disc_optimizer=disc_optimizer,
+        feature_match_loss=feature_match_loss,
+        gan_loss_fns=gan_loss_fns,
+        vad_eval_enabled=vad_eval_enabled,
+        vad_eval_mode=vad_eval_mode,
+        silero_vad=silero_vad,
+        vad_band_mask=vad_band_mask,
+        vad_band_bins=vad_band_bins,
+    )
+
+
+def finalize_training(
+    *,
+    final_epoch: int,
+    global_step: int,
+    avg_train_loss: float,
+    best_valid_loss: float,
+    last_completed_epoch: int,
+    last_valid_epoch: int | None,
+    last_valid_loss: float | None,
+    model: Any,
+    optimizer: Any,
+    state: list,
+    discriminator: Any | None,
+    disc_optimizer: Any | None,
+    ckpt_dir: Any,  # Path
+    train_config: dict[str, Any],
+    active_stage_index: int,
+    active_stage_name: str,
+    tqdm_setup_panel: Any | None,
+    run_validation_fn: Any,  # Callable[[], float]
+) -> None:
+    """Run final validation, save final/best checkpoints, and print summary."""
+    import mlx.core as mx
+
+    from df_mlx.training_checkpoints import save_checkpoint
+
+    ckpt_dir_path = ckpt_dir if hasattr(ckpt_dir, "name") else __import__("pathlib").Path(ckpt_dir)
+
+    # Final validation to compare against best checkpoint.
+    final_valid_loss = float("inf")
+    if last_valid_epoch == final_epoch and last_valid_loss is not None:
+        final_valid_loss = last_valid_loss
+    else:
+        final_valid_loss = run_validation_fn()
+
+    if final_valid_loss < best_valid_loss:
+        best_valid_loss = final_valid_loss
+        best_path = ckpt_dir_path / "best.safetensors"
+        best_final_saved = save_checkpoint(
+            model,
+            best_path,
+            epoch=final_epoch,
+            batch_idx=None,
+            global_step=global_step,
+            loss=avg_train_loss,
+            best_valid_loss=best_valid_loss,
+            config=train_config,
+            optimizer=optimizer,
+            discriminator=discriminator,
+            disc_optimizer=disc_optimizer,
+            last_completed_epoch=max(last_completed_epoch, final_epoch),
+            pipeline_stage_index=active_stage_index,
+            pipeline_stage_name=active_stage_name,
+            kind="best_final",
+        )
+        if best_final_saved:
+            print(f"  ✅ Final weights set new best: {best_valid_loss:.4f}")
+        else:
+            print("  ⚠️  Failed to save final best checkpoint.")
+
+    # Save final weights (even if not aligned to checkpoint interval).
+    mx.eval(state)
+    final_path = ckpt_dir_path / "final.safetensors"
+    final_saved = save_checkpoint(
+        model,
+        final_path,
+        epoch=final_epoch,
+        batch_idx=None,
+        global_step=global_step,
+        loss=avg_train_loss,
+        best_valid_loss=best_valid_loss,
+        config=train_config,
+        optimizer=optimizer,
+        discriminator=discriminator,
+        disc_optimizer=disc_optimizer,
+        last_completed_epoch=max(last_completed_epoch, final_epoch),
+        pipeline_stage_index=active_stage_index,
+        pipeline_stage_name=active_stage_name,
+        kind="final",
+    )
+    if final_saved:
+        print(f"  📦 Final checkpoint saved: {final_path.name}")
+    else:
+        print("  ⚠️  Final checkpoint save failed.")
+
+    # ====== Final Summary ======
+    print("\n" + "=" * 60)
+    print("Training Complete")
+    print("=" * 60)
+    print(f"Final epoch:     {final_epoch + 1}")
+    print(f"Best valid loss: {best_valid_loss:.4f}")
+    if final_valid_loss != float("inf"):
+        print(f"Final valid loss: {final_valid_loss:.4f}")
+    else:
+        print("Final valid loss: N/A")
+    print(f"Final checkpoint: {final_path}")
+    print(f"Best checkpoint: {ckpt_dir_path / 'best.safetensors'}")
+    print(f"Checkpoints:     {ckpt_dir_path}")
+
+    if tqdm_setup_panel is not None:
+        tqdm_setup_panel.close()
+
+
+@dataclass
 class DataPipelineResult:
     """Result of data pipeline setup."""
 

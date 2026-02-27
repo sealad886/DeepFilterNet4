@@ -172,11 +172,14 @@ from df_mlx.training_diagnostics import (  # noqa: E402, F401
     diagnose_nonfinite as _diagnose_nonfinite_impl,
 )
 from df_mlx.training_setup import (  # noqa: E402
+    AuxLossSetupResult,
     DataPipelineResult,
     DatasetSetupResult,
     build_train_config,
+    finalize_training,
     print_epoch_summary,
     print_training_config,
+    setup_auxiliary_losses,
     setup_data_pipeline,
     setup_dataset,
     setup_gan,
@@ -505,71 +508,17 @@ def train(
     print("\nInitializing dynamic dataset...")
     dataset = DynamicDataset(config)
 
-    use_awesome_loss = dynamic_loss == "awesome"
-    use_pipeline_awesome_loss = dynamic_loss == "pipeline_awesome"
-    pipeline_stage_defs = sorted((pipeline_stages or []), key=lambda s: int(s.get("start_epoch", 0)))
-
-    base_awesome_loss_weight = awesome_loss_weight
-    base_vad_loss_weight = vad_loss_weight
-    base_vad_speech_loss_weight = vad_speech_loss_weight
-    stage_max_vad_weight = max(
-        [
-            base_vad_loss_weight,
-            *[
-                float(s.get("vad_loss_weight", 0.0))
-                for s in pipeline_stage_defs
-                if s.get("vad_loss_weight") is not None
-            ],
-        ]
-    )
-    stage_max_vad_speech_weight = max(
-        [
-            base_vad_speech_loss_weight,
-            *[
-                float(s.get("vad_speech_loss_weight", 0.0))
-                for s in pipeline_stage_defs
-                if s.get("vad_speech_loss_weight") is not None
-            ],
-        ]
-    )
-    mrstft_cfg = mrstft_config
-    use_mrstft_loss = mrstft_cfg is not None and mrstft_cfg.factor > 0
-    mrstft_loss_fn = None
-    mrstft_hop_sizes = None
-    mrstft_istft = None
-    mrstft_target_len = None
-    if use_mrstft_loss:
-        if not mrstft_cfg or not mrstft_cfg.fft_sizes:
-            print("Warning: mrstft enabled but fft_sizes is empty; disabling MRSTFT loss.")
-            use_mrstft_loss = False
-        else:
-            from functools import partial
-
-            from df_mlx.ops import istft
-
-            mrstft_istft = partial(istft)
-            mrstft_hop_sizes = tuple(mrstft_cfg.hop_sizes) if mrstft_cfg.hop_sizes is not None else None
-            mrstft_loss_fn = MultiResolutionSTFTLoss(
-                fft_sizes=tuple(mrstft_cfg.fft_sizes),
-                hop_sizes=mrstft_hop_sizes,
-                gamma=mrstft_cfg.gamma,
-                factor=mrstft_cfg.factor,
-                f_complex=mrstft_cfg.f_complex,
-            )
-            mrstft_target_len = int(round(config.segment_length * config.sample_rate))
-
-    # GAN configuration (adversarial + feature matching)
-    gan_enabled = bool(gan_enabled or gan_adv_weight > 0 or gan_fm_weight > 0)
-    gan_disc_type = gan_disc_type.lower()
-    if gan_disc_type not in {"combined", "mpd", "msd"}:
-        print(f"Warning: unsupported gan_disc_type={gan_disc_type}; using combined.")
-        gan_disc_type = "combined"
-    gan_disc_update_freq = max(int(gan_disc_update_freq), 1)
-    gan_target_len = int(round(config.segment_length * config.sample_rate))
-    gan_istft = mrstft_istft
-
-    discriminator, disc_optimizer, feature_match_loss, gan_loss_fns = setup_gan(
+    _aux = setup_auxiliary_losses(
+        config=config,
+        dynamic_loss=dynamic_loss,
+        pipeline_stages=pipeline_stages,
+        awesome_loss_weight=awesome_loss_weight,
+        vad_loss_weight=vad_loss_weight,
+        vad_speech_loss_weight=vad_speech_loss_weight,
+        mrstft_config=mrstft_config,
         gan_enabled=gan_enabled,
+        gan_adv_weight=gan_adv_weight,
+        gan_fm_weight=gan_fm_weight,
         gan_disc_type=gan_disc_type,
         gan_mpd_periods=gan_mpd_periods,
         gan_mpd_channels=gan_mpd_channels,
@@ -577,51 +526,47 @@ def train(
         gan_msd_channels=gan_msd_channels,
         gan_disc_lr=gan_disc_lr,
         gan_disc_weight_decay=gan_disc_weight_decay,
-    )
-    if gan_enabled and gan_istft is None:
-        from functools import partial
-
-        from df_mlx.ops import istft
-
-        gan_istft = partial(istft)
-
-    if vad_eval_mode == "auto":
-        vad_eval_mode = "proxy" if (use_awesome_loss or use_pipeline_awesome_loss) else "off"
-    vad_eval_enabled = vad_eval_mode != "off"
-    silero_vad = None
-    if vad_eval_mode == "silero":
-        from df_mlx.vad_silero import SileroVAD, SileroVADConfig
-
-        silero_vad = SileroVAD(
-            SileroVADConfig(
-                sample_rate=vad_silero_sample_rate,
-                model_path=vad_silero_model_path,
-                max_seconds=vad_eval_max_seconds if vad_eval_max_seconds > 0 else None,
-                force_cpu=True,
-            )
-        )
-
-    use_vad_loss = stage_max_vad_weight > 0 or stage_max_vad_speech_weight > 0
-    use_vad_train_reg = _is_vad_train_reg_enabled(
+        gan_disc_update_freq=gan_disc_update_freq,
+        vad_eval_mode=vad_eval_mode,
+        vad_silero_model_path=vad_silero_model_path,
+        vad_silero_sample_rate=vad_silero_sample_rate,
+        vad_eval_max_seconds=vad_eval_max_seconds,
+        vad_band_low_hz=vad_band_low_hz,
+        vad_band_high_hz=vad_band_high_hz,
         vad_train_prob=vad_train_prob,
         vad_train_every_steps=vad_train_every_steps,
-        max_stage_vad_weight=stage_max_vad_weight,
     )
-
-    need_band_mask = (
-        use_vad_loss or use_awesome_loss or use_pipeline_awesome_loss or vad_eval_enabled or use_vad_train_reg
-    )
-    if need_band_mask:
-        n_freqs = config.fft_size // 2 + 1
-        vad_band_mask, vad_band_bins = _build_speech_band_mask(
-            n_freqs,
-            config.sample_rate,
-            vad_band_low_hz,
-            vad_band_high_hz,
-        )
-    else:
-        vad_band_mask = _SCALAR_ZERO
-        vad_band_bins = 1.0
+    use_awesome_loss = _aux.use_awesome_loss
+    use_pipeline_awesome_loss = _aux.use_pipeline_awesome_loss
+    pipeline_stage_defs = _aux.pipeline_stage_defs
+    base_awesome_loss_weight = _aux.base_awesome_loss_weight
+    base_vad_loss_weight = _aux.base_vad_loss_weight
+    base_vad_speech_loss_weight = _aux.base_vad_speech_loss_weight
+    stage_max_vad_weight = _aux.stage_max_vad_weight
+    stage_max_vad_speech_weight = _aux.stage_max_vad_speech_weight
+    mrstft_cfg = _aux.mrstft_cfg
+    use_mrstft_loss = _aux.use_mrstft_loss
+    mrstft_loss_fn = _aux.mrstft_loss_fn
+    mrstft_istft = _aux.mrstft_istft
+    mrstft_target_len = _aux.mrstft_target_len
+    mrstft_hop_sizes = _aux.mrstft_hop_sizes
+    gan_enabled = _aux.gan_enabled
+    gan_target_len = _aux.gan_target_len
+    gan_istft = _aux.gan_istft
+    gan_disc_type = _aux.gan_disc_type
+    gan_disc_update_freq = _aux.gan_disc_update_freq
+    discriminator = _aux.discriminator
+    disc_optimizer = _aux.disc_optimizer
+    feature_match_loss = _aux.feature_match_loss
+    gan_loss_fns = _aux.gan_loss_fns
+    vad_eval_enabled = _aux.vad_eval_enabled
+    vad_eval_mode = _aux.vad_eval_mode
+    silero_vad = _aux.silero_vad
+    vad_band_mask = _aux.vad_band_mask
+    vad_band_bins = _aux.vad_band_bins
+    use_vad_loss = _aux.use_vad_loss
+    use_vad_train_reg = _aux.use_vad_train_reg
+    del _aux
 
     min_lr = learning_rate_min if learning_rate_min is not None else learning_rate * 0.01
 
@@ -2922,11 +2867,8 @@ def train(
             gc.collect()
 
     # Final validation to compare against best checkpoint.
-    final_valid_loss = float("inf")
-    if last_valid_epoch == final_epoch and last_valid_loss is not None:
-        final_valid_loss = last_valid_loss
-    else:
-        final_valid_loss = _run_validation(
+    def _run_final_validation() -> float:
+        return _run_validation(
             _valid_ctx,
             epoch=final_epoch,
             global_step=global_step,
@@ -2939,75 +2881,27 @@ def train(
             label="  Final validation",
             do_vad_eval=vad_eval_enabled,
         )
-        last_valid_loss = final_valid_loss
-        last_valid_epoch = final_epoch
 
-    if final_valid_loss < best_valid_loss:
-        best_valid_loss = final_valid_loss
-        best_path = ckpt_dir / "best.safetensors"
-        best_final_saved = save_checkpoint(
-            model,
-            best_path,
-            epoch=final_epoch,
-            batch_idx=None,
-            global_step=global_step,
-            loss=avg_train_loss,
-            best_valid_loss=best_valid_loss,
-            config=train_config,
-            optimizer=optimizer,
-            discriminator=discriminator,
-            disc_optimizer=disc_optimizer,
-            last_completed_epoch=max(last_completed_epoch, final_epoch),
-            pipeline_stage_index=active_stage_index,
-            pipeline_stage_name=active_stage_name,
-            kind="best_final",
-        )
-        if best_final_saved:
-            print(f"  ✅ Final weights set new best: {best_valid_loss:.4f}")
-        else:
-            print("  ⚠️  Failed to save final best checkpoint.")
-
-    # Save final weights (even if not aligned to checkpoint interval).
-    mx.eval(state)
-    final_path = ckpt_dir / "final.safetensors"
-    final_saved = save_checkpoint(
-        model,
-        final_path,
-        epoch=final_epoch,
-        batch_idx=None,
+    finalize_training(
+        final_epoch=final_epoch,
         global_step=global_step,
-        loss=avg_train_loss,
+        avg_train_loss=avg_train_loss,
         best_valid_loss=best_valid_loss,
-        config=train_config,
+        last_completed_epoch=last_completed_epoch,
+        last_valid_epoch=last_valid_epoch,
+        last_valid_loss=last_valid_loss,
+        model=model,
         optimizer=optimizer,
+        state=state,
         discriminator=discriminator,
         disc_optimizer=disc_optimizer,
-        last_completed_epoch=max(last_completed_epoch, final_epoch),
-        pipeline_stage_index=active_stage_index,
-        pipeline_stage_name=active_stage_name,
-        kind="final",
+        ckpt_dir=ckpt_dir,
+        train_config=train_config,
+        active_stage_index=active_stage_index,
+        active_stage_name=active_stage_name,
+        tqdm_setup_panel=tqdm_setup_panel,
+        run_validation_fn=_run_final_validation,
     )
-    if final_saved:
-        print(f"  📦 Final checkpoint saved: {final_path.name}")
-    else:
-        print("  ⚠️  Final checkpoint save failed.")
-
-    # ====== Final Summary ======
-    print("\n" + "=" * 60)
-    print("Training Complete")
-    print("=" * 60)
-    print(f"Final epoch:     {final_epoch + 1}")
-    print(f"Best valid loss: {best_valid_loss:.4f}")
-    if final_valid_loss != float("inf"):
-        print(f"Final valid loss: {final_valid_loss:.4f}")
-    else:
-        print("Final valid loss: N/A")
-    print(f"Final checkpoint: {final_path}")
-    print(f"Best checkpoint: {ckpt_dir / 'best.safetensors'}")
-    print(f"Checkpoints:     {ckpt_dir}")
-
-    if tqdm_setup_panel is not None:
-        tqdm_setup_panel.close()
 
 
 # main() is now in df_mlx.training_cli_main (re-exported above).
