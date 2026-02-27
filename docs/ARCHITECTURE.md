@@ -566,7 +566,7 @@ MLX framework constraints on compile and autograd boundaries:
   requires the loss function to capture model/state as closure variables.
 - **`loss_fn_gan`** (~225 lines): GAN loss variant with the same closure constraint,
   additionally capturing discriminator state.
-- **Compiled step variants** (6 functions, ~320 lines): Wrapped with
+- **Compiled step variants** (6 functions, ~220 lines): Wrapped with
   `@mx.compile(inputs=state, outputs=state)` — the compile boundary requires state dict
   capture as nonlocal variables.
 - **`_sync_data_stream_stage`** and diagnostic helpers (~75 lines): Capture nonlocal

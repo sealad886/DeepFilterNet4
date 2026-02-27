@@ -32,7 +32,7 @@ import mlx.core as mx
 import numpy as np
 
 if TYPE_CHECKING:
-    from df_mlx.train_dynamic import NumericDebugger
+    from df_mlx.training_ops import NumericDebugger
 
 # =============================================================================
 # VAD-based speech preservation helpers

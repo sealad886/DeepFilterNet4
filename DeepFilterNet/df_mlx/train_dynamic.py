@@ -15,8 +15,8 @@ eight helper modules (see the ``# noqa: F401`` block and
 Key exports:
     - train: Main entry-point — builds closures, runs epoch/batch loop.
     - (re-exports): All public symbols from training_checkpoints,
-      training_cli, training_losses, training_ops, training_session,
-      training_signals, and training_waveform.
+      training_cli, training_cli_main, training_losses, training_ops,
+      training_session, training_signals, and training_waveform.
 
 Usage:
     python -m df_mlx.train_dynamic \\
@@ -201,9 +201,6 @@ if TYPE_CHECKING:
 # value-immutable, so sharing a single instance is safe.
 _SCALAR_ZERO = mx.array(0.0)
 
-# Clamp discriminator logits before hinge losses to prevent rare runaway
-# values from dominating the composite loss while preserving sign.
-_GAN_SCORE_ABS_CLIP = 30.0
 
 # =============================================================================
 # tqdm configuration

@@ -10,8 +10,9 @@ Key exports:
     - main: CLI entry-point — parse arguments, build RunConfig, call train().
 
 Relationship to train_dynamic:
-    Imported directly by train_dynamic.py (not a backward-compat re-export).
-    ``main()`` is the outermost layer that feeds configuration into train().
+    Imported by train_dynamic.py and included in the backward-compat re-export
+    block.  ``main()`` is the outermost layer that feeds configuration into
+    train().
 """
 
 from __future__ import annotations

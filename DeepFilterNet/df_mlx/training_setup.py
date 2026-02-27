@@ -9,7 +9,6 @@ Key exports:
     - DatasetSetupResult / setup_dataset: Build and validate the DatasetConfig.
     - DataPipelineResult / setup_data_pipeline: Construct train/valid iterators.
     - AuxLossSetupResult / setup_auxiliary_losses: Wire VAD, awesome, pipeline losses.
-    - setup_gan: Initialise discriminator, disc optimizer, and disc scheduler.
     - print_training_config: Pretty-print the full training configuration panel.
     - build_train_config: Assemble the flat config dict saved alongside checkpoints.
     - print_epoch_summary: Log end-of-epoch stats.
@@ -24,10 +23,7 @@ Relationship to train_dynamic:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    pass
+from typing import Any
 
 
 @dataclass
