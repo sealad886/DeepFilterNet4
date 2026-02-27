@@ -62,7 +62,7 @@ class TrainingDashboard:
         if self.live:
             self.live.stop()
 
-    def write(self, message: str):
+    def write(self, message: str = ""):
         if self.disable:
             print(message, file=sys.stderr)
         elif self.live:
