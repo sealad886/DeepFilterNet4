@@ -58,7 +58,7 @@ LD_OVERRIDE=""
 CARGO_INCLUDE_PYDF=0
 DRY_RUN=0
 PRINT_ENV=0
-PY_EDITABLE=0
+# PY_EDITABLE=0
 
 usage() {
   cat <<'EOF'
@@ -69,7 +69,7 @@ Python (default on):
   --python-bin PATH         Python interpreter to use (default: python3.10)
   --venv DIR                Virtualenv directory (default: .venv)
   --no-python               Skip Python environment setup
-  --editable                Install Python packages in editable mode (pip install -e .)
+  --(no-)editable           Install Python packages in editable mode (pip install -e .)
   --all                     Convenience: enables extras dev,train,eval and builds pyDF + pyDF-data + pyDF-augment; also sets editable mode for Python.
 
 Cargo (default on):
@@ -155,12 +155,16 @@ while [[ $# -gt 0 ]]; do
       PRINT_ENV=1
       shift 1
       ;;
-    --dry-run)
+    -n|--dry-run)
       DRY_RUN=1
       shift 1
       ;;
     --editable)
       PY_EDITABLE=1
+      shift 1
+      ;;
+    --no-editable)
+      PY_EDITABLE=0
       shift 1
       ;;
     -h|--help)
@@ -181,7 +185,7 @@ if [[ $USE_ALL -eq 1 ]]; then
   BUILD_PYDF=1
   BUILD_PYDF_DATA=1
   BUILD_PYDF_AUGMENT=1
-  PY_EDITABLE=1
+  PY_EDITABLE="${PY_EDITABLE:-1}"
 fi
 
 # ------------------------- print-env ------------------------- #

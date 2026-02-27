@@ -69,9 +69,7 @@ def is_vad_train_reg_enabled(
     return (vad_train_prob > 0 or vad_train_every_steps > 0) and max_stage_vad_weight > 0
 
 
-def _resolve_pipeline_stage_by_index(
-    stage_index: int, pipeline_stage_defs: list[dict[str, Any]]
-) -> dict[str, Any]:
+def _resolve_pipeline_stage_by_index(stage_index: int, pipeline_stage_defs: list[dict[str, Any]]) -> dict[str, Any]:
     """Return stage metadata for a fixed stage index."""
     from df_mlx.training_cli import _resolve_pipeline_stage
 

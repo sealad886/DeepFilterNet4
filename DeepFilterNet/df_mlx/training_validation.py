@@ -768,4 +768,3 @@ def run_validation(
                 tqdm.write(f"\u26a0\ufe0f  Failed to write ablation metrics: {exc}")
 
     return valid_loss / max(num_valid_batches, 1)
-

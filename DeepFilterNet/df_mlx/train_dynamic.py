@@ -46,13 +46,11 @@ import random
 import sys
 import time
 from itertools import islice
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Tuple
 
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
-import numpy as np
 from tqdm.auto import tqdm
 
 from df_mlx.hardware import print_hardware_diagnostics  # noqa: E402, F401
@@ -90,19 +88,18 @@ from df_mlx.training_cli import (  # noqa: E402, F401
     _resolve_pipeline_stage,
 )
 from df_mlx.training_cli_main import main  # noqa: E402, F401
-from df_mlx.training_helpers import (  # noqa: E402, F401
-    _resolve_pipeline_stage_by_index,
-    build_setup_panel_line as _build_setup_panel_line,
-    clip_gan_scores as _clip_gan_scores,
-    curriculum_schedule,
-    is_vad_train_reg_enabled as _is_vad_train_reg_enabled,
-    print_compiled_step_eligibility,
+from df_mlx.training_diagnostics import (
+    DiagnosticContext,
 )
-from df_mlx.training_metrics import (
-    collect_sync_metrics,
-    compute_epoch_averages,
-    create_epoch_accums,
-    update_progress_bar,
+from df_mlx.training_diagnostics import diagnose_nonfinite as _diagnose_nonfinite_impl  # noqa: E402, F401
+from df_mlx.training_helpers import (
+    _resolve_pipeline_stage_by_index,
+)
+from df_mlx.training_helpers import build_setup_panel_line as _build_setup_panel_line  # noqa: E402, F401
+from df_mlx.training_helpers import clip_gan_scores as _clip_gan_scores
+from df_mlx.training_helpers import (
+    curriculum_schedule,
+    print_compiled_step_eligibility,
 )
 from df_mlx.training_losses import (  # noqa: E402, F401
     _AWESOME_ENERGY_BOOST_DB,
@@ -146,6 +143,12 @@ from df_mlx.training_losses import (  # noqa: E402, F401
     _snr_bucket_name,
     _sync_model_config_with_dataset,
 )
+from df_mlx.training_metrics import (
+    collect_sync_metrics,
+    compute_epoch_averages,
+    create_epoch_accums,
+    update_progress_bar,
+)
 from df_mlx.training_ops import (  # noqa: E402, F401
     NumericDebugConfig,
     NumericDebugger,
@@ -161,26 +164,7 @@ from df_mlx.training_session import (  # noqa: E402, F401
     TrainingSession,
     _kwargs_from_run_config,
 )
-from df_mlx.training_signals import (  # noqa: E402, F401
-    _handle_sigint,
-    _interrupt_state,
-    _register_sigint_handler,
-    _update_interrupt_state,
-)
-from df_mlx.training_waveform import (  # noqa: E402, F401
-    _disc_crop_waveform,
-    _gan_waveform_view,
-    compute_mrstft_loss,
-    specs_to_wavs,
-)
-from df_mlx.training_diagnostics import (  # noqa: E402, F401
-    DiagnosticContext,
-    diagnose_nonfinite as _diagnose_nonfinite_impl,
-)
 from df_mlx.training_setup import (  # noqa: E402
-    AuxLossSetupResult,
-    DataPipelineResult,
-    DatasetSetupResult,
     build_train_config,
     finalize_training,
     print_epoch_summary,
@@ -188,11 +172,22 @@ from df_mlx.training_setup import (  # noqa: E402
     setup_auxiliary_losses,
     setup_data_pipeline,
     setup_dataset,
-    setup_gan,
 )
-from df_mlx.training_validation import (  # noqa: E402, F401
+from df_mlx.training_signals import (  # noqa: E402, F401
+    _handle_sigint,
+    _interrupt_state,
+    _register_sigint_handler,
+    _update_interrupt_state,
+)
+from df_mlx.training_validation import (
     ValidationContext,
-    run_validation as _run_validation,
+)
+from df_mlx.training_validation import run_validation as _run_validation  # noqa: E402, F401
+from df_mlx.training_waveform import (  # noqa: E402, F401
+    _disc_crop_waveform,
+    _gan_waveform_view,
+    compute_mrstft_loss,
+    specs_to_wavs,
 )
 
 # sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -440,17 +435,12 @@ def train(
     """
     from df_mlx.config import get_default_config
     from df_mlx.dynamic_dataset import (
-        HAS_MLX_DATA,
-        DatasetConfig,
         DynamicDataset,
-        MLXDataStream,
         PrefetchDataLoader,
-        read_file_list,
     )
     from df_mlx.hardware import HardwareConfig
-    from df_mlx.hf_paths import hf_dataset_fsspec_path, normalize_hf_dataset_cache_dir
     from df_mlx.model import count_parameters, init_model
-    from df_mlx.train import MultiResolutionSTFTLoss, WarmupCosineSchedule, spectral_loss
+    from df_mlx.train import WarmupCosineSchedule, spectral_loss
 
     print("=" * 60)
     print("MLX DeepFilterNet4 Training - Dynamic On-the-Fly Mixing")
@@ -541,14 +531,11 @@ def train(
     base_awesome_loss_weight = _aux.base_awesome_loss_weight
     base_vad_loss_weight = _aux.base_vad_loss_weight
     base_vad_speech_loss_weight = _aux.base_vad_speech_loss_weight
-    stage_max_vad_weight = _aux.stage_max_vad_weight
-    stage_max_vad_speech_weight = _aux.stage_max_vad_speech_weight
     mrstft_cfg = _aux.mrstft_cfg
     use_mrstft_loss = _aux.use_mrstft_loss
     mrstft_loss_fn = _aux.mrstft_loss_fn
     mrstft_istft = _aux.mrstft_istft
     mrstft_target_len = _aux.mrstft_target_len
-    mrstft_hop_sizes = _aux.mrstft_hop_sizes
     gan_enabled = _aux.gan_enabled
     gan_target_len = _aux.gan_target_len
     gan_istft = _aux.gan_istft
@@ -733,7 +720,6 @@ def train(
     )
     ckpt_dir = pipeline.ckpt_dir
     debugger = pipeline.debugger
-    debug_dump_dir = pipeline.debug_dump_dir
     validation_report = pipeline.validation_report
     use_mlx_stream = pipeline.use_mlx_stream
     train_stream = pipeline.train_stream
@@ -1282,7 +1268,6 @@ def train(
             debug_ctx,
             gan_active=gan_active,
         )
-
 
     # -- Compile-boundary shape guardrails ----------------------------------
     def _assert_compile_boundary_shapes(
@@ -2097,7 +2082,8 @@ def train(
                         else:
                             did_optimizer_update = False
                             tqdm.write(
-                                "⚠️  Non-finite grads after clipping; skipping optimizer update " f"(step={global_step})"
+                                "⚠️  Non-finite grads after clipping; skipping optimizer update "
+                                f"(step={global_step})"
                             )
                         accumulated_grads = None
                         accumulated_loss = _SCALAR_ZERO

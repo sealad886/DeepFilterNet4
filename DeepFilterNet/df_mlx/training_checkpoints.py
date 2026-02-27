@@ -928,9 +928,7 @@ def reconcile_resume(
         if state:
             ckpt_epoch = int(state.get("epoch", 0))
             ckpt_kind = state.get("kind", "epoch_end")
-            result.resume_checkpoint_kind = (
-                ckpt_kind if isinstance(ckpt_kind, str) else "epoch_end"
-            )
+            result.resume_checkpoint_kind = ckpt_kind if isinstance(ckpt_kind, str) else "epoch_end"
             result.resume_global_step = state.get(
                 "optimizer_steps_completed",
                 state.get("global_step", ckpt_epoch * optimizer_steps_per_epoch),
@@ -938,13 +936,9 @@ def reconcile_resume(
             result.start_epoch = compute_resume_epoch(state)
             completed_kinds = {"epoch_end", "best", "best_final", "final"}
             if ckpt_kind in completed_kinds:
-                result.last_completed_epoch = state.get(
-                    "last_completed_epoch", ckpt_epoch
-                )
+                result.last_completed_epoch = state.get("last_completed_epoch", ckpt_epoch)
             else:
-                result.last_completed_epoch = state.get(
-                    "last_completed_epoch", ckpt_epoch - 1
-                )
+                result.last_completed_epoch = state.get("last_completed_epoch", ckpt_epoch - 1)
             if ckpt_kind in _IN_PROGRESS_KINDS:
                 result.resume_batch_idx = resolve_resume_batch_count(state)
             result.best_valid_loss = state.get("best_valid_loss", float("inf"))
@@ -974,19 +968,13 @@ def reconcile_resume(
                 f"global_step {result.resume_global_step}"
             )
             if result.start_epoch >= epochs:
-                print(
-                    f"\u2705 Training already complete "
-                    f"(checkpoint epoch {ckpt_epoch}/{epochs})."
-                )
+                print(f"\u2705 Training already complete " f"(checkpoint epoch {ckpt_epoch}/{epochs}).")
                 if tqdm_setup_panel is not None:
                     tqdm_setup_panel.close()
                 result.should_return_early = True
                 return result
 
-    if (
-        validation_report
-        and validation_report["last_completed_epoch"] > result.last_completed_epoch
-    ):
+    if validation_report and validation_report["last_completed_epoch"] > result.last_completed_epoch:
         result.last_completed_epoch = validation_report["last_completed_epoch"]
 
     if train_stream is not None and result.data_resume_progress is not None:
@@ -1000,17 +988,13 @@ def reconcile_resume(
                 f"source={data_resume_source}, "
                 f"progress={result.data_resume_progress}"
             )
-        if data_stage_index is not None and (
-            not isinstance(data_stage_index, int) or data_stage_index < 0
-        ):
+        if data_stage_index is not None and (not isinstance(data_stage_index, int) or data_stage_index < 0):
             raise RuntimeError(
-                "Data checkpoint stage is malformed. "
-                f"source={data_resume_source}, stage={data_stage_index}"
+                "Data checkpoint stage is malformed. " f"source={data_resume_source}, stage={data_stage_index}"
             )
         if data_stage_name is not None and not isinstance(data_stage_name, str):
             raise RuntimeError(
-                "Data checkpoint stage name is malformed. "
-                f"source={data_resume_source}, stage_name={data_stage_name}"
+                "Data checkpoint stage name is malformed. " f"source={data_resume_source}, stage_name={data_stage_name}"
             )
 
         if resume_from is not None and isinstance(data_stage_index, int):
@@ -1034,23 +1018,13 @@ def reconcile_resume(
                     f"data={data_stage_index} \u2192 "
                     f"model={result.resume_stage_index}."
                 )
-                train_stream._checkpoint.pipeline_stage_index = (
-                    result.resume_stage_index
-                )
+                train_stream._checkpoint.pipeline_stage_index = result.resume_stage_index
                 if result.resume_stage_name is not None:
-                    train_stream._checkpoint.pipeline_stage_name = (
-                        result.resume_stage_name
-                    )
+                    train_stream._checkpoint.pipeline_stage_name = result.resume_stage_name
 
-        resume_requires_mid_epoch = (
-            resume_from is not None
-            and result.resume_checkpoint_kind in _IN_PROGRESS_KINDS
-        )
+        resume_requires_mid_epoch = resume_from is not None and result.resume_checkpoint_kind in _IN_PROGRESS_KINDS
         if resume_requires_mid_epoch:
-            if (
-                data_epoch != result.start_epoch
-                or data_batch != result.resume_batch_idx
-            ):
+            if data_epoch != result.start_epoch or data_batch != result.resume_batch_idx:
                 batch_delta = abs(data_batch - result.resume_batch_idx)
                 if data_epoch == result.start_epoch and batch_delta <= 1:
                     print(
@@ -1093,8 +1067,7 @@ def reconcile_resume(
 
     if resume_from:
         lc_display = (
-            f"{result.last_completed_epoch + 1} "
-            f"(idx {result.last_completed_epoch})"
+            f"{result.last_completed_epoch + 1} " f"(idx {result.last_completed_epoch})"
             if result.last_completed_epoch >= 0
             else "none"
         )

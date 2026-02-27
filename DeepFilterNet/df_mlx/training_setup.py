@@ -7,7 +7,7 @@ training loop itself.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -306,9 +306,7 @@ def print_training_config(
         print(f"  VAD SNR gate:  {vad_snr_gate_db} dB (width {vad_snr_gate_width} dB)")
         print(f"  VAD band:      {vad_band_low_hz:.0f}-{vad_band_high_hz:.0f} Hz")
     if vad_eval_enabled:
-        print(
-            f"  VAD eval:      mode={vad_eval_mode} every={vad_eval_every} epochs batches={vad_eval_batches}"
-        )
+        print(f"  VAD eval:      mode={vad_eval_mode} every={vad_eval_every} epochs batches={vad_eval_batches}")
         if vad_eval_mode == "silero":
             max_sec = vad_eval_max_seconds if vad_eval_max_seconds > 0 else "full"
             print(
@@ -318,8 +316,7 @@ def print_training_config(
             )
     if use_vad_train_reg:
         print(
-            "  VAD train:     "
-            f"prob={vad_train_prob} every_steps={vad_train_every_steps} (weight={vad_loss_weight})"
+            "  VAD train:     " f"prob={vad_train_prob} every_steps={vad_train_every_steps} (weight={vad_loss_weight})"
         )
     if pipeline_stage_defs:
         print("  Pipeline stages:")
@@ -360,9 +357,7 @@ def build_train_config(
         "mrstft_gamma": mrstft_cfg.gamma if mrstft_cfg is not None else 1.0,
         "mrstft_f_complex": mrstft_cfg.f_complex if mrstft_cfg is not None else None,
         "mrstft_fft_sizes": list(mrstft_cfg.fft_sizes) if mrstft_cfg is not None else None,
-        "mrstft_hop_sizes": (
-            list(mrstft_cfg.hop_sizes) if (mrstft_cfg and mrstft_cfg.hop_sizes) else None
-        ),
+        "mrstft_hop_sizes": (list(mrstft_cfg.hop_sizes) if (mrstft_cfg and mrstft_cfg.hop_sizes) else None),
         "gan_mpd_periods": list(gan_mpd_periods) if gan_mpd_periods else [2, 3, 5, 7, 11],
         **params,
     }
@@ -492,10 +487,7 @@ def print_epoch_summary(
         if use_vad_loss and num_vad_logs > 0:
             avg_vad_clip_ref = train_vad_clip_ref / num_vad_logs
             avg_vad_clip_out = train_vad_clip_out / num_vad_logs
-            parts.append(
-                f"vad_clip_ref={avg_vad_clip_ref:.1f}% "
-                f"vad_clip_out={avg_vad_clip_out:.1f}%"
-            )
+            parts.append(f"vad_clip_ref={avg_vad_clip_ref:.1f}% " f"vad_clip_out={avg_vad_clip_out:.1f}%")
         if parts:
             print("  Debug numerics: " + " | ".join(parts))
 
@@ -537,9 +529,7 @@ def setup_gan(
     if gan_disc_type == "mpd":
         discriminator = MultiPeriodDiscriminator(periods=mpd_periods, channels=gan_mpd_channels)
     elif gan_disc_type == "msd":
-        discriminator = MultiScaleDiscriminator(
-            num_scales=gan_msd_scales, channels=gan_msd_channels
-        )
+        discriminator = MultiScaleDiscriminator(num_scales=gan_msd_scales, channels=gan_msd_channels)
     else:
         discriminator = CombinedDiscriminator(
             mpd_periods=mpd_periods,
@@ -637,9 +627,7 @@ def setup_auxiliary_losses(
 
     use_awesome_loss = dynamic_loss == "awesome"
     use_pipeline_awesome_loss = dynamic_loss == "pipeline_awesome"
-    pipeline_stage_defs = sorted(
-        (pipeline_stages or []), key=lambda s: int(s.get("start_epoch", 0))
-    )
+    pipeline_stage_defs = sorted((pipeline_stages or []), key=lambda s: int(s.get("start_epoch", 0)))
 
     base_awesome_loss_weight = awesome_loss_weight
     base_vad_loss_weight = vad_loss_weight
@@ -682,9 +670,7 @@ def setup_auxiliary_losses(
             from df_mlx.train import MultiResolutionSTFTLoss
 
             mrstft_istft = partial(istft)
-            mrstft_hop_sizes = (
-                tuple(mrstft_cfg.hop_sizes) if mrstft_cfg.hop_sizes is not None else None
-            )
+            mrstft_hop_sizes = tuple(mrstft_cfg.hop_sizes) if mrstft_cfg.hop_sizes is not None else None
             mrstft_loss_fn = MultiResolutionSTFTLoss(
                 fft_sizes=tuple(mrstft_cfg.fft_sizes),
                 hop_sizes=mrstft_hop_sizes,
@@ -746,11 +732,7 @@ def setup_auxiliary_losses(
 
     _SCALAR_ZERO = mx.array(0.0)
     need_band_mask = (
-        use_vad_loss
-        or use_awesome_loss
-        or use_pipeline_awesome_loss
-        or vad_eval_enabled
-        or use_vad_train_reg
+        use_vad_loss or use_awesome_loss or use_pipeline_awesome_loss or vad_eval_enabled or use_vad_train_reg
     )
     if need_band_mask:
         n_freqs = config.fft_size // 2 + 1

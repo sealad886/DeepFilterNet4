@@ -7,6 +7,7 @@ At each sync boundary (every eval_frequency batches), these functions:
 3. Accumulate per-epoch totals
 4. Format and display progress bar metrics
 """
+
 from __future__ import annotations
 
 import math
@@ -28,7 +29,6 @@ from df_mlx.training_losses import (
 )
 from df_mlx.training_ops import _batch_to_float
 from df_mlx.training_waveform import (
-    _disc_crop_waveform,
     _gan_waveform_view,
     compute_mrstft_loss,
     specs_to_wavs,
@@ -38,9 +38,7 @@ _SCALAR_ZERO = mx.array(0.0)
 _GAN_SCORE_ABS_CLIP = 30.0
 
 
-def _clip_gan_scores_default(
-    scores: list[mx.array], clip_value: float = _GAN_SCORE_ABS_CLIP
-) -> list[mx.array]:
+def _clip_gan_scores_default(scores: list[mx.array], clip_value: float = _GAN_SCORE_ABS_CLIP) -> list[mx.array]:
     return clip_gan_scores(scores=scores, clip_value=clip_value)
 
 
@@ -710,9 +708,7 @@ def update_progress_bar(
             fm=f"{gan_fm_loss_val:.4f}" if gan_active else "0.0000",
             vad=f"{vad_loss_val:.4f}" if use_vad_loss else "0.0000",
             speech=f"{speech_loss_val:.4f}" if use_vad_loss else "0.0000",
-            awesome=(
-                f"{awesome_loss_val:.4f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.0000"
-            ),
+            awesome=(f"{awesome_loss_val:.4f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.0000"),
             mask=(f"{mask_mean:.2f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.00"),
             lr=f"{lr:.1e}",
             data=f"{data_time * 1000:.0f}ms",
@@ -730,9 +726,7 @@ def update_progress_bar(
             fm=f"{gan_fm_loss_val:.4f}" if gan_active else "0.0000",
             vad=f"{vad_loss_val:.4f}" if use_vad_loss else "0.0000",
             speech=f"{speech_loss_val:.4f}" if use_vad_loss else "0.0000",
-            awesome=(
-                f"{awesome_loss_val:.4f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.0000"
-            ),
+            awesome=(f"{awesome_loss_val:.4f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.0000"),
             mask=(f"{mask_mean:.2f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.00"),
             p_ref=f"{p_ref_mean:.2f}" if use_vad_loss else "0.00",
             p_out=f"{p_out_mean:.2f}" if use_vad_loss else "0.00",

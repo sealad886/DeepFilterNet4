@@ -7,7 +7,7 @@ a non-finite loss is detected during training.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
 
 import mlx.core as mx
@@ -130,12 +130,7 @@ def diagnose_nonfinite(
         )
         _diag_check("mrstft_loss", mrstft_loss)
 
-    if (
-        gan_active
-        and ctx.gan_loss_fns is not None
-        and ctx.discriminator is not None
-        and ctx.gan_istft is not None
-    ):
+    if gan_active and ctx.gan_loss_fns is not None and ctx.discriminator is not None and ctx.gan_istft is not None:
         out_wav, clean_wav = specs_to_wavs(
             spec_out,
             (clean_real, clean_imag),
