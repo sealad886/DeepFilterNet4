@@ -59,6 +59,15 @@ CARGO_INCLUDE_PYDF=0
 DRY_RUN=0
 PRINT_ENV=0
 PY_EDITABLE="${PY_EDITABLE:-0}"
+# Normalize env-supplied PY_EDITABLE to 0 or 1 before any numeric comparisons.
+case "${PY_EDITABLE}" in
+  1|true|yes|on)  PY_EDITABLE=1 ;;
+  0|false|no|off) PY_EDITABLE=0 ;;
+  *)
+    echo "ERROR: PY_EDITABLE must be 0 or 1 (got '${PY_EDITABLE}')" >&2
+    exit 2
+    ;;
+esac
 PY_EDITABLE_EXPLICIT=0
 
 usage() {
