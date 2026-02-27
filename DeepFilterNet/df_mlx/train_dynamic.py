@@ -88,6 +88,12 @@ from df_mlx.training_cli import (  # noqa: E402, F401
     _resolve_pipeline_stage,
 )
 from df_mlx.training_cli_main import main  # noqa: E402, F401
+from df_mlx.training_helpers import (  # noqa: E402, F401
+    build_setup_panel_line as _build_setup_panel_line_impl,
+    clip_gan_scores as _clip_gan_scores_impl,
+    curriculum_schedule as _curriculum_schedule_impl,
+    is_vad_train_reg_enabled as _is_vad_train_reg_enabled_impl,
+)
 from df_mlx.training_losses import (  # noqa: E402, F401
     _AWESOME_ENERGY_BOOST_DB,
     _AWESOME_ENERGY_BOOST_WIDTH,
@@ -219,16 +225,15 @@ def _build_setup_panel_line(
     use_fp16: bool,
 ) -> str:
     """Build single-line setup metadata for the persistent setup panel."""
-    return (
-        "SETUP │ "
-        f"epochs={epochs} "
-        f"bs={batch_size} "
-        f"lr={learning_rate:.1e} "
-        f"loss={dynamic_loss} "
-        f"gan={'on' if gan_enabled else 'off'} "
-        f"vad={'on' if vad_enabled else 'off'} "
-        f"fp16={'on' if use_fp16 else 'off'} "
-        f"ckpt={checkpoint_dir}"
+    return _build_setup_panel_line_impl(
+        epochs=epochs,
+        batch_size=batch_size,
+        learning_rate=learning_rate,
+        dynamic_loss=dynamic_loss,
+        gan_enabled=gan_enabled,
+        vad_enabled=vad_enabled,
+        checkpoint_dir=checkpoint_dir,
+        use_fp16=use_fp16,
     )
 
 
@@ -265,24 +270,19 @@ def curriculum_schedule(
     Returns:
         Tuple of (p_extreme_snr, p_very_low_snr, p_interfer_speech)
     """
-    if warmup_epochs <= 0 or epoch >= warmup_epochs:
-        # Past warmup: use full target distribution
-        return target_p_extreme, target_p_very_low, target_p_interfer
-
-    # Linear ramp during warmup
-    progress = epoch / warmup_epochs
-    return (
-        progress * target_p_extreme,
-        progress * target_p_very_low,
-        progress * target_p_interfer,
+    return _curriculum_schedule_impl(
+        epoch=epoch,
+        total_epochs=total_epochs,
+        warmup_epochs=warmup_epochs,
+        target_p_extreme=target_p_extreme,
+        target_p_very_low=target_p_very_low,
+        target_p_interfer=target_p_interfer,
     )
 
 
 def _clip_gan_scores(scores: list[mx.array], clip_value: float = _GAN_SCORE_ABS_CLIP) -> list[mx.array]:
     """Clamp GAN discriminator logits to a bounded range for stability."""
-    if clip_value <= 0:
-        return scores
-    return [mx.clip(score, -clip_value, clip_value) for score in scores]
+    return _clip_gan_scores_impl(scores=scores, clip_value=clip_value)
 
 
 def _is_vad_train_reg_enabled(
@@ -291,7 +291,11 @@ def _is_vad_train_reg_enabled(
     max_stage_vad_weight: float,
 ) -> bool:
     """Return whether sparse VAD train regularization should be enabled."""
-    return (vad_train_prob > 0 or vad_train_every_steps > 0) and max_stage_vad_weight > 0
+    return _is_vad_train_reg_enabled_impl(
+        vad_train_prob=vad_train_prob,
+        vad_train_every_steps=vad_train_every_steps,
+        max_stage_vad_weight=max_stage_vad_weight,
+    )
 
 
 def train(
@@ -3340,8 +3344,7 @@ def train(
                         else:
                             did_optimizer_update = False
                             tqdm.write(
-                                "⚠️  Non-finite grads after clipping; skipping optimizer update "
-                                f"(step={global_step})"
+                                "⚠️  Non-finite grads after clipping; skipping optimizer update " f"(step={global_step})"
                             )
                         accumulated_grads = None
                         accumulated_loss = _SCALAR_ZERO
