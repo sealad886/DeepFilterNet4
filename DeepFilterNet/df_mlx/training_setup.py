@@ -185,3 +185,134 @@ def build_train_config(
         **params,
     }
     return train_config
+
+
+def print_epoch_summary(
+    epoch_avgs: dict[str, float],
+    *,
+    epoch: int,
+    epochs: int,
+    avg_valid_loss: float,
+    best_valid_loss: float,
+    samples_processed: int,
+    epoch_time: float,
+    use_vad_loss: bool,
+    use_awesome_loss: bool,
+    use_pipeline_awesome_loss: bool,
+    use_mrstft_loss: bool,
+    use_vad_train_reg: bool,
+    gan_enabled: bool,
+    gan_fm_weight: float,
+    verbose: bool,
+    debug_numerics: bool,
+    num_debug_logs: int = 0,
+    train_mask_clip_rate: float = 0.0,
+    train_eps_clean_rate: float = 0.0,
+    train_eps_noise_rate: float = 0.0,
+    train_mask_logit_min: float = 0.0,
+    train_mask_logit_max: float = 0.0,
+    num_vad_logs: int = 0,
+    train_vad_clip_ref: float = 0.0,
+    train_vad_clip_out: float = 0.0,
+) -> None:
+    """Print a formatted epoch summary line plus optional verbose details.
+
+    *epoch_avgs* is a ``dict[str, float]`` keyed by short metric names
+    (``"loss"``, ``"spec_loss"``, ``"mrstft_loss"``, etc.).  Config flags
+    control which loss components appear.  Debug-numerics stats are only
+    printed when *debug_numerics* is ``True`` and the relevant counters
+    are positive.
+    """
+    epoch_throughput = samples_processed / epoch_time if epoch_time > 0 else 0
+
+    improvement_marker = "★" if avg_valid_loss <= best_valid_loss else ""
+    loss_summary = ""
+    if (
+        use_vad_loss
+        or use_awesome_loss
+        or use_pipeline_awesome_loss
+        or use_vad_train_reg
+        or use_mrstft_loss
+        or gan_enabled
+    ):
+        loss_parts = [f"Spec: {epoch_avgs['spec_loss']:.4f}"]
+        if use_mrstft_loss:
+            loss_parts.append(f"MRSTFT: {epoch_avgs['mrstft_loss']:.4f}")
+        if gan_enabled:
+            loss_parts.append(f"GAN_G: {epoch_avgs['gan_g_loss']:.4f}")
+            loss_parts.append(f"GAN_D: {epoch_avgs['gan_d_loss']:.4f}")
+            if gan_fm_weight > 0:
+                loss_parts.append(f"FM: {epoch_avgs['gan_fm_loss']:.4f}")
+        if use_vad_loss:
+            loss_parts.extend(
+                [
+                    f"VAD: {epoch_avgs['vad_loss']:.4f}",
+                    f"Speech: {epoch_avgs['speech_loss']:.4f}",
+                ]
+            )
+        if use_awesome_loss or use_pipeline_awesome_loss:
+            loss_parts.extend(
+                [
+                    f"Awesome: {epoch_avgs['awesome_loss']:.4f}",
+                    f"AwS: {epoch_avgs['awesome_speech']:.4f}",
+                    f"AwN: {epoch_avgs['awesome_noise']:.4f}",
+                    f"AwSm: {epoch_avgs['awesome_smooth']:.4f}",
+                ]
+            )
+        if use_pipeline_awesome_loss:
+            loss_parts.extend(
+                [
+                    f"MusSup: {epoch_avgs['music_supp']:.4f}",
+                    f"MaskSat: {epoch_avgs['mask_sat']:.4f}",
+                ]
+            )
+        if use_vad_train_reg:
+            loss_parts.append(f"VADreg: {epoch_avgs['vad_reg_loss']:.4f}")
+        loss_summary = " | " + " | ".join(loss_parts)
+
+    print(
+        f"✓ Epoch {epoch + 1}/{epochs} complete | "
+        f"Train: {epoch_avgs['loss']:.4f}{loss_summary} | "
+        f"Valid: {avg_valid_loss:.4f} {improvement_marker}| "
+        f"Best: {best_valid_loss:.4f} | "
+        f"{samples_processed:,} samples @ {epoch_throughput:.0f}/s | "
+        f"{epoch_time:.1f}s"
+    )
+
+    if use_vad_loss and verbose:
+        print(
+            f"  VAD stats: p_ref={epoch_avgs['p_ref']:.2f} | "
+            f"p_out={epoch_avgs['p_out']:.2f} | gate={epoch_avgs['gate']:.0f}%"
+        )
+    if (use_awesome_loss or use_pipeline_awesome_loss) and verbose:
+        print(
+            "  Awesome stats: "
+            f"mask={epoch_avgs['mask_mean']:.2f} "
+            f"(hi {epoch_avgs['mask_high']:.0f}%, lo {epoch_avgs['mask_low']:.0f}%) | "
+            f"proxy={epoch_avgs['proxy']:.2f} ratio={epoch_avgs['speech_ratio']:.2f} | "
+            f"music_gate={epoch_avgs['music_gate']:.2f} "
+            f"music={epoch_avgs['musicness']:.2f} | "
+            f"mod={epoch_avgs['mod']:.2f} "
+            f"e_boost={epoch_avgs['energy_boost']:.2f} "
+            f"snr_boost={epoch_avgs['snr_boost']:.2f}"
+        )
+    if debug_numerics:
+        parts: list[str] = []
+        if (use_awesome_loss or use_pipeline_awesome_loss) and num_debug_logs > 0:
+            avg_mask_clip = train_mask_clip_rate / num_debug_logs
+            avg_eps_clean = train_eps_clean_rate / num_debug_logs
+            avg_eps_noise = train_eps_noise_rate / num_debug_logs
+            parts.append(
+                f"mask_logit=[{train_mask_logit_min:.1f},{train_mask_logit_max:.1f}] "
+                f"clip={avg_mask_clip:.1f}% eps_clean={avg_eps_clean:.1f}% "
+                f"eps_noise={avg_eps_noise:.1f}%"
+            )
+        if use_vad_loss and num_vad_logs > 0:
+            avg_vad_clip_ref = train_vad_clip_ref / num_vad_logs
+            avg_vad_clip_out = train_vad_clip_out / num_vad_logs
+            parts.append(
+                f"vad_clip_ref={avg_vad_clip_ref:.1f}% "
+                f"vad_clip_out={avg_vad_clip_out:.1f}%"
+            )
+        if parts:
+            print("  Debug numerics: " + " | ".join(parts))

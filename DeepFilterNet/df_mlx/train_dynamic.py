@@ -165,7 +165,7 @@ from df_mlx.training_diagnostics import (  # noqa: E402, F401
     DiagnosticContext,
     diagnose_nonfinite as _diagnose_nonfinite_impl,
 )
-from df_mlx.training_setup import build_train_config, print_training_config  # noqa: E402
+from df_mlx.training_setup import build_train_config, print_epoch_summary, print_training_config  # noqa: E402
 from df_mlx.training_validation import (  # noqa: E402, F401
     ValidationContext,
     run_validation as _run_validation,
@@ -3446,34 +3446,41 @@ def train(
             _sync_data_stream_stage(active_stage_index, active_stage_name)
             train_stream.save_checkpoint(data_checkpoint_path)
 
-        avg_train_loss = train_loss / max(num_train_batches, 1)
-        avg_train_spec_loss = train_spec_loss / max(num_train_batches, 1)
-        avg_train_mrstft_loss = train_mrstft_loss / max(num_train_batches, 1)
-        avg_train_gan_g_loss = train_gan_g_loss / max(num_train_batches, 1)
-        avg_train_gan_fm_loss = train_gan_fm_loss / max(num_train_batches, 1)
-        avg_train_gan_d_loss = train_gan_d_loss / max(train_gan_d_updates, 1)
-        avg_train_vad_loss = train_vad_loss / max(num_train_batches, 1)
-        avg_train_speech_loss = train_speech_loss / max(num_train_batches, 1)
-        avg_train_awesome_loss = train_awesome_loss / max(num_train_batches, 1)
-        avg_train_awesome_speech = train_awesome_speech / max(num_train_batches, 1)
-        avg_train_awesome_noise = train_awesome_noise / max(num_train_batches, 1)
-        avg_train_awesome_smooth = train_awesome_smooth / max(num_train_batches, 1)
-        avg_train_music_supp = train_music_supp_loss / max(num_train_batches, 1)
-        avg_train_mask_sat = train_mask_sat_loss / max(num_train_batches, 1)
-        avg_train_vad_reg_loss = train_vad_reg_loss / max(num_train_batches, 1)
-        avg_train_p_ref = train_p_ref / max(num_vad_logs, 1)
-        avg_train_p_out = train_p_out / max(num_vad_logs, 1)
-        avg_train_gate = train_gate_pct / max(num_vad_logs, 1)
-        avg_train_mask_mean = train_mask_mean / max(num_awesome_logs, 1)
-        avg_train_mask_high = train_mask_high / max(num_awesome_logs, 1)
-        avg_train_mask_low = train_mask_low / max(num_awesome_logs, 1)
-        avg_train_proxy = train_proxy_mean / max(num_awesome_logs, 1)
-        avg_train_speech_ratio = train_speech_ratio / max(num_awesome_logs, 1)
-        avg_train_music_gate = train_music_gate / max(num_awesome_logs, 1)
-        avg_train_musicness = train_musicness / max(num_awesome_logs, 1)
-        avg_train_mod = train_mod_energy / max(num_awesome_logs, 1)
-        avg_train_energy_boost = train_energy_boost / max(num_awesome_logs, 1)
-        avg_train_snr_boost = train_snr_boost / max(num_awesome_logs, 1)
+        _n = max(num_train_batches, 1)
+        _n_d = max(train_gan_d_updates, 1)
+        _n_v = max(num_vad_logs, 1)
+        _n_a = max(num_awesome_logs, 1)
+        avg_train_loss = train_loss / _n
+        epoch_avgs: dict[str, float] = {
+            "loss": avg_train_loss,
+            "spec_loss": train_spec_loss / _n,
+            "mrstft_loss": train_mrstft_loss / _n,
+            "gan_g_loss": train_gan_g_loss / _n,
+            "gan_fm_loss": train_gan_fm_loss / _n,
+            "gan_d_loss": train_gan_d_loss / _n_d,
+            "vad_loss": train_vad_loss / _n,
+            "speech_loss": train_speech_loss / _n,
+            "awesome_loss": train_awesome_loss / _n,
+            "awesome_speech": train_awesome_speech / _n,
+            "awesome_noise": train_awesome_noise / _n,
+            "awesome_smooth": train_awesome_smooth / _n,
+            "music_supp": train_music_supp_loss / _n,
+            "mask_sat": train_mask_sat_loss / _n,
+            "vad_reg_loss": train_vad_reg_loss / _n,
+            "p_ref": train_p_ref / _n_v,
+            "p_out": train_p_out / _n_v,
+            "gate": train_gate_pct / _n_v,
+            "mask_mean": train_mask_mean / _n_a,
+            "mask_high": train_mask_high / _n_a,
+            "mask_low": train_mask_low / _n_a,
+            "proxy": train_proxy_mean / _n_a,
+            "speech_ratio": train_speech_ratio / _n_a,
+            "music_gate": train_music_gate / _n_a,
+            "musicness": train_musicness / _n_a,
+            "mod": train_mod_energy / _n_a,
+            "energy_boost": train_energy_boost / _n_a,
+            "snr_boost": train_snr_boost / _n_a,
+        }
 
         # Print detailed timing breakdown in verbose mode
         if verbose and num_train_batches > 0:
@@ -3558,7 +3565,6 @@ def train(
 
         # ====== Epoch Summary ======
         epoch_time = time.perf_counter() - epoch_start
-        epoch_throughput = samples_processed / epoch_time if epoch_time > 0 else 0
 
         # Update interrupt state with final epoch metrics
         _update_interrupt_state(
@@ -3572,90 +3578,33 @@ def train(
             pipeline_stage_name=active_stage_name,
         )
 
-        # Improved epoch summary with throughput
-        improvement_marker = "★" if avg_valid_loss <= best_valid_loss else ""
-        loss_summary = ""
-        if (
-            use_vad_loss
-            or use_awesome_loss
-            or use_pipeline_awesome_loss
-            or use_vad_train_reg
-            or use_mrstft_loss
-            or gan_enabled
-        ):
-            loss_parts = [f"Spec: {avg_train_spec_loss:.4f}"]
-            if use_mrstft_loss:
-                loss_parts.append(f"MRSTFT: {avg_train_mrstft_loss:.4f}")
-            if gan_enabled:
-                loss_parts.append(f"GAN_G: {avg_train_gan_g_loss:.4f}")
-                loss_parts.append(f"GAN_D: {avg_train_gan_d_loss:.4f}")
-                if gan_fm_weight > 0:
-                    loss_parts.append(f"FM: {avg_train_gan_fm_loss:.4f}")
-            if use_vad_loss:
-                loss_parts.extend(
-                    [
-                        f"VAD: {avg_train_vad_loss:.4f}",
-                        f"Speech: {avg_train_speech_loss:.4f}",
-                    ]
-                )
-            if use_awesome_loss or use_pipeline_awesome_loss:
-                loss_parts.extend(
-                    [
-                        f"Awesome: {avg_train_awesome_loss:.4f}",
-                        f"AwS: {avg_train_awesome_speech:.4f}",
-                        f"AwN: {avg_train_awesome_noise:.4f}",
-                        f"AwSm: {avg_train_awesome_smooth:.4f}",
-                    ]
-                )
-            if use_pipeline_awesome_loss:
-                loss_parts.extend(
-                    [
-                        f"MusSup: {avg_train_music_supp:.4f}",
-                        f"MaskSat: {avg_train_mask_sat:.4f}",
-                    ]
-                )
-            if use_vad_train_reg:
-                loss_parts.append(f"VADreg: {avg_train_vad_reg_loss:.4f}")
-            loss_summary = " | " + " | ".join(loss_parts)
-
-        print(
-            f"✓ Epoch {epoch + 1}/{epochs} complete | "
-            f"Train: {avg_train_loss:.4f}{loss_summary} | "
-            f"Valid: {avg_valid_loss:.4f} {improvement_marker}| "
-            f"Best: {best_valid_loss:.4f} | "
-            f"{samples_processed:,} samples @ {epoch_throughput:.0f}/s | "
-            f"{epoch_time:.1f}s"
+        print_epoch_summary(
+            epoch_avgs,
+            epoch=epoch,
+            epochs=epochs,
+            avg_valid_loss=avg_valid_loss,
+            best_valid_loss=best_valid_loss,
+            samples_processed=samples_processed,
+            epoch_time=epoch_time,
+            use_vad_loss=use_vad_loss,
+            use_awesome_loss=use_awesome_loss,
+            use_pipeline_awesome_loss=use_pipeline_awesome_loss,
+            use_mrstft_loss=use_mrstft_loss,
+            use_vad_train_reg=use_vad_train_reg,
+            gan_enabled=gan_enabled,
+            gan_fm_weight=gan_fm_weight,
+            verbose=verbose,
+            debug_numerics=debug_numerics,
+            num_debug_logs=num_debug_logs,
+            train_mask_clip_rate=train_mask_clip_rate,
+            train_eps_clean_rate=train_eps_clean_rate,
+            train_eps_noise_rate=train_eps_noise_rate,
+            train_mask_logit_min=train_mask_logit_min,
+            train_mask_logit_max=train_mask_logit_max,
+            num_vad_logs=num_vad_logs,
+            train_vad_clip_ref=train_vad_clip_ref,
+            train_vad_clip_out=train_vad_clip_out,
         )
-
-        if use_vad_loss and verbose:
-            print(
-                f"  VAD stats: p_ref={avg_train_p_ref:.2f} | "
-                f"p_out={avg_train_p_out:.2f} | gate={avg_train_gate:.0f}%"
-            )
-        if (use_awesome_loss or use_pipeline_awesome_loss) and verbose:
-            print(
-                "  Awesome stats: "
-                f"mask={avg_train_mask_mean:.2f} (hi {avg_train_mask_high:.0f}%, lo {avg_train_mask_low:.0f}%) | "
-                f"proxy={avg_train_proxy:.2f} ratio={avg_train_speech_ratio:.2f} | "
-                f"music_gate={avg_train_music_gate:.2f} music={avg_train_musicness:.2f} | "
-                f"mod={avg_train_mod:.2f} e_boost={avg_train_energy_boost:.2f} snr_boost={avg_train_snr_boost:.2f}"
-            )
-        if debug_numerics:
-            parts = []
-            if (use_awesome_loss or use_pipeline_awesome_loss) and num_debug_logs > 0:
-                avg_mask_clip = train_mask_clip_rate / num_debug_logs
-                avg_eps_clean = train_eps_clean_rate / num_debug_logs
-                avg_eps_noise = train_eps_noise_rate / num_debug_logs
-                parts.append(
-                    f"mask_logit=[{train_mask_logit_min:.1f},{train_mask_logit_max:.1f}] "
-                    f"clip={avg_mask_clip:.1f}% eps_clean={avg_eps_clean:.1f}% eps_noise={avg_eps_noise:.1f}%"
-                )
-            if use_vad_loss and num_vad_logs > 0:
-                avg_vad_clip_ref = train_vad_clip_ref / num_vad_logs
-                avg_vad_clip_out = train_vad_clip_out / num_vad_logs
-                parts.append(f"vad_clip_ref={avg_vad_clip_ref:.1f}% vad_clip_out={avg_vad_clip_out:.1f}%")
-            if parts:
-                print("  Debug numerics: " + " | ".join(parts))
 
         # ====== Early Stopping / Curriculum Advance ======
         should_stop = False
