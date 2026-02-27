@@ -94,6 +94,9 @@ from df_mlx.training_helpers import build_setup_panel_line as _build_setup_panel
 from df_mlx.training_helpers import clip_gan_scores as _clip_gan_scores_impl
 from df_mlx.training_helpers import curriculum_schedule as _curriculum_schedule_impl
 from df_mlx.training_helpers import is_vad_train_reg_enabled as _is_vad_train_reg_enabled_impl
+from df_mlx.training_helpers import (  # noqa: E402
+    _resolve_pipeline_stage_by_index,
+)
 from df_mlx.training_losses import (  # noqa: E402, F401
     _AWESOME_ENERGY_BOOST_DB,
     _AWESOME_ENERGY_BOOST_WIDTH,
@@ -167,7 +170,12 @@ from df_mlx.training_diagnostics import (  # noqa: E402, F401
     DiagnosticContext,
     diagnose_nonfinite as _diagnose_nonfinite_impl,
 )
-from df_mlx.training_setup import build_train_config, print_epoch_summary, print_training_config  # noqa: E402
+from df_mlx.training_setup import (  # noqa: E402
+    build_train_config,
+    print_epoch_summary,
+    print_training_config,
+    setup_gan,
+)
 from df_mlx.training_validation import (  # noqa: E402, F401
     ValidationContext,
     run_validation as _run_validation,
@@ -652,22 +660,6 @@ def train(
     use_pipeline_awesome_loss = dynamic_loss == "pipeline_awesome"
     pipeline_stage_defs = sorted((pipeline_stages or []), key=lambda s: int(s.get("start_epoch", 0)))
 
-    def _resolve_pipeline_stage_by_index(stage_index: int) -> dict[str, Any]:
-        """Return stage metadata for a fixed stage index."""
-        if not pipeline_stage_defs:
-            return _resolve_pipeline_stage(0, pipeline_stage_defs)
-
-        bounded_index = min(max(int(stage_index), 0), len(pipeline_stage_defs) - 1)
-        stage = pipeline_stage_defs[bounded_index]
-        return {
-            "index": bounded_index,
-            "name": str(stage.get("name", f"stage_{bounded_index}")),
-            "start_epoch": int(stage.get("start_epoch", 0)),
-            "awesome_loss_weight": stage.get("awesome_loss_weight"),
-            "vad_loss_weight": stage.get("vad_loss_weight"),
-            "vad_speech_loss_weight": stage.get("vad_speech_loss_weight"),
-        }
-
     base_awesome_loss_weight = awesome_loss_weight
     base_vad_loss_weight = vad_loss_weight
     base_vad_speech_loss_weight = vad_speech_loss_weight
@@ -727,44 +719,22 @@ def train(
     gan_target_len = int(round(config.segment_length * config.sample_rate))
     gan_istft = mrstft_istft
 
-    discriminator = None
-    disc_optimizer = None
-    feature_match_loss = None
-    gan_loss_fns = None
-
-    if gan_enabled:
+    discriminator, disc_optimizer, feature_match_loss, gan_loss_fns = setup_gan(
+        gan_enabled=gan_enabled,
+        gan_disc_type=gan_disc_type,
+        gan_mpd_periods=gan_mpd_periods,
+        gan_mpd_channels=gan_mpd_channels,
+        gan_msd_scales=gan_msd_scales,
+        gan_msd_channels=gan_msd_channels,
+        gan_disc_lr=gan_disc_lr,
+        gan_disc_weight_decay=gan_disc_weight_decay,
+    )
+    if gan_enabled and gan_istft is None:
         from functools import partial
 
-        from df_mlx.discriminator import (
-            CombinedDiscriminator,
-            MultiPeriodDiscriminator,
-            MultiScaleDiscriminator,
-        )
-        from df_mlx.loss import FeatureMatchingLoss, discriminator_loss, generator_loss
         from df_mlx.ops import istft
 
-        if gan_istft is None:
-            gan_istft = partial(istft)
-
-        mpd_periods = tuple(gan_mpd_periods) if gan_mpd_periods else (2, 3, 5, 7, 11)
-        if gan_disc_type == "mpd":
-            discriminator = MultiPeriodDiscriminator(periods=mpd_periods, channels=gan_mpd_channels)
-        elif gan_disc_type == "msd":
-            discriminator = MultiScaleDiscriminator(num_scales=gan_msd_scales, channels=gan_msd_channels)
-        else:
-            discriminator = CombinedDiscriminator(
-                mpd_periods=mpd_periods,
-                mpd_channels=gan_mpd_channels,
-                msd_scales=gan_msd_scales,
-                msd_channels=gan_msd_channels,
-            )
-
-        disc_optimizer = optim.AdamW(
-            learning_rate=gan_disc_lr,
-            weight_decay=gan_disc_weight_decay,
-        )
-        feature_match_loss = FeatureMatchingLoss(factor=1.0)
-        gan_loss_fns = (generator_loss, discriminator_loss)
+        gan_istft = partial(istft)
 
     if vad_eval_mode == "auto":
         vad_eval_mode = "proxy" if (use_awesome_loss or use_pipeline_awesome_loss) else "off"
@@ -1916,7 +1886,7 @@ def train(
                 f"resume_stage={resume_stage_index} → scheduled_stage={scheduled_start_stage_index}."
             )
         initial_stage_index = max(resume_stage_index, scheduled_start_stage_index)
-    initial_stage = _resolve_pipeline_stage_by_index(initial_stage_index)
+    initial_stage = _resolve_pipeline_stage_by_index(initial_stage_index, pipeline_stage_defs)
     initial_stage_name = str(initial_stage["name"])
     if resume_stage_name and resume_stage_name != initial_stage_name:
         print(
@@ -2040,7 +2010,7 @@ def train(
             epochs_without_improvement = 0
 
         active_stage_index = next_stage_index
-        active_stage = _resolve_pipeline_stage_by_index(active_stage_index)
+        active_stage = _resolve_pipeline_stage_by_index(active_stage_index, pipeline_stage_defs)
         active_stage_name = str(active_stage["name"])
         epoch_awesome_loss_weight = float(
             active_stage["awesome_loss_weight"]
@@ -3495,7 +3465,7 @@ def train(
             if active_stage_index + 1 < len(pipeline_stage_defs):
                 prev_stage_index = active_stage_index
                 active_stage_index += 1
-                next_stage = _resolve_pipeline_stage_by_index(active_stage_index)
+                next_stage = _resolve_pipeline_stage_by_index(active_stage_index, pipeline_stage_defs)
                 active_stage_name = str(next_stage["name"])
                 print(f"\nEarly stopping triggered after {patience} epochs without improvement.")
                 print(

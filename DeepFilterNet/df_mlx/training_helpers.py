@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import mlx.core as mx
 
 
@@ -65,3 +67,24 @@ def is_vad_train_reg_enabled(
 ) -> bool:
     """Return whether sparse VAD train regularization should be enabled."""
     return (vad_train_prob > 0 or vad_train_every_steps > 0) and max_stage_vad_weight > 0
+
+
+def _resolve_pipeline_stage_by_index(
+    stage_index: int, pipeline_stage_defs: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Return stage metadata for a fixed stage index."""
+    from df_mlx.training_cli import _resolve_pipeline_stage
+
+    if not pipeline_stage_defs:
+        return _resolve_pipeline_stage(0, pipeline_stage_defs)
+
+    bounded_index = min(max(int(stage_index), 0), len(pipeline_stage_defs) - 1)
+    stage = pipeline_stage_defs[bounded_index]
+    return {
+        "index": bounded_index,
+        "name": str(stage.get("name", f"stage_{bounded_index}")),
+        "start_epoch": int(stage.get("start_epoch", 0)),
+        "awesome_loss_weight": stage.get("awesome_loss_weight"),
+        "vad_loss_weight": stage.get("vad_loss_weight"),
+        "vad_speech_loss_weight": stage.get("vad_speech_loss_weight"),
+    }

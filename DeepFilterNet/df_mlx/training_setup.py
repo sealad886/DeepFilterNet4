@@ -316,3 +316,61 @@ def print_epoch_summary(
             )
         if parts:
             print("  Debug numerics: " + " | ".join(parts))
+
+
+def setup_gan(
+    *,
+    gan_enabled: bool,
+    gan_disc_type: str,
+    gan_mpd_periods: tuple | list | None,
+    gan_mpd_channels: int,
+    gan_msd_scales: int,
+    gan_msd_channels: int,
+    gan_disc_lr: float,
+    gan_disc_weight_decay: float,
+) -> tuple[Any, Any, Any, tuple | None]:
+    """Create GAN discriminator, optimizer, and loss functions.
+
+    Returns ``(discriminator, disc_optimizer, feature_match_loss, gan_loss_fns)``.
+    All elements are ``None`` when *gan_enabled* is ``False``.
+    """
+    discriminator = None
+    disc_optimizer = None
+    feature_match_loss = None
+    gan_loss_fns = None
+
+    if not gan_enabled:
+        return discriminator, disc_optimizer, feature_match_loss, gan_loss_fns
+
+    import mlx.optimizers as optim
+
+    from df_mlx.discriminator import (
+        CombinedDiscriminator,
+        MultiPeriodDiscriminator,
+        MultiScaleDiscriminator,
+    )
+    from df_mlx.loss import FeatureMatchingLoss, discriminator_loss, generator_loss
+
+    mpd_periods = tuple(gan_mpd_periods) if gan_mpd_periods else (2, 3, 5, 7, 11)
+    if gan_disc_type == "mpd":
+        discriminator = MultiPeriodDiscriminator(periods=mpd_periods, channels=gan_mpd_channels)
+    elif gan_disc_type == "msd":
+        discriminator = MultiScaleDiscriminator(
+            num_scales=gan_msd_scales, channels=gan_msd_channels
+        )
+    else:
+        discriminator = CombinedDiscriminator(
+            mpd_periods=mpd_periods,
+            mpd_channels=gan_mpd_channels,
+            msd_scales=gan_msd_scales,
+            msd_channels=gan_msd_channels,
+        )
+
+    disc_optimizer = optim.AdamW(
+        learning_rate=gan_disc_lr,
+        weight_decay=gan_disc_weight_decay,
+    )
+    feature_match_loss = FeatureMatchingLoss(factor=1.0)
+    gan_loss_fns = (generator_loss, discriminator_loss)
+
+    return discriminator, disc_optimizer, feature_match_loss, gan_loss_fns
