@@ -90,11 +90,11 @@ from df_mlx.training_cli import (  # noqa: E402, F401
     _resolve_pipeline_stage,
 )
 from df_mlx.training_cli_main import main  # noqa: E402, F401
-from df_mlx.training_helpers import build_setup_panel_line as _build_setup_panel_line_impl  # noqa: E402, F401
-from df_mlx.training_helpers import clip_gan_scores as _clip_gan_scores_impl
+from df_mlx.training_helpers import build_setup_panel_line as _build_setup_panel_line  # noqa: E402, F401
+from df_mlx.training_helpers import clip_gan_scores as _clip_gan_scores  # noqa: E402, F401
+from df_mlx.training_helpers import curriculum_schedule  # noqa: E402, F401
+from df_mlx.training_helpers import is_vad_train_reg_enabled as _is_vad_train_reg_enabled  # noqa: E402, F401
 from df_mlx.training_metrics import collect_sync_metrics, create_epoch_accums, update_progress_bar
-from df_mlx.training_helpers import curriculum_schedule as _curriculum_schedule_impl
-from df_mlx.training_helpers import is_vad_train_reg_enabled as _is_vad_train_reg_enabled_impl
 from df_mlx.training_helpers import (  # noqa: E402
     _resolve_pipeline_stage_by_index,
 )
@@ -235,89 +235,11 @@ else:
     _tqdm_panels = not _tqdm_disable
 
 
-def _build_setup_panel_line(
-    *,
-    epochs: int,
-    batch_size: int,
-    learning_rate: float,
-    dynamic_loss: str,
-    gan_enabled: bool,
-    vad_enabled: bool,
-    checkpoint_dir: str,
-    use_fp16: bool,
-) -> str:
-    """Build single-line setup metadata for the persistent setup panel."""
-    return _build_setup_panel_line_impl(
-        epochs=epochs,
-        batch_size=batch_size,
-        learning_rate=learning_rate,
-        dynamic_loss=dynamic_loss,
-        gan_enabled=gan_enabled,
-        vad_enabled=vad_enabled,
-        checkpoint_dir=checkpoint_dir,
-        use_fp16=use_fp16,
-    )
-
-
 # =============================================================================
-# Curriculum Learning Scheduler
+# Module-level helpers (thin aliases to training_helpers)
 # =============================================================================
-
-
-def curriculum_schedule(
-    epoch: int,
-    total_epochs: int,
-    warmup_epochs: int,
-    target_p_extreme: float,
-    target_p_very_low: float,
-    target_p_interfer: float,
-) -> tuple[float, float, float]:
-    """Compute curriculum-scheduled SNR and interferer probabilities.
-
-    During warmup, we start with easy (high SNR) samples and gradually
-    introduce harder samples. After warmup, we use the full target distribution.
-
-    Schedule:
-    - Epoch 0 to warmup_epochs: linear ramp from 0 to target values
-    - After warmup_epochs: use full target values
-
-    Args:
-        epoch: Current training epoch (0-indexed)
-        total_epochs: Total training epochs
-        warmup_epochs: Number of warmup epochs for curriculum
-        target_p_extreme: Final probability for extreme SNR
-        target_p_very_low: Final probability for very-low SNR
-        target_p_interfer: Final probability for interfering speech
-
-    Returns:
-        Tuple of (p_extreme_snr, p_very_low_snr, p_interfer_speech)
-    """
-    return _curriculum_schedule_impl(
-        epoch=epoch,
-        total_epochs=total_epochs,
-        warmup_epochs=warmup_epochs,
-        target_p_extreme=target_p_extreme,
-        target_p_very_low=target_p_very_low,
-        target_p_interfer=target_p_interfer,
-    )
-
-
-def _clip_gan_scores(scores: list[mx.array], clip_value: float = _GAN_SCORE_ABS_CLIP) -> list[mx.array]:
-    """Clamp GAN discriminator logits to a bounded range for stability."""
-    return _clip_gan_scores_impl(scores=scores, clip_value=clip_value)
-
-
-def _is_vad_train_reg_enabled(
-    vad_train_prob: float,
-    vad_train_every_steps: int,
-    max_stage_vad_weight: float,
-) -> bool:
-    """Return whether sparse VAD train regularization should be enabled."""
-    return _is_vad_train_reg_enabled_impl(
-        vad_train_prob=vad_train_prob,
-        vad_train_every_steps=vad_train_every_steps,
-        max_stage_vad_weight=max_stage_vad_weight,
-    )
+# _build_setup_panel_line, _clip_gan_scores, curriculum_schedule,
+# _is_vad_train_reg_enabled are imported directly above as aliases.
 
 
 def train(

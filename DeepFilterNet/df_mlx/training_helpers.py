@@ -53,7 +53,7 @@ def curriculum_schedule(
     )
 
 
-def clip_gan_scores(scores: list[mx.array], clip_value: float) -> list[mx.array]:
+def clip_gan_scores(scores: list[mx.array], clip_value: float = 30.0) -> list[mx.array]:
     """Clamp GAN discriminator logits to a bounded range for stability."""
     if clip_value <= 0:
         return scores
