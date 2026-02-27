@@ -13,6 +13,7 @@ This document provides a comprehensive overview of the DeepFilterNet architectur
   - [Deep Filtering](#deep-filtering)
 - [Feature Extraction](#feature-extraction)
 - [Training Components](#training-components)
+  - [Training Module Architecture](#training-module-architecture)
 - [Configuration Reference](#configuration-reference)
 
 ---
@@ -514,6 +515,93 @@ for batch in dataloader:
 # Convert to quantized model
 quantized = torch.quantization.convert(qat_model)
 ```
+
+### Training Module Architecture
+
+The MLX training system (`df_mlx/`) was decomposed from a monolithic `train_dynamic.py`
+(4580 lines) into 14 specialized modules totaling ~10,000 lines:
+
+| Module | Lines | Responsibility |
+|--------|-------|---------------|
+| `train_dynamic.py` | ~2850 | Orchestrator: `train()` function, MLX closures, re-exports |
+| `training_checkpoints.py` | ~1080 | Checkpoint save/load/resume/cleanup/validation |
+| `training_setup.py` | ~1050 | Dataset pipeline, aux losses, config, epoch summary |
+| `training_losses.py` | ~1050 | Loss computation (spectral, VAD, awesome, pipeline) |
+| `training_cli_main.py` | ~960 | CLI entry-point with argument parsing and dispatch |
+| `training_validation.py` | ~770 | `ValidationContext` + `run_validation` |
+| `training_metrics.py` | ~740 | Epoch accumulators, sync metrics, progress bar |
+| `training_cli.py` | ~330 | CLI parsing helpers and stage resolution |
+| `training_session.py` | ~310 | `TrainingSession` class-based API |
+| `training_diagnostics.py` | ~250 | Non-finite detection and numeric diagnostics |
+| `training_ops.py` | ~230 | Gradient utilities (clip, accumulate, scale) |
+| `training_helpers.py` | ~190 | `TrainingLoopState` dataclass and small helpers |
+| `training_signals.py` | ~180 | SIGINT handling and interrupt state |
+| `training_waveform.py` | ~130 | Waveform conversion for GAN signal processing |
+
+#### Module Dependency Structure
+
+```
+train_dynamic.py (orchestrator)
+├── training_setup.py (dataset, pipeline, config, epoch lifecycle)
+│   ├── training_helpers.py (TrainingLoopState, stage resolution)
+│   └── training_checkpoints.py (save/load/resume)
+├── training_losses.py (all loss functions)
+├── training_metrics.py (accumulators, progress bar)
+├── training_validation.py (ValidationContext, run_validation)
+│   └── training_losses.py
+├── training_ops.py (gradient management)
+├── training_diagnostics.py (numeric debugging)
+├── training_waveform.py (GAN signal conversion)
+├── training_signals.py (SIGINT handling)
+└── training_cli_main.py (entry point)
+    └── training_cli.py (argument parsing)
+```
+
+#### Immovable Closures (~840 Lines)
+
+Approximately 840 lines of code **must** remain inside the `train()` function due to
+MLX framework constraints on compile and autograd boundaries:
+
+- **`loss_fn`** (~185 lines): Used with `nn.value_and_grad(model, loss_fn)` — MLX autograd
+  requires the loss function to capture model/state as closure variables.
+- **`loss_fn_gan`** (~225 lines): GAN loss variant with the same closure constraint,
+  additionally capturing discriminator state.
+- **Compiled step variants** (6 functions, ~320 lines): Wrapped with
+  `@mx.compile(inputs=state, outputs=state)` — the compile boundary requires state dict
+  capture as nonlocal variables.
+- **`_sync_data_stream_stage`** and diagnostic helpers (~75 lines): Capture nonlocal
+  `train_stream` and validation contexts.
+
+These cannot be extracted without breaking MLX's compile/autograd semantics. This is a
+fundamental MLX framework constraint, not a design choice.
+
+#### Re-export Compatibility Pattern
+
+`train_dynamic.py` re-exports all public symbols from 8 `training_*` modules so that
+existing code importing from `df_mlx.train_dynamic` continues to work unchanged.
+
+The 8 re-exported modules:
+- `training_losses`
+- `training_checkpoints`
+- `training_cli`
+- `training_ops`
+- `training_session`
+- `training_signals`
+- `training_waveform`
+- `training_cli_main`
+
+This contract is enforced by `test_train_dynamic_reexports.py` with two checks:
+1. **Completeness** — every public symbol in the 8 source modules is accessible from
+   `train_dynamic`.
+2. **Identity** — re-exported symbols are the same objects, not copies.
+
+#### Deferred Extraction: Epoch-End Logic
+
+> The ~255-line epoch-end section (validation, early stopping, curriculum advance,
+> checkpointing) was assessed for extraction into `handle_epoch_end()` but deferred.
+> The section requires 30+ parameters from the enclosing scope — extracting it would
+> create a function signature that is harder to maintain than the current well-commented
+> inline code. The section uses clear `====== Section Name ======` markers for navigation.
 
 ---
 
