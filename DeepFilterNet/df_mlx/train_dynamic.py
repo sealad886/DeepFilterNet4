@@ -90,13 +90,19 @@ from df_mlx.training_cli import (  # noqa: E402, F401
     _resolve_pipeline_stage,
 )
 from df_mlx.training_cli_main import main  # noqa: E402, F401
-from df_mlx.training_helpers import build_setup_panel_line as _build_setup_panel_line  # noqa: E402, F401
-from df_mlx.training_helpers import clip_gan_scores as _clip_gan_scores  # noqa: E402, F401
-from df_mlx.training_helpers import curriculum_schedule  # noqa: E402, F401
-from df_mlx.training_helpers import is_vad_train_reg_enabled as _is_vad_train_reg_enabled  # noqa: E402, F401
-from df_mlx.training_metrics import collect_sync_metrics, create_epoch_accums, update_progress_bar
-from df_mlx.training_helpers import (  # noqa: E402
+from df_mlx.training_helpers import (  # noqa: E402, F401
     _resolve_pipeline_stage_by_index,
+    build_setup_panel_line as _build_setup_panel_line,
+    clip_gan_scores as _clip_gan_scores,
+    curriculum_schedule,
+    is_vad_train_reg_enabled as _is_vad_train_reg_enabled,
+    print_compiled_step_eligibility,
+)
+from df_mlx.training_metrics import (
+    collect_sync_metrics,
+    compute_epoch_averages,
+    create_epoch_accums,
+    update_progress_bar,
 )
 from df_mlx.training_losses import (  # noqa: E402, F401
     _AWESOME_ENERGY_BOOST_DB,
@@ -236,13 +242,6 @@ elif _tqdm_panels_env in {"0", "false", "no", "off"}:
 else:
     # Default on interactive terminals only.
     _tqdm_panels = not _tqdm_disable
-
-
-# =============================================================================
-# Module-level helpers (thin aliases to training_helpers)
-# =============================================================================
-# _build_setup_panel_line, _clip_gan_scores, curriculum_schedule,
-# _is_vad_train_reg_enabled are imported directly above as aliases.
 
 
 def train(
@@ -1553,49 +1552,16 @@ def train(
         _compiled_disc_infer_holder[0] = compiled_disc_infer
 
     # Base compiled-step eligibility (epoch-level mode selection may still choose eager).
-    # Base compiled-step eligibility (epoch-level mode selection may still choose eager).
     # Gradient accumulation is supported via compiled fwd+bwd with eager optimizer updates.
-    base_compiled_step_enabled = not (debug_numerics or nan_skip_batch)
-    compiled_disable_reasons: list[str] = []
-    if debug_numerics:
-        compiled_disable_reasons.append("debug_numerics")
-    if nan_skip_batch:
-        compiled_disable_reasons.append("nan_skip_batch")
-
-    print(f"  Compiled-step base eligibility: {base_compiled_step_enabled}")
-    if base_compiled_step_enabled:
-        if gan_enabled and gan_start_epoch <= 0 and not experimental_compiled_gan:
-            print("  GAN starts at epoch 1: training will run eager from the first epoch")
-        elif gan_enabled and gan_start_epoch <= 0 and experimental_compiled_gan:
-            print("  [EXPERIMENTAL] GAN starts at epoch 1: compiled-GAN experiment keeps compiled mode")
-        elif gan_enabled and not experimental_compiled_gan:
-            print(
-                "  GAN delayed start: training will use compiled mode until GAN activation "
-                f"(gan_start_epoch={gan_start_epoch + 1})"
-            )
-        elif gan_enabled and experimental_compiled_gan:
-            print(
-                "  [EXPERIMENTAL] GAN delayed start: compiled-GAN experiment will keep compiled "
-                f"mode through GAN activation (gan_start_epoch={gan_start_epoch + 1})"
-            )
-    else:
-        joined = ", ".join(compiled_disable_reasons) if compiled_disable_reasons else "unknown"
-        print(f"  Compiled-step disabled by: {joined}")
-        if experimental_compiled_gan:
-            print(
-                "  [EXPERIMENTAL] WARNING: compiled-GAN experiment requested but compiled mode "
-                f"is globally disabled ({joined}). Experiment will not activate."
-            )
-    if grad_accumulation_steps > 1:
-        print(
-            f"  Gradient accumulation: {grad_accumulation_steps} steps (effective batch = {batch_size * grad_accumulation_steps})"
-        )
-        if base_compiled_step_enabled:
-            print("  Gradient accumulation: compiled forward/backward enabled; optimizer updates remain accumulated")
-        else:
-            print("  Gradient accumulation: compiled training step disabled")
-    if nan_skip_batch:
-        print("  nan-skip-batch: enabled (will skip updates on non-finite loss/grads)")
+    base_compiled_step_enabled = print_compiled_step_eligibility(
+        debug_numerics=debug_numerics,
+        nan_skip_batch=nan_skip_batch,
+        gan_enabled=gan_enabled,
+        gan_start_epoch=gan_start_epoch,
+        experimental_compiled_gan=experimental_compiled_gan,
+        grad_accumulation_steps=grad_accumulation_steps,
+        batch_size=batch_size,
+    )
 
     scheduled_start_stage = _resolve_pipeline_stage(start_epoch, pipeline_stage_defs)
     scheduled_start_stage_index = int(scheduled_start_stage["index"])
@@ -2608,40 +2574,14 @@ def train(
             train_stream.save_checkpoint(data_checkpoint_path)
 
         _n = max(num_train_batches, 1)
-        _n_d = max(train_gan_d_updates, 1)
-        _n_v = max(_epoch_accums["num_vad_logs"], 1)
-        _n_a = max(_epoch_accums["num_awesome_logs"], 1)
         avg_train_loss = train_loss / _n
-        epoch_avgs: dict[str, float] = {
-            "loss": avg_train_loss,
-            "spec_loss": _epoch_accums["spec_loss"] / _n,
-            "mrstft_loss": _epoch_accums["mrstft_loss"] / _n,
-            "gan_g_loss": _epoch_accums["gan_g_loss"] / _n,
-            "gan_fm_loss": _epoch_accums["gan_fm_loss"] / _n,
-            "gan_d_loss": train_gan_d_loss / _n_d,
-            "vad_loss": _epoch_accums["vad_loss"] / _n,
-            "speech_loss": _epoch_accums["speech_loss"] / _n,
-            "awesome_loss": _epoch_accums["awesome_loss"] / _n,
-            "awesome_speech": _epoch_accums["awesome_speech"] / _n,
-            "awesome_noise": _epoch_accums["awesome_noise"] / _n,
-            "awesome_smooth": _epoch_accums["awesome_smooth"] / _n,
-            "music_supp": _epoch_accums["music_supp_loss"] / _n,
-            "mask_sat": _epoch_accums["mask_sat_loss"] / _n,
-            "vad_reg_loss": _epoch_accums["vad_reg_loss"] / _n,
-            "p_ref": _epoch_accums["p_ref"] / _n_v,
-            "p_out": _epoch_accums["p_out"] / _n_v,
-            "gate": _epoch_accums["gate_pct"] / _n_v,
-            "mask_mean": _epoch_accums["mask_mean"] / _n_a,
-            "mask_high": _epoch_accums["mask_high"] / _n_a,
-            "mask_low": _epoch_accums["mask_low"] / _n_a,
-            "proxy": _epoch_accums["proxy_mean"] / _n_a,
-            "speech_ratio": _epoch_accums["speech_ratio"] / _n_a,
-            "music_gate": _epoch_accums["music_gate"] / _n_a,
-            "musicness": _epoch_accums["musicness"] / _n_a,
-            "mod": _epoch_accums["mod_energy"] / _n_a,
-            "energy_boost": _epoch_accums["energy_boost"] / _n_a,
-            "snr_boost": _epoch_accums["snr_boost"] / _n_a,
-        }
+        epoch_avgs = compute_epoch_averages(
+            _epoch_accums,
+            train_loss=train_loss,
+            num_train_batches=num_train_batches,
+            train_gan_d_loss=train_gan_d_loss,
+            train_gan_d_updates=train_gan_d_updates,
+        )
 
         # Print detailed timing breakdown in verbose mode
         if verbose and num_train_batches > 0:

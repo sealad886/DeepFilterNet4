@@ -88,3 +88,64 @@ def _resolve_pipeline_stage_by_index(
         "vad_loss_weight": stage.get("vad_loss_weight"),
         "vad_speech_loss_weight": stage.get("vad_speech_loss_weight"),
     }
+
+
+def print_compiled_step_eligibility(
+    *,
+    debug_numerics: bool,
+    nan_skip_batch: bool,
+    gan_enabled: bool,
+    gan_start_epoch: int,
+    experimental_compiled_gan: bool,
+    grad_accumulation_steps: int,
+    batch_size: int,
+) -> bool:
+    """Determine compiled-step base eligibility and print status diagnostics.
+
+    Returns ``True`` when compiled training steps should be used (base
+    eligibility).  Epoch-level mode selection may still choose eager.
+    """
+    enabled = not (debug_numerics or nan_skip_batch)
+    disable_reasons: list[str] = []
+    if debug_numerics:
+        disable_reasons.append("debug_numerics")
+    if nan_skip_batch:
+        disable_reasons.append("nan_skip_batch")
+
+    print(f"  Compiled-step base eligibility: {enabled}")
+    if enabled:
+        if gan_enabled and gan_start_epoch <= 0 and not experimental_compiled_gan:
+            print("  GAN starts at epoch 1: training will run eager from the first epoch")
+        elif gan_enabled and gan_start_epoch <= 0 and experimental_compiled_gan:
+            print("  [EXPERIMENTAL] GAN starts at epoch 1: compiled-GAN experiment keeps compiled mode")
+        elif gan_enabled and not experimental_compiled_gan:
+            print(
+                "  GAN delayed start: training will use compiled mode until GAN activation "
+                f"(gan_start_epoch={gan_start_epoch + 1})"
+            )
+        elif gan_enabled and experimental_compiled_gan:
+            print(
+                "  [EXPERIMENTAL] GAN delayed start: compiled-GAN experiment will keep compiled "
+                f"mode through GAN activation (gan_start_epoch={gan_start_epoch + 1})"
+            )
+    else:
+        joined = ", ".join(disable_reasons) if disable_reasons else "unknown"
+        print(f"  Compiled-step disabled by: {joined}")
+        if experimental_compiled_gan:
+            print(
+                "  [EXPERIMENTAL] WARNING: compiled-GAN experiment requested but compiled mode "
+                f"is globally disabled ({joined}). Experiment will not activate."
+            )
+    if grad_accumulation_steps > 1:
+        print(
+            f"  Gradient accumulation: {grad_accumulation_steps} steps "
+            f"(effective batch = {batch_size * grad_accumulation_steps})"
+        )
+        if enabled:
+            print("  Gradient accumulation: compiled forward/backward enabled; optimizer updates remain accumulated")
+        else:
+            print("  Gradient accumulation: compiled training step disabled")
+    if nan_skip_batch:
+        print("  nan-skip-batch: enabled (will skip updates on non-finite loss/grads)")
+
+    return enabled

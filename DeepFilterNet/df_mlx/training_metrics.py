@@ -91,6 +91,55 @@ def create_epoch_accums() -> dict[str, Any]:
     }
 
 
+def compute_epoch_averages(
+    accums: dict[str, Any],
+    *,
+    train_loss: float,
+    num_train_batches: int,
+    train_gan_d_loss: float,
+    train_gan_d_updates: int,
+) -> dict[str, float]:
+    """Compute per-epoch average metrics from raw accumulators.
+
+    Returns a dict of human-readable metric averages suitable for
+    ``print_epoch_summary`` and logging.
+    """
+    _n = max(num_train_batches, 1)
+    _n_d = max(train_gan_d_updates, 1)
+    _n_v = max(accums["num_vad_logs"], 1)
+    _n_a = max(accums["num_awesome_logs"], 1)
+    return {
+        "loss": train_loss / _n,
+        "spec_loss": accums["spec_loss"] / _n,
+        "mrstft_loss": accums["mrstft_loss"] / _n,
+        "gan_g_loss": accums["gan_g_loss"] / _n,
+        "gan_fm_loss": accums["gan_fm_loss"] / _n,
+        "gan_d_loss": train_gan_d_loss / _n_d,
+        "vad_loss": accums["vad_loss"] / _n,
+        "speech_loss": accums["speech_loss"] / _n,
+        "awesome_loss": accums["awesome_loss"] / _n,
+        "awesome_speech": accums["awesome_speech"] / _n,
+        "awesome_noise": accums["awesome_noise"] / _n,
+        "awesome_smooth": accums["awesome_smooth"] / _n,
+        "music_supp": accums["music_supp_loss"] / _n,
+        "mask_sat": accums["mask_sat_loss"] / _n,
+        "vad_reg_loss": accums["vad_reg_loss"] / _n,
+        "p_ref": accums["p_ref"] / _n_v,
+        "p_out": accums["p_out"] / _n_v,
+        "gate": accums["gate_pct"] / _n_v,
+        "mask_mean": accums["mask_mean"] / _n_a,
+        "mask_high": accums["mask_high"] / _n_a,
+        "mask_low": accums["mask_low"] / _n_a,
+        "proxy": accums["proxy_mean"] / _n_a,
+        "speech_ratio": accums["speech_ratio"] / _n_a,
+        "music_gate": accums["music_gate"] / _n_a,
+        "musicness": accums["musicness"] / _n_a,
+        "mod": accums["mod_energy"] / _n_a,
+        "energy_boost": accums["energy_boost"] / _n_a,
+        "snr_boost": accums["snr_boost"] / _n_a,
+    }
+
+
 def collect_sync_metrics(
     *,
     # Batch data
