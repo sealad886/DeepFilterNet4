@@ -161,6 +161,10 @@ from df_mlx.training_waveform import (  # noqa: E402, F401
     compute_mrstft_loss,
     specs_to_wavs,
 )
+from df_mlx.training_diagnostics import (  # noqa: E402, F401
+    DiagnosticContext,
+    diagnose_nonfinite as _diagnose_nonfinite_impl,
+)
 from df_mlx.training_validation import (  # noqa: E402, F401
     ValidationContext,
     run_validation as _run_validation,
@@ -1683,6 +1687,41 @@ def train(
 
         loss_and_grad_gan = nn.value_and_grad(model, loss_fn_gan)
 
+    # Diagnostic context — groups all immutable state needed by diagnose_nonfinite.
+    _diag_ctx = DiagnosticContext(
+        model=model,
+        debugger=debugger,
+        spectral_loss_fn=spectral_loss,
+        use_mrstft_loss=use_mrstft_loss,
+        mrstft_loss_fn=mrstft_loss_fn,
+        mrstft_istft=mrstft_istft,
+        fft_size=config.fft_size,
+        hop_size=config.hop_size,
+        mrstft_target_len=mrstft_target_len,
+        gan_loss_fns=gan_loss_fns,
+        discriminator=discriminator,
+        gan_istft=gan_istft,
+        gan_target_len=gan_target_len,
+        feature_match_loss=feature_match_loss,
+        gan_fm_weight=gan_fm_weight,
+        clip_gan_scores_fn=_clip_gan_scores,
+        use_awesome_loss=use_awesome_loss,
+        use_pipeline_awesome_loss=use_pipeline_awesome_loss,
+        vad_band_mask=vad_band_mask,
+        vad_band_bins=vad_band_bins,
+        awesome_mask_sharpness=awesome_mask_sharpness,
+        vad_z_threshold=vad_z_threshold,
+        vad_z_slope=vad_z_slope,
+        vad_snr_gate_db=vad_snr_gate_db,
+        vad_snr_gate_width=vad_snr_gate_width,
+        vad_proxy_enabled=vad_proxy_enabled,
+        use_vad_loss=use_vad_loss,
+        vad_threshold=vad_threshold,
+        vad_margin=vad_margin,
+        vad_speech_loss_weight=vad_speech_loss_weight,
+        use_vad_train_reg=use_vad_train_reg,
+    )
+
     def _diagnose_nonfinite(
         noisy_real: mx.array,
         noisy_imag: mx.array,
@@ -1693,167 +1732,20 @@ def train(
         snr: mx.array,
         debug_ctx: dict[str, Any],
     ) -> None:
-        """Run a diagnostic forward pass with detailed finite checks.
+        """Thin wrapper — delegates to training_diagnostics.diagnose_nonfinite."""
+        _diagnose_nonfinite_impl(
+            _diag_ctx,
+            noisy_real,
+            noisy_imag,
+            feat_erb,
+            feat_spec,
+            clean_real,
+            clean_imag,
+            snr,
+            debug_ctx,
+            gan_active=gan_active,
+        )
 
-        Uses a non-fail-fast debugger so all components are checked and
-        logged even when multiple contain non-finite values.
-        """
-        if debugger is None:
-            return
-        # Use a non-fail-fast copy so diagnosis completes fully instead of
-        # crashing on the first non-finite intermediate value.
-        from dataclasses import replace as _dc_replace
-
-        diag_cfg = _dc_replace(debugger.config, fail_fast=False)
-        diag = NumericDebugger(diag_cfg)
-        tqdm.write("  [diagnose] Running non-finite diagnostic pass...")
-        findings: list[str] = []
-
-        def _diag_check(name: str, tensor: mx.array) -> None:
-            if not diag.check(name, tensor, debug_ctx):
-                findings.append(name)
-
-        out = model((noisy_real, noisy_imag), feat_erb, feat_spec, return_vad=True)
-        if isinstance(out, tuple) and len(out) == 2 and isinstance(out[0], tuple):
-            spec_out, vad_logits = out
-        else:
-            spec_out = out
-            vad_logits = None
-
-        _diag_check("model.out_real", spec_out[0])
-        _diag_check("model.out_imag", spec_out[1])
-        if vad_logits is not None:
-            _diag_check("model.vad_logits", vad_logits)
-
-        spec_loss = spectral_loss(spec_out, (clean_real, clean_imag))
-        _diag_check("spec_loss", spec_loss)
-        if use_mrstft_loss and mrstft_loss_fn is not None and mrstft_istft is not None:
-            mrstft_loss = compute_mrstft_loss(
-                spec_out,
-                (clean_real, clean_imag),
-                istft_fn=mrstft_istft,
-                loss_fn=mrstft_loss_fn,
-                n_fft=config.fft_size,
-                hop_length=config.hop_size,
-                target_len=mrstft_target_len,
-                force_fp32=True,
-            )
-            _diag_check("mrstft_loss", mrstft_loss)
-        if gan_active and gan_loss_fns is not None and discriminator is not None and gan_istft is not None:
-            out_wav, clean_wav = specs_to_wavs(
-                spec_out,
-                (clean_real, clean_imag),
-                istft_fn=gan_istft,
-                n_fft=config.fft_size,
-                hop_length=config.hop_size,
-                target_len=gan_target_len,
-                force_fp32=True,
-            )
-            gen_loss_fn, _ = gan_loss_fns
-            disc_fake, fake_feats = discriminator(out_wav)
-            disc_real, real_feats = discriminator(clean_wav)
-            disc_fake = _clip_gan_scores(disc_fake)
-            gan_g_loss = gen_loss_fn(disc_fake)
-            _diag_check("gan_g_loss", gan_g_loss)
-            if feature_match_loss is not None and gan_fm_weight > 0:
-                fm_loss = feature_match_loss(real_feats, fake_feats)
-                _diag_check("gan_fm_loss", fm_loss)
-        if use_awesome_loss:
-            _compute_awesome_losses(
-                noisy_real,
-                noisy_imag,
-                clean_real,
-                clean_imag,
-                spec_out[0],
-                spec_out[1],
-                snr,
-                vad_band_mask,
-                vad_band_bins,
-                awesome_mask_sharpness,
-                vad_z_threshold,
-                vad_z_slope,
-                vad_snr_gate_db,
-                vad_snr_gate_width,
-                vad_proxy_enabled,
-                debug=diag,
-                debug_ctx=debug_ctx,
-            )
-        if use_pipeline_awesome_loss:
-            _compute_pipeline_awesome_losses(
-                noisy_real,
-                noisy_imag,
-                clean_real,
-                clean_imag,
-                spec_out[0],
-                spec_out[1],
-                snr,
-                vad_band_mask,
-                vad_band_bins,
-                awesome_mask_sharpness,
-                vad_z_threshold,
-                vad_z_slope,
-                vad_snr_gate_db,
-                vad_snr_gate_width,
-                vad_proxy_enabled,
-                debug=diag,
-                debug_ctx=debug_ctx,
-            )
-        if use_vad_loss:
-            _compute_vad_loss(
-                clean_real,
-                clean_imag,
-                spec_out[0],
-                spec_out[1],
-                snr,
-                vad_band_mask,
-                vad_band_bins,
-                vad_threshold,
-                vad_margin,
-                vad_snr_gate_db,
-                vad_snr_gate_width,
-                vad_z_threshold,
-                vad_z_slope,
-                debug=diag,
-                debug_ctx=debug_ctx,
-            )
-            if vad_speech_loss_weight > 0:
-                gate = mx.ones((clean_real.shape[0], clean_real.shape[1]))
-                _compute_speech_band_logmag_loss(
-                    clean_real,
-                    clean_imag,
-                    spec_out[0],
-                    spec_out[1],
-                    vad_band_mask,
-                    vad_band_bins,
-                    gate,
-                    debug=diag,
-                    debug_ctx=debug_ctx,
-                )
-        if use_vad_train_reg:
-            _compute_vad_reg_loss(
-                clean_real,
-                clean_imag,
-                noisy_real,
-                noisy_imag,
-                spec_out[0],
-                spec_out[1],
-                snr,
-                vad_band_mask,
-                vad_band_bins,
-                vad_threshold,
-                vad_margin,
-                vad_z_threshold,
-                vad_z_slope,
-                vad_snr_gate_db,
-                vad_snr_gate_width,
-                debug=diag,
-                debug_ctx=debug_ctx,
-            )
-
-        if findings:
-            tqdm.write(f"  [diagnose] Non-finite in: {', '.join(findings)}")
-        else:
-            tqdm.write("  [diagnose] All individual components finite — NaN likely in backward pass")
 
     # -- Compile-boundary shape guardrails ----------------------------------
     def _assert_compile_boundary_shapes(

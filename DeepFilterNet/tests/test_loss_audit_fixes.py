@@ -422,7 +422,13 @@ class TestTrainDynamicRegularizerGates:
         # Eager-side detailed metric logging may skip this expensive metric when
         # speech weight is zero.
         assert train_source.count("if speech_weight > 0:") == 1
-        assert train_source.count("if vad_speech_loss_weight > 0:") == 1
+        # The diagnostic check for vad_speech_loss_weight > 0 was moved to
+        # training_diagnostics.py (DiagnosticContext pattern).  Verify it
+        # exists there instead.
+        import df_mlx.training_diagnostics as td_diag
+
+        diag_source = inspect.getsource(td_diag.diagnose_nonfinite)
+        assert diag_source.count("vad_speech_loss_weight > 0") == 1
 
     def test_compiled_loss_paths_do_not_branch_on_weight_tensors(self):
         import inspect
