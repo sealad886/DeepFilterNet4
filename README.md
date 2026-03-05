@@ -276,20 +276,18 @@ cd path/to/DeepFilterNet/  # cd into repository
 # Mandatory: Install cpu/cuda pytorch (>=1.8) dependency from pytorch.org, e.g.:
 pip install torch torchaudio -f https://download.pytorch.org/whl/cpu/torch_stable.html
 # Install build dependencies used to compile libdf and DeepFilterNet python wheels
-pip install maturin poetry
+pip install maturin setuptools wheel
 
 #  Install remaining DeepFilterNet python dependencies
 # *Option A:* Install DeepFilterNet python wheel globally within your environment. Do this if you want use
 # this repos as is, and don't want to develop within this repository.
-poetry -C DeepFilterNet install -E train -E eval
+pip install ./DeepFilterNet[train,eval]
 # *Option B:* If you want to develop within this repo, install only dependencies and work with the repository version
-poetry -C DeepFilterNet install -E train -E eval --no-root
-export PYTHONPATH=$PWD/DeepFilterNet # And set the python path correctly
+pip install -e ./DeepFilterNet[train,eval]
 
-# Build and install libdf python package required for enhance.py
+# If you are modifying the Rust bindings directly, rebuild them in-place:
 maturin develop --release -m pyDF/Cargo.toml
-# *Optional*: Install libdfdata python package with dataset and dataloading functionality for training
-# Required build dependency: HDF5 headers (e.g. ubuntu: libhdf5-dev)
+# Required build dependency for pyDF-data: HDF5 headers (e.g. ubuntu: libhdf5-dev)
 maturin develop --release -m pyDF-data/Cargo.toml
 # If you have troubles with hdf5 you may try to build and link hdf5 statically:
 # (This is required on macOS/Homebrew when only hdf5 2.x is installed.)

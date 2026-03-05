@@ -50,8 +50,7 @@ Feature requests are welcome! Please use the [Feature Request template](.github/
 ### Prerequisites
 
 - Rust (via [rustup](https://rustup.rs/))
-- Python 3.8+
-- Poetry for Python dependency management
+- Python 3.10+
 - Maturin for building Python wheels
 
 ### Setup Instructions
@@ -59,14 +58,16 @@ Feature requests are welcome! Please use the [Feature Request template](.github/
 ```bash
 cd path/to/DeepFilterNet/
 
-# Install Python dependencies
-pip install maturin poetry
+# Recommended one-step setup
+./setup.sh --all
 
-# For Python development
-poetry -C DeepFilterNet install -E train -E eval --no-root
-export PYTHONPATH=$PWD/DeepFilterNet
+# Or manual Python development setup
+python -m venv .venv
+source .venv/bin/activate
+pip install -U pip setuptools wheel maturin
+pip install -e ./DeepFilterNet[train,eval,dev]
 
-# Build libDF Python package
+# Rebuild Rust-backed Python packages in-place when you change them
 maturin develop --release -m pyDF/Cargo.toml
 
 # Optional: Build libdfdata for dataset functionality
@@ -125,7 +126,7 @@ Configuration files:
 
 ```bash
 cd DeepFilterNet
-poetry run python df/scripts/test_df.py
+python df/scripts/test_df.py
 ```
 
 ### Rust Tests

@@ -7,7 +7,6 @@ assets/hostbs.ini
 out/
 export/
 assets/valid_cache*
-DeepFilterNet/poetry.lock
 data/
 .*ignore
 !.gitignore

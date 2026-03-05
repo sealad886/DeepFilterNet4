@@ -54,10 +54,11 @@ brew install mpv
 
 # Install Python dependencies
 cd DeepFilterNet
-poetry install
+pip install -e .[train,eval]
 
-# Or if using pip
-pip install -r requirements.txt
+# Or use the repository helper from the project root
+cd ..
+./setup.sh --all
 ```
 
 ### Verify Installation

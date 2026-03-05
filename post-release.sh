@@ -20,9 +20,9 @@ fd "(pyproject)|(Cargo)" -t f -e toml -x bash -c "set_version {} $VERSION"
 
 (
   cd DeepFilterNet/
-  # Workaround for 'poetry add ../pyDF/' which gives some obscure error message
-  sed -i "s/^deepfilterlib.*/deepfilterlib = { path = \"..\/pyDF\/\" }/" pyproject.toml
-  sed -i "s/^deepfilterdataloader.*/deepfilterdataloader = { path = \"..\/pyDF-data\/\", optional = true }/" pyproject.toml
+  # Restore local workspace bindings for development after cutting a release.
+  sed -i 's|\"deepfilterlib == [^\"]*\"|\"deepfilterlib @ file:../pyDF\"|' pyproject.toml
+  sed -i 's|\"deepfilterdataloader == [^\"]*\"|\"deepfilterdataloader @ file:../pyDF-data\"|' pyproject.toml
 
 )
 echo cargo add --manifest-path ./pyDF/Cargo.toml --features transforms --path ./libDF
@@ -30,13 +30,6 @@ echo cargo add --manifest-path ./pyDF/Cargo.toml --features transforms --path ./
 # cargo add --manifest-path ./pyDF-data/Cargo.toml --features dataset --path ./libDF deep_filter
 
 cargo update
-(
-  cd DeepFilterNet/
-  echo "Running poetry update"
-  poetry update
-  echo "done"
-  git add poetry.lock
-)
 fd "(pyproject)|(Cargo)" -I -t f -e toml -e lock -X git add {}
 
 git commit -m "post-release v$VERSION"
