@@ -63,7 +63,7 @@ eval = [
   "scipy>=1,<2",
 ]
 soundfile = ["soundfile>=0.10,<0.14"]
-dnsmos-local = ["onnxruntime>=1.15,<1.24"]
+dnsmos-local = ["onnxruntime>=1.15,<1.25"]
 # ASR-based loss and evaluation (requires openai-whisper)
 asr = ["openai-whisper>=20240930"]
 mlx = [
