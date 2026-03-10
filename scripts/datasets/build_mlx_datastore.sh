@@ -157,6 +157,9 @@ Optional clean-speech preprocessing:
                               clean-speech duration before enhancement
   --preprocess-probe-cache P  Optional JSON cache for ffprobe duration results
                               (default: auto path derived from the preprocess output list)
+  --preprocess-enhance-batch-size N
+                              Batch size for MLX enhancement (default: auto;
+                              currently 4 for MLX, 1 for torch)
   --preprocess-overwrite      Rebuild preprocessed files even if they already exist; otherwise resume is automatic
 
 General:
@@ -495,6 +498,11 @@ if [[ ${PREPROCESS_CLEAN_SPEECH} -eq 1 ]]; then
     echo "Preprocess device:  auto"
   fi
   echo "Preprocess mode:    $([[ ${PREPROCESS_OVERWRITE} -eq 1 ]] && echo "overwrite" || echo "resume")"
+  if [[ -n "${PREPROCESS_ENHANCE_BATCH_SIZE}" ]]; then
+    echo "Preprocess batch:   ${PREPROCESS_ENHANCE_BATCH_SIZE}"
+  else
+    echo "Preprocess batch:   auto"
+  fi
 else
   echo "Preprocess speech:  disabled"
 fi
