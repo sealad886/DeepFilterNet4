@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import os
 import wave
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -37,6 +38,12 @@ def parse_args() -> argparse.Namespace:
         "--overwrite",
         action="store_true",
         help="Rebuild extracted RSI subject-channel files even when resumable outputs already exist.",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=min(4, os.cpu_count() or 1),
+        help="Max parallel workers for RSI extraction (default: min(4, cpu_count)).",
     )
     return parser.parse_args()
 
@@ -177,14 +184,22 @@ def main() -> int:
     rsi_outputs: list[Path] = []
     rsi_rebuilt = 0
     rsi_reused = 0
-    for source in rsi_sources:
+
+    def _extract_one_rsi(source: Path) -> tuple[Path, str]:
         target = build_rsi_output_path(source, rsi_root, prepared_root).resolve()
         if should_refresh_output(source, target, overwrite=args.overwrite):
             extract_rsi_subject_channel(source, target)
-            rsi_rebuilt += 1
-        else:
-            rsi_reused += 1
-        rsi_outputs.append(target)
+            return target, "rebuilt"
+        return target, "reused"
+
+    num_workers = max(1, args.num_workers)
+    with ThreadPoolExecutor(max_workers=num_workers) as pool:
+        for target, status in pool.map(_extract_one_rsi, rsi_sources):
+            rsi_outputs.append(target)
+            if status == "rebuilt":
+                rsi_rebuilt += 1
+            else:
+                rsi_reused += 1
 
     all_paths = sorted({path.resolve() for path in (*mono_files, *rsi_outputs)}, key=str)
     write_output_list(all_paths, output_list)

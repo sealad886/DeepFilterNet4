@@ -45,10 +45,9 @@ import sys
 import threading
 import time
 import zipfile
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from queue import Queue
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -526,11 +525,11 @@ def build_cache_for_category(
 
     # Use bounded queue to prevent OOM
     max_in_flight = num_workers * 4
-    pending_futures: Queue[Future] = Queue(maxsize=max_in_flight)
+    pending_futures: list[Future] = []
 
     def submit_task(executor, path):
         future = executor.submit(process_file, path, sample_rate, normalize, min_samples)
-        pending_futures.put(future)
+        pending_futures.append(future)
 
     def flush_short_buffer():
         """Merge accumulated short files and write to cache."""
@@ -548,48 +547,92 @@ def build_cache_for_category(
         short_buffer = []
         short_buffer_samples = 0
 
-    def process_completed():
+    def drain_completed():
         nonlocal cached_count, failed_count, total_samples, total_duration
         nonlocal short_buffer, short_buffer_samples, short_skipped_count
-        future = pending_futures.get()
-        result = future.result()
-        if result is not None:
-            path, audio, is_short = result
-            if is_short:
-                if merge_short:
-                    # Add to buffer for merging
-                    short_buffer.append((path, audio))
-                    short_buffer_samples += len(audio)
-                    # Flush when buffer reaches target length
-                    if short_buffer_samples >= min_samples:
-                        flush_short_buffer()
+        drained = 0
+        newly_done = [f for f in pending_futures if f.done()]
+        for future in newly_done:
+            pending_futures.remove(future)
+            result = future.result()
+            if result is not None:
+                path, audio, is_short = result
+                if is_short:
+                    if merge_short:
+                        short_buffer.append((path, audio))
+                        short_buffer_samples += len(audio)
+                        if short_buffer_samples >= min_samples:
+                            flush_short_buffer()
+                    else:
+                        short_skipped_count += 1
                 else:
-                    # Skip short files
-                    short_skipped_count += 1
+                    writer.add(path, audio)
+                    cached_count += 1
+                    total_samples += len(audio)
+                    total_duration += len(audio) / sample_rate
             else:
-                # Normal file - add directly
-                writer.add(path, audio)
-                cached_count += 1
-                total_samples += len(audio)
-                total_duration += len(audio) / sample_rate
-        else:
-            failed_count += 1
+                failed_count += 1
+            drained += 1
+        return drained
 
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
         pbar = tqdm(total=total_files, desc=f"  {category}", unit="files", dynamic_ncols=True, smoothing=0.1)
 
         for i, file_path in enumerate(files_to_process):
-            # If queue is full, process one completed task first
-            if pending_futures.full():
-                process_completed()
-                pbar.update(1)
+            if len(pending_futures) >= max_in_flight:
+                drained = drain_completed()
+                if drained == 0:
+                    done_iter = as_completed(pending_futures)
+                    done_future = next(done_iter)
+                    pending_futures.remove(done_future)
+                    result = done_future.result()
+                    if result is not None:
+                        path, audio, is_short = result
+                        if is_short:
+                            if merge_short:
+                                short_buffer.append((path, audio))
+                                short_buffer_samples += len(audio)
+                                if short_buffer_samples >= min_samples:
+                                    flush_short_buffer()
+                            else:
+                                short_skipped_count += 1
+                        else:
+                            writer.add(path, audio)
+                            cached_count += 1
+                            total_samples += len(audio)
+                            total_duration += len(audio) / sample_rate
+                    else:
+                        failed_count += 1
+                    drained = 1
+                pbar.update(drained)
 
             submit_task(executor, file_path)
 
-        # Process remaining tasks
-        while not pending_futures.empty():
-            process_completed()
-            pbar.update(1)
+        while pending_futures:
+            drained = drain_completed()
+            if drained == 0:
+                done_future = next(as_completed(pending_futures))
+                pending_futures.remove(done_future)
+                result = done_future.result()
+                if result is not None:
+                    path, audio, is_short = result
+                    if is_short:
+                        if merge_short:
+                            short_buffer.append((path, audio))
+                            short_buffer_samples += len(audio)
+                            if short_buffer_samples >= min_samples:
+                                flush_short_buffer()
+                        else:
+                            short_skipped_count += 1
+                    else:
+                        writer.add(path, audio)
+                        cached_count += 1
+                        total_samples += len(audio)
+                        total_duration += len(audio) / sample_rate
+                else:
+                    failed_count += 1
+                drained = 1
+            pbar.update(drained)
 
         pbar.close()
 
@@ -1018,7 +1061,39 @@ def main():
     # Convert GB to bytes for async writer
     max_writer_bytes = args.max_pending_bytes * 1024 * 1024 * 1024
 
-    # Speech cache (with short file handling)
+    bg_workers = max(1, args.num_workers // 2)
+    bg_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="cat")
+
+    noise_future = bg_executor.submit(
+        build_cache_for_category,
+        noise_files,
+        "noise",
+        output_dir,
+        args.sample_rate,
+        args.shard_size,
+        bg_workers,
+        True,
+        existing_indices.get("noise"),
+        args.base_dir,
+        max_writer_bytes,
+    )
+
+    rir_future: Future | None = None
+    if rir_files:
+        rir_future = bg_executor.submit(
+            build_cache_for_category,
+            rir_files,
+            "rir",
+            output_dir,
+            args.sample_rate,
+            args.shard_size,
+            bg_workers,
+            False,
+            existing_indices.get("rir"),
+            args.base_dir,
+            max_writer_bytes,
+        )
+
     speech_index, speech_stats = build_cache_for_category(
         speech_files,
         "speech",
@@ -1036,38 +1111,16 @@ def main():
     all_indices["speech"] = speech_index
     all_stats["speech"] = speech_stats
 
-    # Noise cache (no min duration - noise can be any length)
-    noise_index, noise_stats = build_cache_for_category(
-        noise_files,
-        "noise",
-        output_dir,
-        args.sample_rate,
-        args.shard_size,
-        args.num_workers,
-        normalize=True,
-        existing_index=existing_indices.get("noise"),
-        base_dir=args.base_dir,
-        max_writer_bytes=max_writer_bytes,
-    )
+    noise_index, noise_stats = noise_future.result()
     all_indices["noise"] = noise_index
     all_stats["noise"] = noise_stats
 
-    # RIR cache (no min duration - RIR can be any length)
-    if rir_files:
-        rir_index, rir_stats = build_cache_for_category(
-            rir_files,
-            "rir",
-            output_dir,
-            args.sample_rate,
-            args.shard_size,
-            args.num_workers,
-            normalize=False,
-            existing_index=existing_indices.get("rir"),
-            base_dir=args.base_dir,
-            max_writer_bytes=max_writer_bytes,
-        )
+    if rir_future is not None:
+        rir_index, rir_stats = rir_future.result()
         all_indices["rir"] = rir_index
         all_stats["rir"] = rir_stats
+
+    bg_executor.shutdown(wait=False)
 
     elapsed = time.time() - start_time
 

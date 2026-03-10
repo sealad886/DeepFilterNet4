@@ -102,6 +102,11 @@ print(os.path.commonpath(parent_dirs))
 PY
 }
 
+phase_elapsed() {
+  local s=$SECONDS
+  printf '%dm%02ds' $((s / 60)) $((s % 60))
+}
+
 usage_helptext() {
   cat <<EOF
 Usage:
@@ -510,6 +515,7 @@ mkdir -p "${LIST_DIR}"
 
 cd "${ROOT_DIR}/DeepFilterNet"
 
+SECONDS=0
 if [[ ${INCLUDE_CHAINS} -eq 1 ]]; then
   if [[ ! -d "${CHAINS_DIR}" ]]; then
     echo "Error: CHAINS corpus root not found: ${CHAINS_DIR}" >&2
@@ -533,7 +539,9 @@ if [[ ${INCLUDE_CHAINS} -eq 1 ]]; then
   merge_unique_file_lists "${COMBINED_CLEAN_LIST}" "${CLEAN_LIST}" "${CHAINS_LIST}"
   CLEAN_LIST_TO_USE="${COMBINED_CLEAN_LIST}"
 fi
+echo "[timing] CHAINS preparation: $(phase_elapsed)"
 
+SECONDS=0
 if [[ ${PREPROCESS_CLEAN_SPEECH} -eq 1 ]]; then
   PREPROCESS_BASE_DIR_TO_USE="${PREPROCESS_BASE_DIR}"
   if [[ ${INCLUDE_CHAINS} -eq 1 && ${PREPROCESS_BASE_DIR_WAS_SET} -eq 0 ]]; then
@@ -574,7 +582,9 @@ if [[ ${PREPROCESS_CLEAN_SPEECH} -eq 1 ]]; then
     exit 1
   fi
 fi
+echo "[timing] Clean-speech preprocessing: $(phase_elapsed)"
 
+SECONDS=0
 echo ""
 echo "Starting audio cache build..."
 echo "Speech list used: ${CLEAN_LIST_TO_USE}"
@@ -608,6 +618,7 @@ if [[ "${MERGE_SHORT}" == "true" ]]; then
 fi
 
 "${build_cmd[@]}"
+echo "[timing] Audio cache build: $(phase_elapsed)"
 
 echo ""
 echo "=============================================="

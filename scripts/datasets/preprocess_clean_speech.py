@@ -51,6 +51,8 @@ NON_SPEECH_PATH_MARKERS = frozenset(
 KNOWN_MLX_MODEL_NAMES = frozenset({"deepfilternet3-mlx", "deepfilternet4-mlx"})
 KNOWN_TORCH_MODEL_NAMES = frozenset({"deepfilternet", "deepfilternet2", "deepfilternet3"})
 MLX_CLEAR_CACHE_INTERVAL = 8
+_last_list_write_time = 0.0
+_LIST_WRITE_INTERVAL = 30.0
 
 
 class PreprocessProgressStats:
@@ -107,6 +109,17 @@ def write_output_list(paths: Iterable[Path], output_list: Path) -> None:
 
 def write_resumable_output_list(output_paths: list[Path], completed_paths: set[Path], output_list: Path) -> None:
     write_output_list((path for path in output_paths if path in completed_paths), output_list)
+
+
+def _maybe_write_resumable_output_list(
+    output_paths: list[Path], completed_paths: set[Path], output_list: Path, *, force: bool = False
+) -> None:
+    global _last_list_write_time
+    now = time.monotonic()
+    if not force and (now - _last_list_write_time) < _LIST_WRITE_INTERVAL:
+        return
+    write_resumable_output_list(output_paths, completed_paths, output_list)
+    _last_list_write_time = now
 
 
 def resolve_probe_cache_path(output_list: Path, explicit_cache_path: str | None) -> Path:
@@ -891,7 +904,7 @@ def main() -> int:
                             completed_paths,
                         )
                         if completed_save_count:
-                            write_resumable_output_list(output_paths, completed_paths, output_list)
+                            _maybe_write_resumable_output_list(output_paths, completed_paths, output_list)
                             progress.update(completed_duration_seconds)
                         if len(inflight_saves) >= max_inflight_saves:
                             completed_save_count, completed_duration_seconds = collect_completed_saves(
@@ -902,7 +915,7 @@ def main() -> int:
                                 wait_for_completion=True,
                             )
                             if completed_save_count:
-                                write_resumable_output_list(output_paths, completed_paths, output_list)
+                                _maybe_write_resumable_output_list(output_paths, completed_paths, output_list)
                                 progress.update(completed_duration_seconds)
                         progress.set_postfix_str(
                             build_progress_postfix(
