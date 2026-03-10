@@ -68,7 +68,15 @@ def init_logger(file: Optional[str] = None, level: str = "INFO", model: Optional
     _logger_initialized = True
 
 
+_warn_once_seen: set = set()
+_deprecated_seen: set = set()
+
+
 def warn_once(message, *args, **kwargs):
+    key = message if not args else message.format(*args)
+    if key in _warn_once_seen:
+        return
+    _warn_once_seen.add(key)
     try:
         logger.log("WARNONCE", message, *args, **kwargs)
     except ValueError:
@@ -76,6 +84,10 @@ def warn_once(message, *args, **kwargs):
 
 
 def log_deprecated(message, *args, **kwargs):
+    key = message if not args else message.format(*args)
+    if key in _deprecated_seen:
+        return
+    _deprecated_seen.add(key)
     try:
         logger.log("DEPRECATED", message, *args, **kwargs)
     except ValueError:

@@ -17,7 +17,6 @@ import platform
 import shutil
 import subprocess
 import sys
-import threading
 import time
 from concurrent.futures import ALL_COMPLETED, FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
@@ -25,6 +24,7 @@ from typing import Callable, Iterable, List, NamedTuple
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -52,9 +52,9 @@ NON_SPEECH_PATH_MARKERS = frozenset(
 KNOWN_MLX_MODEL_NAMES = frozenset({"deepfilternet3-mlx", "deepfilternet4-mlx"})
 KNOWN_TORCH_MODEL_NAMES = frozenset({"deepfilternet", "deepfilternet2", "deepfilternet3"})
 MLX_CLEAR_CACHE_INTERVAL = 8
+MLX_DEFAULT_ENHANCE_BATCH_SIZE = 4
 _last_list_write_time = 0.0
 _LIST_WRITE_INTERVAL = 30.0
-_enhance_tls = threading.local()
 
 
 class PreprocessProgressStats:
@@ -400,8 +400,8 @@ def load_mlx_backend(model_base_dir: str) -> EnhanceBackend:
     return EnhanceBackend(name="mlx", sample_rate=params.sr, enhance_audio=enhance_audio)
 
 
-def resolve_backend(model_base_dir: str, requested_device: str | None, *, allow_mlx: bool = True) -> EnhanceBackend:
-    if allow_mlx and should_prefer_mlx_backend(model_base_dir, requested_device):
+def resolve_backend(model_base_dir: str, requested_device: str | None) -> EnhanceBackend:
+    if should_prefer_mlx_backend(model_base_dir, requested_device):
         try:
             return load_mlx_backend(model_base_dir)
         except Exception as exc:
@@ -409,15 +409,48 @@ def resolve_backend(model_base_dir: str, requested_device: str | None, *, allow_
     return load_torch_backend(resolve_torch_fallback_model(model_base_dir), requested_device)
 
 
-def _init_enhance_thread(model_base_dir: str, device: str | None, *, allow_mlx: bool = True) -> None:
-    _enhance_tls.backend = resolve_backend(model_base_dir, device, allow_mlx=allow_mlx)
+def choose_enhance_batch_size(backend_name: str) -> int:
+    return MLX_DEFAULT_ENHANCE_BATCH_SIZE if backend_name == "mlx" else 1
 
 
-def _enhance_one_threaded(audio: torch.Tensor) -> tuple[torch.Tensor, float]:
-    with torch.inference_mode():
-        t0 = time.perf_counter()
-        enhanced = _enhance_tls.backend.enhance_audio(audio)
-        return enhanced, time.perf_counter() - t0
+def _can_batch_audio(audio: torch.Tensor) -> bool:
+    return audio.ndim == 1 or (audio.ndim == 2 and audio.shape[0] == 1)
+
+
+def _normalize_batched_audio(audio: torch.Tensor) -> torch.Tensor:
+    if audio.ndim == 1:
+        return audio.detach().cpu()
+    if audio.ndim == 2 and audio.shape[0] == 1:
+        return audio.squeeze(0).detach().cpu()
+    raise ValueError(f"Batched enhancement supports mono tensors only, got shape {tuple(audio.shape)}")
+
+
+def enhance_audio_batch(backend: EnhanceBackend, audios: list[torch.Tensor]) -> tuple[list[torch.Tensor], float]:
+    if not audios:
+        return [], 0.0
+
+    had_channel_dim = [audio.ndim == 2 for audio in audios]
+    normalized = [_normalize_batched_audio(audio) for audio in audios]
+    lengths = [int(audio.shape[-1]) for audio in normalized]
+    max_length = max(lengths)
+    padded = [F.pad(audio, (0, max_length - audio.shape[-1])) for audio in normalized]
+
+    enhance_started = time.perf_counter()
+    enhanced_batch = backend.enhance_audio(torch.stack(padded, dim=0))
+    elapsed = time.perf_counter() - enhance_started
+
+    if enhanced_batch.ndim == 1:
+        enhanced_batch = enhanced_batch.unsqueeze(0)
+    elif enhanced_batch.ndim == 3 and enhanced_batch.shape[1] == 1:
+        enhanced_batch = enhanced_batch.squeeze(1)
+
+    enhanced_items = []
+    for i, length in enumerate(lengths):
+        enhanced_item = enhanced_batch[i, :length].detach().cpu()
+        if had_channel_dim[i]:
+            enhanced_item = enhanced_item.unsqueeze(0)
+        enhanced_items.append(enhanced_item)
+    return enhanced_items, elapsed
 
 
 def probe_audio_duration_seconds(path: Path, ffprobe_bin: str) -> float:
@@ -752,14 +785,6 @@ def parse_args() -> argparse.Namespace:
         help="DataLoader workers used while reading source audio (resume is default unless --overwrite is set).",
     )
     parser.add_argument(
-        "--enhance-workers",
-        type=int,
-        default=1,
-        help="Parallel enhancement model instances (default: 1). "
-        "Each worker loads a separate model copy; increase to trade RAM for throughput. "
-        "Forces Torch backend when > 1 (MLX Metal is not thread-safe).",
-    )
-    parser.add_argument(
         "--probe-workers",
         type=int,
         default=None,
@@ -821,7 +846,6 @@ def main() -> int:
     ]
     pending_sources = [source for source, _ in pending_pairs]
     completed_count = len(sources) - len(pending_sources)
-    enhance_workers = max(1, args.enhance_workers)
     save_workers = choose_save_workers(args.num_workers, effective_device)
     probe_workers = max(1, getattr(args, "probe_workers", 0) or choose_probe_workers(args.num_workers))
     probe_cache_path = resolve_probe_cache_path(output_list, getattr(args, "probe_cache", None))
@@ -843,7 +867,6 @@ def main() -> int:
     print(f"Device:          {effective_device}")
     print(f"Workers:         {args.num_workers}")
     print(f"Probe workers:   {probe_workers}")
-    print(f"Enhance workers: {enhance_workers}")
     print(f"Save workers:    {save_workers}")
     print(f"Mode:            {'overwrite' if args.overwrite else 'resume'}")
     print("=" * 60)
@@ -864,14 +887,13 @@ def main() -> int:
     total_audio_seconds = sum(pending_source_durations.values())
     print(f"Pending audio:   {total_audio_seconds / 3600.0:.2f}h")
 
-    force_torch = enhance_workers > 1
-    if force_torch and should_prefer_mlx_backend(args.model_base_dir, args.device):
-        print(
-            f"[info] --enhance-workers={enhance_workers} requested; "
-            f"using Torch backend (MLX Metal is not thread-safe)."
-        )
-    backend = resolve_backend(args.model_base_dir, args.device, allow_mlx=not force_torch)
+    backend = resolve_backend(args.model_base_dir, args.device)
+    enhance_batch_size = choose_enhance_batch_size(backend.name)
     print(f"Enhance backend: {backend.name}")
+    print(f"Enhance batch:   {enhance_batch_size}")
+
+    if enhance_batch_size > 1:
+        pending_sources = sorted(pending_sources, key=lambda source: pending_source_durations[source])
 
     dataset = AudioDataset([str(path) for path in pending_sources], backend.sample_rate)
     loader_kwargs: dict[str, object] = {
@@ -887,17 +909,7 @@ def main() -> int:
     inflight_saves: dict[Future[float], tuple[Path, Path, float]] = {}
     max_inflight_saves = max(2, save_workers * 2)
     progress_stats = PreprocessProgressStats(start_time=time.perf_counter())
-
-    enhance_pool: ThreadPoolExecutor | None = None
-    if enhance_workers > 1:
-        enhance_pool = ThreadPoolExecutor(
-            max_workers=enhance_workers,
-            initializer=lambda: _init_enhance_thread(args.model_base_dir, args.device, allow_mlx=False),
-            thread_name_prefix="enhance",
-        )
-
-    inflight_enhances: dict[Future[tuple[torch.Tensor, float]], tuple[Path, Path, float, int]] = {}
-    max_inflight_enhances = max(2, enhance_workers * 2)
+    pending_enhance_batch: list[tuple[Path, Path, float, int, torch.Tensor]] = []
 
     def _submit_save(enhanced, source, target, duration_seconds, orig_sr):
         future = save_pool.submit(
@@ -910,18 +922,17 @@ def main() -> int:
         inflight_saves[future] = (source, target, duration_seconds)
         progress_stats.queue_high_water = max(progress_stats.queue_high_water, len(inflight_saves))
 
-    def _drain_enhances():
-        """Collect completed enhancement futures and submit their saves."""
-        done_futures = [f for f in inflight_enhances if f.done()]
-        for ef in done_futures:
-            source, target, duration_seconds, orig_sr = inflight_enhances.pop(ef)
-            try:
-                enhanced, elapsed = ef.result()
-                progress_stats.enhance_seconds += elapsed
-                progress_stats.enhance_count += 1
-                _submit_save(enhanced, source, target, duration_seconds, orig_sr)
-            except Exception as exc:  # pragma: no cover
-                failures.append(f"{source}: {exc}")
+    def _flush_pending_enhance_batch() -> None:
+        if not pending_enhance_batch:
+            return
+        batch_records = list(pending_enhance_batch)
+        pending_enhance_batch.clear()
+        source_audio = [audio for _, _, _, _, audio in batch_records]
+        enhanced_items, elapsed = enhance_audio_batch(backend, source_audio)
+        progress_stats.enhance_seconds += elapsed
+        progress_stats.enhance_count += len(batch_records)
+        for enhanced, (source, target, duration_seconds, orig_sr, _) in zip(enhanced_items, batch_records):
+            _submit_save(enhanced, source, target, duration_seconds, orig_sr)
 
     def _drain_saves(progress, *, force: bool = False):
         """Collect completed saves and update progress."""
@@ -974,18 +985,16 @@ def main() -> int:
                     try:
                         audio = audio_batch.squeeze(0)
                         orig_sr = int(orig_sr_batch[0])
-                        if enhance_pool is not None:
-                            ef = enhance_pool.submit(_enhance_one_threaded, audio)
-                            inflight_enhances[ef] = (source, target, duration_seconds, orig_sr)
-                            _drain_enhances()
-                            while len(inflight_enhances) >= max_inflight_enhances:
-                                wait(inflight_enhances, return_when=FIRST_COMPLETED)
-                                _drain_enhances()
+                        if enhance_batch_size > 1 and _can_batch_audio(audio):
+                            pending_enhance_batch.append((source, target, duration_seconds, orig_sr, audio))
+                            if len(pending_enhance_batch) >= enhance_batch_size:
+                                _flush_pending_enhance_batch()
                         else:
-                            enhance_started = time.perf_counter()
-                            enhanced = backend.enhance_audio(audio)
-                            progress_stats.enhance_seconds += time.perf_counter() - enhance_started
+                            _flush_pending_enhance_batch()
+                            enhanced_items, elapsed = enhance_audio_batch(backend, [audio])
+                            progress_stats.enhance_seconds += elapsed
                             progress_stats.enhance_count += 1
+                            enhanced = enhanced_items[0]
                             _submit_save(enhanced, source, target, duration_seconds, orig_sr)
                         _drain_saves(progress)
                         if len(inflight_saves) >= max_inflight_saves:
@@ -995,11 +1004,8 @@ def main() -> int:
                         failures.append(f"{source}: {exc}")
                         _update_postfix(progress)
 
-                if enhance_pool is not None:
-                    while inflight_enhances:
-                        wait(inflight_enhances, return_when=FIRST_COMPLETED)
-                        _drain_enhances()
-                        _drain_saves(progress)
+                _flush_pending_enhance_batch()
+                _drain_saves(progress)
 
                 completed_save_count, completed_duration_seconds = collect_completed_saves(
                     inflight_saves,
@@ -1013,9 +1019,6 @@ def main() -> int:
                     write_resumable_output_list(output_paths, completed_paths, output_list)
                     progress.update(completed_duration_seconds)
                 _update_postfix(progress)
-
-    if enhance_pool is not None:
-        enhance_pool.shutdown(wait=True)
 
     elapsed = max(time.perf_counter() - progress_stats.start_time, 1e-9)
     print(
