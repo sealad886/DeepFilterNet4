@@ -409,7 +409,9 @@ def resolve_backend(model_base_dir: str, requested_device: str | None) -> Enhanc
     return load_torch_backend(resolve_torch_fallback_model(model_base_dir), requested_device)
 
 
-def choose_enhance_batch_size(backend_name: str) -> int:
+def choose_enhance_batch_size(backend_name: str, override: int | None = None) -> int:
+    if override is not None:
+        return max(1, override)
     return MLX_DEFAULT_ENHANCE_BATCH_SIZE if backend_name == "mlx" else 1
 
 
@@ -796,6 +798,12 @@ def parse_args() -> argparse.Namespace:
         help="JSON cache for ffprobe duration results; defaults to a sibling of --output-list. Unchanged files reuse cached durations on reruns.",
     )
     parser.add_argument(
+        "--enhance-batch-size",
+        type=int,
+        default=None,
+        help="Batch size for MLX enhancement (default: auto, currently 4 for MLX, 1 for torch).",
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Rebuild outputs even when the mirrored file already exists.",
@@ -888,7 +896,7 @@ def main() -> int:
     print(f"Pending audio:   {total_audio_seconds / 3600.0:.2f}h")
 
     backend = resolve_backend(args.model_base_dir, args.device)
-    enhance_batch_size = choose_enhance_batch_size(backend.name)
+    enhance_batch_size = choose_enhance_batch_size(backend.name, args.enhance_batch_size)
     print(f"Enhance backend: {backend.name}")
     print(f"Enhance batch:   {enhance_batch_size}")
 

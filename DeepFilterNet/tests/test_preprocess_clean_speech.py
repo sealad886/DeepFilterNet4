@@ -115,6 +115,7 @@ def test_main_resumes_existing_outputs_by_default(tmp_path: Path, monkeypatch) -
             num_workers=2,
             probe_workers=None,
             probe_cache=None,
+            enhance_batch_size=None,
             overwrite=False,
             allow_non_speech_paths=False,
         ),
@@ -198,6 +199,7 @@ def test_main_fully_resumed_run_skips_ffprobe_and_backend_init(tmp_path: Path, m
             num_workers=2,
             probe_workers=None,
             probe_cache=None,
+            enhance_batch_size=None,
             overwrite=False,
             allow_non_speech_paths=False,
         ),
@@ -252,6 +254,7 @@ def test_main_rejects_colliding_output_paths(tmp_path: Path, monkeypatch) -> Non
             num_workers=0,
             probe_workers=None,
             probe_cache=None,
+            enhance_batch_size=None,
             overwrite=False,
             allow_non_speech_paths=False,
         ),
@@ -432,6 +435,7 @@ def test_main_rejects_obvious_non_speech_sources_by_default(tmp_path: Path, monk
             num_workers=0,
             probe_workers=None,
             probe_cache=None,
+            enhance_batch_size=None,
             overwrite=False,
             allow_non_speech_paths=False,
         ),
@@ -703,6 +707,10 @@ def test_choose_enhance_batch_size_defaults_to_mlx_batching() -> None:
 
     assert module.choose_enhance_batch_size("mlx") == module.MLX_DEFAULT_ENHANCE_BATCH_SIZE
     assert module.choose_enhance_batch_size("torch") == 1
+    assert module.choose_enhance_batch_size("mlx", override=8) == 8
+    assert module.choose_enhance_batch_size("torch", override=2) == 2
+    assert module.choose_enhance_batch_size("mlx", override=None) == module.MLX_DEFAULT_ENHANCE_BATCH_SIZE
+    assert module.choose_enhance_batch_size("mlx", override=0) == 1
 
 
 def test_enhance_audio_batch_pads_inputs_and_trims_outputs() -> None:
