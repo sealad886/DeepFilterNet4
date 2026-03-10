@@ -400,8 +400,8 @@ def load_mlx_backend(model_base_dir: str) -> EnhanceBackend:
     return EnhanceBackend(name="mlx", sample_rate=params.sr, enhance_audio=enhance_audio)
 
 
-def resolve_backend(model_base_dir: str, requested_device: str | None) -> EnhanceBackend:
-    if should_prefer_mlx_backend(model_base_dir, requested_device):
+def resolve_backend(model_base_dir: str, requested_device: str | None, *, allow_mlx: bool = True) -> EnhanceBackend:
+    if allow_mlx and should_prefer_mlx_backend(model_base_dir, requested_device):
         try:
             return load_mlx_backend(model_base_dir)
         except Exception as exc:
@@ -409,8 +409,8 @@ def resolve_backend(model_base_dir: str, requested_device: str | None) -> Enhanc
     return load_torch_backend(resolve_torch_fallback_model(model_base_dir), requested_device)
 
 
-def _init_enhance_thread(model_base_dir: str, device: str | None) -> None:
-    _enhance_tls.backend = resolve_backend(model_base_dir, device)
+def _init_enhance_thread(model_base_dir: str, device: str | None, *, allow_mlx: bool = True) -> None:
+    _enhance_tls.backend = resolve_backend(model_base_dir, device, allow_mlx=allow_mlx)
 
 
 def _enhance_one_threaded(audio: torch.Tensor) -> tuple[torch.Tensor, float]:
@@ -757,7 +757,7 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Parallel enhancement model instances (default: 1). "
         "Each worker loads a separate model copy; increase to trade RAM for throughput. "
-        "Clamped to 1 for MLX backend (Metal GPU is not thread-safe).",
+        "Forces Torch backend when > 1 (MLX Metal is not thread-safe).",
     )
     parser.add_argument(
         "--probe-workers",
@@ -864,14 +864,13 @@ def main() -> int:
     total_audio_seconds = sum(pending_source_durations.values())
     print(f"Pending audio:   {total_audio_seconds / 3600.0:.2f}h")
 
-    backend = resolve_backend(args.model_base_dir, args.device)
-    if backend.name == "mlx" and enhance_workers > 1:
+    force_torch = enhance_workers > 1
+    if force_torch and should_prefer_mlx_backend(args.model_base_dir, args.device):
         print(
-            f"[warn] MLX Metal backend is not thread-safe; "
-            f"clamping --enhance-workers from {enhance_workers} to 1. "
-            f"Use the Torch backend for multi-worker enhancement."
+            f"[info] --enhance-workers={enhance_workers} requested; "
+            f"using Torch backend (MLX Metal is not thread-safe)."
         )
-        enhance_workers = 1
+    backend = resolve_backend(args.model_base_dir, args.device, allow_mlx=not force_torch)
     print(f"Enhance backend: {backend.name}")
 
     dataset = AudioDataset([str(path) for path in pending_sources], backend.sample_rate)
@@ -893,7 +892,7 @@ def main() -> int:
     if enhance_workers > 1:
         enhance_pool = ThreadPoolExecutor(
             max_workers=enhance_workers,
-            initializer=lambda: _init_enhance_thread(args.model_base_dir, args.device),
+            initializer=lambda: _init_enhance_thread(args.model_base_dir, args.device, allow_mlx=False),
             thread_name_prefix="enhance",
         )
 
