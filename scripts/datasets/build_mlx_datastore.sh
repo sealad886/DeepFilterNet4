@@ -213,6 +213,7 @@ CLI_PREPROCESS_DEVICE=""
 CLI_PREPROCESS_WORKERS=""
 CLI_PREPROCESS_PROBE_WORKERS=""
 CLI_PREPROCESS_PROBE_CACHE=""
+CLI_PREPROCESS_ENHANCE_WORKERS=""
 CLI_MERGE_SHORT=""
 PREPROCESS_CLEAN_SPEECH=0
 PREPROCESS_OVERWRITE=0
@@ -334,6 +335,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --preprocess-probe-cache)
       CLI_PREPROCESS_PROBE_CACHE="$2"
+      shift 2
+      ;;
+    --preprocess-enhance-workers)
+      CLI_PREPROCESS_ENHANCE_WORKERS="$2"
       shift 2
       ;;
     --preprocess-overwrite)
@@ -568,6 +573,9 @@ if [[ ${PREPROCESS_CLEAN_SPEECH} -eq 1 ]]; then
   fi
   if [[ -n "${PREPROCESS_PROBE_CACHE}" ]]; then
     preprocess_cmd+=(--probe-cache "${PREPROCESS_PROBE_CACHE}")
+  fi
+  if [[ -n "${CLI_PREPROCESS_ENHANCE_WORKERS}" ]]; then
+    preprocess_cmd+=(--enhance-workers "${CLI_PREPROCESS_ENHANCE_WORKERS}")
   fi
   if [[ -n "${PREPROCESS_DEVICE}" ]]; then
     preprocess_cmd+=(--device "${PREPROCESS_DEVICE}")

@@ -17,6 +17,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ALL_COMPLETED, FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
@@ -53,6 +54,7 @@ KNOWN_TORCH_MODEL_NAMES = frozenset({"deepfilternet", "deepfilternet2", "deepfil
 MLX_CLEAR_CACHE_INTERVAL = 8
 _last_list_write_time = 0.0
 _LIST_WRITE_INTERVAL = 30.0
+_enhance_tls = threading.local()
 
 
 class PreprocessProgressStats:
@@ -407,6 +409,17 @@ def resolve_backend(model_base_dir: str, requested_device: str | None) -> Enhanc
     return load_torch_backend(resolve_torch_fallback_model(model_base_dir), requested_device)
 
 
+def _init_enhance_thread(model_base_dir: str, device: str | None) -> None:
+    _enhance_tls.backend = resolve_backend(model_base_dir, device)
+
+
+def _enhance_one_threaded(audio: torch.Tensor) -> tuple[torch.Tensor, float]:
+    with torch.inference_mode():
+        t0 = time.perf_counter()
+        enhanced = _enhance_tls.backend.enhance_audio(audio)
+        return enhanced, time.perf_counter() - t0
+
+
 def probe_audio_duration_seconds(path: Path, ffprobe_bin: str) -> float:
     result = subprocess.run(
         [
@@ -739,6 +752,13 @@ def parse_args() -> argparse.Namespace:
         help="DataLoader workers used while reading source audio (resume is default unless --overwrite is set).",
     )
     parser.add_argument(
+        "--enhance-workers",
+        type=int,
+        default=1,
+        help="Parallel enhancement model instances (default: 1). "
+        "Each worker loads a separate model copy; increase to trade RAM for throughput.",
+    )
+    parser.add_argument(
         "--probe-workers",
         type=int,
         default=None,
@@ -800,6 +820,7 @@ def main() -> int:
     ]
     pending_sources = [source for source, _ in pending_pairs]
     completed_count = len(sources) - len(pending_sources)
+    enhance_workers = max(1, args.enhance_workers)
     save_workers = choose_save_workers(args.num_workers, effective_device)
     probe_workers = max(1, getattr(args, "probe_workers", 0) or choose_probe_workers(args.num_workers))
     probe_cache_path = resolve_probe_cache_path(output_list, getattr(args, "probe_cache", None))
@@ -821,6 +842,7 @@ def main() -> int:
     print(f"Device:          {effective_device}")
     print(f"Workers:         {args.num_workers}")
     print(f"Probe workers:   {probe_workers}")
+    print(f"Enhance workers: {enhance_workers}")
     print(f"Save workers:    {save_workers}")
     print(f"Mode:            {'overwrite' if args.overwrite else 'resume'}")
     print("=" * 60)
@@ -858,6 +880,67 @@ def main() -> int:
     inflight_saves: dict[Future[float], tuple[Path, Path, float]] = {}
     max_inflight_saves = max(2, save_workers * 2)
     progress_stats = PreprocessProgressStats(start_time=time.perf_counter())
+
+    enhance_pool: ThreadPoolExecutor | None = None
+    if enhance_workers > 1:
+        enhance_pool = ThreadPoolExecutor(
+            max_workers=enhance_workers,
+            initializer=lambda: _init_enhance_thread(args.model_base_dir, args.device),
+            thread_name_prefix="enhance",
+        )
+
+    inflight_enhances: dict[Future[tuple[torch.Tensor, float]], tuple[Path, Path, float, int]] = {}
+    max_inflight_enhances = max(2, enhance_workers * 2)
+
+    def _submit_save(enhanced, source, target, duration_seconds, orig_sr):
+        future = save_pool.submit(
+            save_enhanced_audio_atomically,
+            target,
+            enhanced,
+            backend.sample_rate,
+            orig_sr,
+        )
+        inflight_saves[future] = (source, target, duration_seconds)
+        progress_stats.queue_high_water = max(progress_stats.queue_high_water, len(inflight_saves))
+
+    def _drain_enhances():
+        """Collect completed enhancement futures and submit their saves."""
+        done_futures = [f for f in inflight_enhances if f.done()]
+        for ef in done_futures:
+            source, target, duration_seconds, orig_sr = inflight_enhances.pop(ef)
+            try:
+                enhanced, elapsed = ef.result()
+                progress_stats.enhance_seconds += elapsed
+                progress_stats.enhance_count += 1
+                _submit_save(enhanced, source, target, duration_seconds, orig_sr)
+            except Exception as exc:  # pragma: no cover
+                failures.append(f"{source}: {exc}")
+
+    def _drain_saves(progress, *, force: bool = False):
+        """Collect completed saves and update progress."""
+        completed_save_count, completed_duration_seconds = collect_completed_saves(
+            inflight_saves,
+            failures,
+            progress_stats,
+            completed_paths,
+            wait_for_completion=force,
+        )
+        if completed_save_count:
+            _maybe_write_resumable_output_list(output_paths, completed_paths, output_list)
+            progress.update(completed_duration_seconds)
+        return completed_save_count
+
+    def _update_postfix(progress):
+        progress.set_postfix_str(
+            build_progress_postfix(
+                progress_stats,
+                len(inflight_saves),
+                progress_stats.processed_audio_seconds,
+                total_audio_seconds,
+            ),
+            refresh=False,
+        )
+
     with ThreadPoolExecutor(max_workers=save_workers) as save_pool:
         with torch.inference_mode():
             with tqdm(
@@ -884,59 +967,33 @@ def main() -> int:
                     try:
                         audio = audio_batch.squeeze(0)
                         orig_sr = int(orig_sr_batch[0])
-                        enhance_started = time.perf_counter()
-                        enhanced = backend.enhance_audio(audio)
-                        progress_stats.enhance_seconds += time.perf_counter() - enhance_started
-                        progress_stats.enhance_count += 1
-                        future = save_pool.submit(
-                            save_enhanced_audio_atomically,
-                            target,
-                            enhanced,
-                            backend.sample_rate,
-                            orig_sr,
-                        )
-                        inflight_saves[future] = (source, target, duration_seconds)
-                        progress_stats.queue_high_water = max(progress_stats.queue_high_water, len(inflight_saves))
-                        completed_save_count, completed_duration_seconds = collect_completed_saves(
-                            inflight_saves,
-                            failures,
-                            progress_stats,
-                            completed_paths,
-                        )
-                        if completed_save_count:
-                            _maybe_write_resumable_output_list(output_paths, completed_paths, output_list)
-                            progress.update(completed_duration_seconds)
+                        if enhance_pool is not None:
+                            ef = enhance_pool.submit(_enhance_one_threaded, audio)
+                            inflight_enhances[ef] = (source, target, duration_seconds, orig_sr)
+                            _drain_enhances()
+                            while len(inflight_enhances) >= max_inflight_enhances:
+                                wait(inflight_enhances, return_when=FIRST_COMPLETED)
+                                _drain_enhances()
+                        else:
+                            enhance_started = time.perf_counter()
+                            enhanced = backend.enhance_audio(audio)
+                            progress_stats.enhance_seconds += time.perf_counter() - enhance_started
+                            progress_stats.enhance_count += 1
+                            _submit_save(enhanced, source, target, duration_seconds, orig_sr)
+                        _drain_saves(progress)
                         if len(inflight_saves) >= max_inflight_saves:
-                            completed_save_count, completed_duration_seconds = collect_completed_saves(
-                                inflight_saves,
-                                failures,
-                                progress_stats,
-                                completed_paths,
-                                wait_for_completion=True,
-                            )
-                            if completed_save_count:
-                                _maybe_write_resumable_output_list(output_paths, completed_paths, output_list)
-                                progress.update(completed_duration_seconds)
-                        progress.set_postfix_str(
-                            build_progress_postfix(
-                                progress_stats,
-                                len(inflight_saves),
-                                progress_stats.processed_audio_seconds,
-                                total_audio_seconds,
-                            ),
-                            refresh=False,
-                        )
+                            _drain_saves(progress, force=True)
+                        _update_postfix(progress)
                     except Exception as exc:  # pragma: no cover - operational safeguard
                         failures.append(f"{source}: {exc}")
-                        progress.set_postfix_str(
-                            build_progress_postfix(
-                                progress_stats,
-                                len(inflight_saves),
-                                progress_stats.processed_audio_seconds,
-                                total_audio_seconds,
-                            ),
-                            refresh=False,
-                        )
+                        _update_postfix(progress)
+
+                if enhance_pool is not None:
+                    while inflight_enhances:
+                        wait(inflight_enhances, return_when=FIRST_COMPLETED)
+                        _drain_enhances()
+                        _drain_saves(progress)
+
                 completed_save_count, completed_duration_seconds = collect_completed_saves(
                     inflight_saves,
                     failures,
@@ -948,15 +1005,10 @@ def main() -> int:
                 if completed_save_count:
                     write_resumable_output_list(output_paths, completed_paths, output_list)
                     progress.update(completed_duration_seconds)
-                progress.set_postfix_str(
-                    build_progress_postfix(
-                        progress_stats,
-                        len(inflight_saves),
-                        progress_stats.processed_audio_seconds,
-                        total_audio_seconds,
-                    ),
-                    refresh=False,
-                )
+                _update_postfix(progress)
+
+    if enhance_pool is not None:
+        enhance_pool.shutdown(wait=True)
 
     elapsed = max(time.perf_counter() - progress_stats.start_time, 1e-9)
     print(
