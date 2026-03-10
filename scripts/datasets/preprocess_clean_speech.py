@@ -756,7 +756,8 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help="Parallel enhancement model instances (default: 1). "
-        "Each worker loads a separate model copy; increase to trade RAM for throughput.",
+        "Each worker loads a separate model copy; increase to trade RAM for throughput. "
+        "Clamped to 1 for MLX backend (Metal GPU is not thread-safe).",
     )
     parser.add_argument(
         "--probe-workers",
@@ -864,6 +865,13 @@ def main() -> int:
     print(f"Pending audio:   {total_audio_seconds / 3600.0:.2f}h")
 
     backend = resolve_backend(args.model_base_dir, args.device)
+    if backend.name == "mlx" and enhance_workers > 1:
+        print(
+            f"[warn] MLX Metal backend is not thread-safe; "
+            f"clamping --enhance-workers from {enhance_workers} to 1. "
+            f"Use the Torch backend for multi-worker enhancement."
+        )
+        enhance_workers = 1
     print(f"Enhance backend: {backend.name}")
 
     dataset = AudioDataset([str(path) for path in pending_sources], backend.sample_rate)
