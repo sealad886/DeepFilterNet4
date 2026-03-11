@@ -53,7 +53,6 @@ KNOWN_MLX_MODEL_NAMES = frozenset({"deepfilternet3-mlx", "deepfilternet4-mlx"})
 KNOWN_TORCH_MODEL_NAMES = frozenset({"deepfilternet", "deepfilternet2", "deepfilternet3"})
 MLX_CLEAR_CACHE_INTERVAL = 8
 MLX_DEFAULT_ENHANCE_BATCH_SIZE = 4
-_last_list_write_time = 0.0
 _LIST_WRITE_INTERVAL = 30.0
 
 
@@ -116,12 +115,15 @@ def write_resumable_output_list(output_paths: list[Path], completed_paths: set[P
 def _maybe_write_resumable_output_list(
     output_paths: list[Path], completed_paths: set[Path], output_list: Path, *, force: bool = False
 ) -> None:
-    global _last_list_write_time
     now = time.monotonic()
-    if not force and (now - _last_list_write_time) < _LIST_WRITE_INTERVAL:
+    last = _maybe_write_resumable_output_list._last_write_time
+    if not force and (now - last) < _LIST_WRITE_INTERVAL:
         return
     write_resumable_output_list(output_paths, completed_paths, output_list)
-    _last_list_write_time = now
+    _maybe_write_resumable_output_list._last_write_time = now
+
+
+_maybe_write_resumable_output_list._last_write_time = 0.0
 
 
 def resolve_probe_cache_path(output_list: Path, explicit_cache_path: str | None) -> Path:
