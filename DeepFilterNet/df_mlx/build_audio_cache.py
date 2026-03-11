@@ -1026,7 +1026,9 @@ def main():
     # Convert GB to bytes for async writer
     max_writer_bytes = args.max_pending_bytes * 1024 * 1024 * 1024
 
-    bg_workers = max(1, args.num_workers // 2)
+    bg_workers = max(1, args.num_workers // 4)
+    # NOTE: noise/rir each use bg_workers threads concurrently with speech's
+    # num_workers threads, so peak threads ≈ num_workers + 2*bg_workers.
     bg_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="cat")
 
     noise_future = bg_executor.submit(

@@ -1001,10 +1001,11 @@ def main() -> int:
                                 _flush_pending_enhance_batch()
                         else:
                             _flush_pending_enhance_batch()
-                            enhanced_items, elapsed = enhance_audio_batch(backend, [audio])
+                            t0 = time.perf_counter()
+                            enhanced = backend.enhance_audio(audio)
+                            elapsed = time.perf_counter() - t0
                             progress_stats.enhance_seconds += elapsed
                             progress_stats.enhance_count += 1
-                            enhanced = enhanced_items[0]
                             _submit_save(enhanced, source, target, duration_seconds, orig_sr)
                         _drain_saves(progress)
                         if len(inflight_saves) >= max_inflight_saves:
