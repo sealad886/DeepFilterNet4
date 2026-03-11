@@ -32,6 +32,7 @@ class AudioDataset(Dataset):
         for file in files:
             if not os.path.isfile(file):
                 logger.warning(f"File not found: {file}. Skipping...")
+                continue
             self.files.append(file)
         self.sr = sr
 
