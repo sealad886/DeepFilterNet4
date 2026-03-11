@@ -10,7 +10,7 @@
 #     --run-config DeepFilterNet/df_mlx/configs/run_profiles/baseline_dfn3_gan_vad_speech_aggressive.toml
 
 [dataset]
-cache_dir = "~/DataDump/datasets/mlx_datastore_cleaned"
+cache_dir = "~/DataDump/datasets/mlx_datastore"
 
 [training]
 epochs = 80

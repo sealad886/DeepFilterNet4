@@ -3,6 +3,10 @@ try:
 except ImportError:  # pragma: no cover
     import tomli as tomllib  # type: ignore
 
+from pathlib import Path
+
+import pytest
+
 from df_mlx.run_config import (
     RunConfig,
     apply_run_config_dict,
@@ -10,6 +14,7 @@ from df_mlx.run_config import (
     load_run_config,
     set_by_path,
 )
+from df_mlx.training_setup import setup_dataset
 
 
 def test_print_run_config_parses_to_defaults():
@@ -126,3 +131,31 @@ def test_run_config_example_includes_speech_boost_descriptions():
     assert "speech_boost_db = 0.0" in text
     assert "# Silero speech probability threshold for segment detection" in text
     assert "speech_boost_threshold = 0.5" in text
+
+
+def test_run_profiles_do_not_reference_removed_cleaned_datastore() -> None:
+    profiles_dir = Path(__file__).resolve().parents[1] / "df_mlx" / "configs" / "run_profiles"
+    stale_profiles = [path.name for path in profiles_dir.glob("*.toml") if "mlx_datastore_cleaned" in path.read_text()]
+    assert stale_profiles == []
+
+
+def test_setup_dataset_falls_back_from_removed_cleaned_cache_dir(tmp_path: Path, capsys) -> None:
+    actual_cache_dir = tmp_path / "mlx_datastore"
+    actual_cache_dir.mkdir()
+    (actual_cache_dir / "config.json").write_text('{"sample_rate": 48000}\n', encoding="utf-8")
+
+    result = setup_dataset(cache_dir=str(tmp_path / "mlx_datastore_cleaned"), use_mlx_data=False)
+
+    assert result.config.cache_dir == str(actual_cache_dir)
+    output = capsys.readouterr().out
+    assert "mlx_datastore_cleaned/config.json" in output
+    assert str(actual_cache_dir / "config.json") in output
+
+
+def test_setup_dataset_missing_cache_lists_checked_candidates(tmp_path: Path) -> None:
+    with pytest.raises(ValueError) as exc_info:
+        setup_dataset(cache_dir=str(tmp_path / "mlx_datastore_cleaned"), use_mlx_data=False)
+
+    message = str(exc_info.value)
+    assert "mlx_datastore_cleaned/config.json" in message
+    assert "mlx_datastore/config.json" in message

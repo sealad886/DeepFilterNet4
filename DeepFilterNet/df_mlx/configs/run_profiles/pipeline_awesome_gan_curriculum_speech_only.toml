@@ -13,7 +13,7 @@
 #     --run-config DeepFilterNet/df_mlx/configs/run_profiles/pipeline_awesome_gan_curriculum_speech_only.toml
 
 [dataset]
-cache_dir = "~/DataDump/datasets/mlx_datastore_cleaned"
+cache_dir = "~/DataDump/datasets/mlx_datastore"
 
 [training]
 epochs = 120

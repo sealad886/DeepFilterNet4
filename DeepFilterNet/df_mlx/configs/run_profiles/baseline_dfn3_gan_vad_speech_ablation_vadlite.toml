@@ -4,7 +4,7 @@
 # - Lower VAD and speech-band weights to test over-suppression pressure.
 
 [dataset]
-cache_dir = "~/DataDump/datasets/mlx_datastore_cleaned"
+cache_dir = "~/DataDump/datasets/mlx_datastore"
 
 [training]
 epochs = 80

@@ -5,7 +5,7 @@
 # - Ramp hard-example probabilities with curriculum warmup to avoid abrupt instability.
 
 [dataset]
-cache_dir = "~/DataDump/datasets/mlx_datastore_cleaned"
+cache_dir = "~/DataDump/datasets/mlx_datastore"
 snr_range = [-5.0, 35.0]
 snr_range_extreme = [-25.0, -5.0]
 snr_range_very_low = [-35.0, -20.0]

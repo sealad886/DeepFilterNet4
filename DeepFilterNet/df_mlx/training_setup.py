@@ -24,6 +24,7 @@ Relationship to train_dynamic:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 
@@ -51,6 +52,25 @@ class DatasetSetupResult:
     num_workers: int = 0
     prefetch_size: int = 2
     use_mlx_data: bool = True
+
+
+def _candidate_cache_dirs(cache_dir: str) -> list[Path]:
+    requested = Path(cache_dir).expanduser().resolve()
+    candidates = [requested]
+    if requested.name.endswith("_cleaned"):
+        candidates.append(requested.with_name(requested.name.removesuffix("_cleaned")))
+    return candidates
+
+
+def _resolve_cache_config_path(cache_dir: str) -> tuple[Path, Path]:
+    candidates = _candidate_cache_dirs(cache_dir)
+    for candidate in candidates:
+        config_file = candidate / "config.json"
+        if config_file.exists():
+            return candidate, config_file
+
+    searched = ", ".join(str(candidate / "config.json") for candidate in candidates)
+    raise ValueError(f"Cache config not found. Checked: {searched}")
 
 
 def setup_dataset(
@@ -85,7 +105,6 @@ def setup_dataset(
 ) -> DatasetSetupResult:
     """Load or create a DatasetConfig, apply CLI/debug overrides, seed RNG."""
     import random
-    from pathlib import Path
 
     import mlx.core as mx
     import numpy as np
@@ -119,14 +138,16 @@ def setup_dataset(
                 raise ValueError(f"Cache config not found in HF repo: {config_file}")
         else:
             # Load config from pre-built audio cache
-            cache_path = Path(cache_dir).expanduser().resolve()
-            config_file = cache_path / "config.json"
-            if config_file.exists():
-                config = DatasetConfig.from_json(str(config_file))
-                config.cache_dir = cache_dir
-                print(f"Loaded config from cache: {cache_dir}")
-            else:
-                raise ValueError(f"Cache config not found: {config_file}")
+            requested_cache_path = Path(cache_dir).expanduser().resolve()
+            cache_path, config_file = _resolve_cache_config_path(cache_dir)
+            if cache_path != requested_cache_path:
+                print(
+                    "Warning: cache config missing at "
+                    f"{requested_cache_path / 'config.json'}; using {config_file} instead"
+                )
+            config = DatasetConfig.from_json(str(config_file))
+            config.cache_dir = str(cache_path)
+            print(f"Loaded config from cache: {cache_path}")
     elif config_path:
         config = DatasetConfig.from_json(config_path)
         print(f"Loaded config from: {config_path}")

@@ -4,7 +4,7 @@
 # - Shift GAN objective toward stronger adversarial signal and less FM dominance.
 
 [dataset]
-cache_dir = "~/DataDump/datasets/mlx_datastore_cleaned"
+cache_dir = "~/DataDump/datasets/mlx_datastore"
 
 [training]
 epochs = 80
