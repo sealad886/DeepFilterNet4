@@ -423,6 +423,8 @@ def build_cache_for_category(
     Returns:
         Tuple of (index dict, stats dict)
     """
+    num_workers = max(1, num_workers)
+
     if not file_list:
         return existing_index or {}, {
             "total": 0,
