@@ -404,6 +404,7 @@ def build_cache_for_category(
     max_writer_bytes: Optional[int] = None,
     min_duration: float = 0.0,
     merge_short: bool = False,
+    show_progress: bool = True,
 ) -> Tuple[Dict[str, Tuple[str, str]], Dict]:
     """Build cache for a single category (speech/noise/rir).
 
@@ -578,7 +579,14 @@ def build_cache_for_category(
         return len(done_futures)
 
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        pbar = tqdm(total=total_files, desc=f"  {category}", unit="files", dynamic_ncols=True, smoothing=0.1)
+        pbar = tqdm(
+            total=total_files,
+            desc=f"  {category}",
+            unit="files",
+            dynamic_ncols=True,
+            smoothing=0.1,
+            disable=not show_progress,
+        )
 
         for i, file_path in enumerate(files_to_process):
             if len(pending_futures) >= max_in_flight:
@@ -1045,6 +1053,7 @@ def main():
         existing_indices.get("noise"),
         args.base_dir,
         max_writer_bytes,
+        show_progress=False,
     )
 
     rir_future: Future | None = None
@@ -1061,6 +1070,7 @@ def main():
             existing_indices.get("rir"),
             args.base_dir,
             max_writer_bytes,
+            show_progress=False,
         )
 
     speech_index, speech_stats = build_cache_for_category(

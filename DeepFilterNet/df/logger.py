@@ -73,7 +73,7 @@ _deprecated_seen: set = set()
 
 
 def warn_once(message, *args, **kwargs):
-    key = message if not args else message.format(*args)
+    key = (message, args, tuple(sorted(kwargs.items())))
     if key in _warn_once_seen:
         return
     _warn_once_seen.add(key)
@@ -84,7 +84,7 @@ def warn_once(message, *args, **kwargs):
 
 
 def log_deprecated(message, *args, **kwargs):
-    key = message if not args else message.format(*args)
+    key = (message, args, tuple(sorted(kwargs.items())))
     if key in _deprecated_seen:
         return
     _deprecated_seen.add(key)
