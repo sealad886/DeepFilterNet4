@@ -8,7 +8,8 @@ and release workflows.
 ## What lives here
 
 - `config.toml`: repo-scoped Codex settings that use supported relative-path
-  configuration only.
+  configuration only. The `model_instructions_file` path is relative to
+  `.codex/config.toml`, so the sibling entrypoint is `AGENTS.md`.
 - `AGENTS.md`: the Codex entrypoint loaded via `model_instructions_file`.
 - `TOOLSET.md`: recommended tool groupings and search order for this repo.
 - `agents/`: thin role definitions for orchestration and specialist work.
