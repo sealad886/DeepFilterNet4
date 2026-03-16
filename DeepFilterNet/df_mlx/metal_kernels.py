@@ -292,15 +292,16 @@ _BAND_ENERGY_SRC = """
     int F = real_shape[2];
     int offset = elem * F;
 
-    T acc = T(0);
+    float acc = 0.0f;
     for (int f = 0; f < F; f++) {
-        T r = real[offset + f];
-        T i = imag[offset + f];
-        acc += (r * r + i * i) * mask[f];
+        float r = float(real[offset + f]);
+        float i = float(imag[offset + f]);
+        float m = float(mask[f]);
+        acc += (r * r + i * i) * m;
     }
-    T bins = params[0];
-    T eps_val = params[1];
-    T band = acc / (bins + eps_val);
+    float bins = params[0];
+    float eps_val = params[1];
+    float band = acc / (bins + eps_val);
     band_out[elem] = band;
     log_out[elem] = metal::log10(band + eps_val);
 """
@@ -335,20 +336,24 @@ def fused_band_energy(
     Returns:
         (band, log_band) where band = sum_f(power*mask)/band_bins
         and log_band = log10(band + eps), both shape (B, T).
+
+        Outputs are always float32 for numerical stability and to support
+        reduced-precision inputs such as bfloat16 without Metal type-mixing
+        compilation errors during accumulation.
     """
     B, T, F = real.shape
     n_out = B * T
     if n_out == 0:
-        empty = mx.zeros((B, T), dtype=real.dtype)
+        empty = mx.zeros((B, T), dtype=mx.float32)
         return empty, empty
-    params = mx.array([band_bins, eps], dtype=real.dtype)
+    params = mx.array([band_bins, eps], dtype=mx.float32)
     band_flat, log_flat = _band_energy_kernel(
         inputs=[real, imag, band_mask.reshape(-1), params],
         template=[("T", real.dtype)],
         grid=(n_out, 1, 1),
         threadgroup=(min(n_out, 256), 1, 1),
         output_shapes=[(n_out,), (n_out,)],
-        output_dtypes=[real.dtype, real.dtype],
+        output_dtypes=[mx.float32, mx.float32],
     )
     return band_flat.reshape(B, T), log_flat.reshape(B, T)
 

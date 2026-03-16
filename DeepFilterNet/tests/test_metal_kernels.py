@@ -221,6 +221,19 @@ class TestFusedBandEnergy:
         np.testing.assert_allclose(np.array(f_band), np.array(r_band), rtol=1e-4, atol=1e-5)
         np.testing.assert_allclose(np.array(f_log), np.array(r_log), rtol=1e-4, atol=1e-5)
 
+    def test_bfloat16_inputs_accumulate_in_float32(self):
+        """Reduced-precision inputs should compile and return stable float32 outputs."""
+        B, T, F = 2, 12, 24
+        real, imag = _rand_complex((B, T, F), dtype=mx.bfloat16)
+        mask, bins = self._make_band_mask(F, active_bins=12)
+        f_band, f_log = fused_band_energy(real, imag, mask, bins)
+        r_band, r_log = _ref_band_energy(real.astype(mx.float32), imag.astype(mx.float32), mask, bins)
+        mx.eval(f_band, f_log, r_band, r_log)
+        assert f_band.dtype == mx.float32
+        assert f_log.dtype == mx.float32
+        np.testing.assert_allclose(np.array(f_band), np.array(r_band), rtol=2e-3, atol=2e-3)
+        np.testing.assert_allclose(np.array(f_log), np.array(r_log), rtol=2e-3, atol=2e-3)
+
     def test_full_mask(self):
         """All bins active."""
         B, T, F = 2, 20, 48
