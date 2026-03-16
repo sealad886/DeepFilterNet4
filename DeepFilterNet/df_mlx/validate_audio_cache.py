@@ -13,7 +13,7 @@ Usage:
 Options:
     --fix           Attempt to fix issues (rebuild index, remove corrupt shards)
     --verbose       Show detailed information about each shard
-    --category      Only validate a specific category (speech/noise/rir)
+    --category      Only validate a specific category (speech/noise/music/rir)
 """
 
 from __future__ import annotations
@@ -263,7 +263,7 @@ def validate_index(
 
     print("\nValidating index.json...")
 
-    for category in ["speech", "noise", "rir"]:
+    for category in ["speech", "noise", "music", "rir"]:
         if category not in index_data:
             if category in all_path_locations and all_path_locations[category]:
                 errors.append(
@@ -432,8 +432,8 @@ Examples:
     # Verbose output
     python -m df_mlx.validate_audio_cache /path/to/cache --verbose
 
-    # Check only speech category
-    python -m df_mlx.validate_audio_cache /path/to/cache --category speech
+    # Check only music category
+    python -m df_mlx.validate_audio_cache /path/to/cache --category music
 
     # Generate JSON report
     python -m df_mlx.validate_audio_cache /path/to/cache --json-report report.json
@@ -454,7 +454,7 @@ Examples:
     parser.add_argument(
         "--category",
         type=str,
-        choices=["speech", "noise", "rir"],
+        choices=["speech", "noise", "music", "rir"],
         help="Only validate a specific category",
     )
     parser.add_argument(
@@ -484,7 +484,7 @@ Examples:
     all_path_locations: Dict[str, Dict[str, Set[Tuple[str, str]]]] = {}
 
     # Determine categories to validate
-    categories = [args.category] if args.category else ["speech", "noise", "rir"]
+    categories = [args.category] if args.category else ["speech", "noise", "music", "rir"]
 
     # Validate each category
     for category in categories:

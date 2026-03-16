@@ -122,6 +122,7 @@ Core options:
                               (apple auto-tunes worker defaults by chip class)
   --clean-list PATH           Clean speech file list
   --noise-list PATH           Noise/music file list
+  --music-list PATH           Optional dedicated background music file list
   --rir-list PATH             Optional RIR file list
   --include-chains            Append CHAINS speaking-style recordings to the clean list
                               (mono styles + extracted RSI speaker channel)
@@ -197,6 +198,7 @@ CLI_LIST_DIR=""
 CLI_PROFILE=""
 CLI_CLEAN_LIST=""
 CLI_NOISE_LIST=""
+CLI_MUSIC_LIST=""
 CLI_RIR_LIST=""
 CLI_CHAINS_DIR=""
 CLI_SR=""
@@ -246,6 +248,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --noise-list)
       CLI_NOISE_LIST="$2"
+      shift 2
+      ;;
+    --music-list)
+      CLI_MUSIC_LIST="$2"
       shift 2
       ;;
     --rir-list)
@@ -377,7 +383,12 @@ SNR_MAX="${CLI_SNR_MAX:-${SNR_MAX:-40}}"
 RIR_PROB="${CLI_RIR_PROB:-${RIR_PROB:-0.5}}"
 
 CLEAN_LIST="${CLI_CLEAN_LIST:-${CLEAN_LIST:-${LIST_DIR}/clean_all.txt}}"
-NOISE_LIST="${CLI_NOISE_LIST:-${NOISE_LIST:-${LIST_DIR}/noise_music.txt}}"
+DEFAULT_NOISE_LIST="${LIST_DIR}/noise_music.txt"
+if [[ -f "${LIST_DIR}/noise_all.txt" ]]; then
+  DEFAULT_NOISE_LIST="${LIST_DIR}/noise_all.txt"
+fi
+NOISE_LIST="${CLI_NOISE_LIST:-${NOISE_LIST:-${DEFAULT_NOISE_LIST}}}"
+MUSIC_LIST="${CLI_MUSIC_LIST:-${MUSIC_LIST:-${LIST_DIR}/background_music.txt}}"
 RIR_LIST="${CLI_RIR_LIST:-${RIR_LIST:-${LIST_DIR}/rir_all.txt}}"
 CHAINS_DIR="${CLI_CHAINS_DIR:-${CHAINS_DIR:-${DEFAULT_CHAINS_DIR}}}"
 CHAINS_PREPARED_ROOT="${CHAINS_PREPARED_ROOT:-${DATA_DIR}/prepared/chains_speech}"
@@ -460,6 +471,11 @@ if [[ ${INCLUDE_CHAINS} -eq 1 ]]; then
 fi
 echo "Clean list:         ${CLEAN_LIST}"
 echo "Noise list:         ${NOISE_LIST}"
+if [[ -f "${MUSIC_LIST}" ]]; then
+  echo "Music list:         ${MUSIC_LIST}"
+else
+  echo "Music list:         (none - dedicated background music disabled)"
+fi
 if [[ -f "${RIR_LIST}" ]]; then
   echo "RIR list:           ${RIR_LIST}"
 else
@@ -626,6 +642,10 @@ build_cmd=(
   --resume
   --max-pending-bytes "${MAX_PENDING_BYTES}"
 )
+
+if [[ -f "${MUSIC_LIST}" ]]; then
+  build_cmd+=(--music-list "${MUSIC_LIST}")
+fi
 
 if [[ -f "${RIR_LIST}" ]]; then
   build_cmd+=(--rir-list "${RIR_LIST}")

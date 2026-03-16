@@ -20,6 +20,9 @@ Both manifests explicitly **exclude CC-BY-NC and CC Sampling+** sources.
     musan_noise.txt
     musan_music.txt
     fsd50k_filtered.txt
+    noise_all.txt
+    background_music.txt
+    noise_music.txt
     air_rir.txt
     openair_rir.txt
     acousticrooms_rir.txt
@@ -91,13 +94,22 @@ Notes:
 
 ## Step 3: Combine lists for each dataset type
 
+For current `df_mlx` training, keep **generic noise** and **dedicated background music**
+as separate lists:
+
+- `noise_all.txt` = environmental/other non-music noise
+- `background_music.txt` = music-only clips used when `--music-list` / `p_background_music` is enabled
+- `noise_music.txt` = backward-compatible combined list for legacy HDF5 / older workflows
+
 Prototype example:
 
 ```
 cat "$DATA_DIR/lists/vctk_clean.txt" > "$DATA_DIR/lists/clean_all.txt"
 cat "$DATA_DIR/lists/musan_noise.txt" \
-    "$DATA_DIR/lists/musan_music.txt" \
-    "$DATA_DIR/lists/fsd50k_filtered.txt" > "$DATA_DIR/lists/noise_music.txt"
+  "$DATA_DIR/lists/fsd50k_filtered.txt" > "$DATA_DIR/lists/noise_all.txt"
+cat "$DATA_DIR/lists/musan_music.txt" > "$DATA_DIR/lists/background_music.txt"
+cat "$DATA_DIR/lists/noise_all.txt" \
+  "$DATA_DIR/lists/background_music.txt" > "$DATA_DIR/lists/noise_music.txt"
 cat "$DATA_DIR/lists/air_rir.txt" \
     "$DATA_DIR/lists/openair_rir.txt" > "$DATA_DIR/lists/rir_all.txt"
 ```
@@ -108,8 +120,10 @@ Production example (adds LibriSpeech + AcousticRooms):
 cat "$DATA_DIR/lists/vctk_clean.txt" \
     "$DATA_DIR/lists/librispeech_clean.txt" > "$DATA_DIR/lists/clean_all.txt"
 cat "$DATA_DIR/lists/musan_noise.txt" \
-    "$DATA_DIR/lists/musan_music.txt" \
-    "$DATA_DIR/lists/fsd50k_filtered.txt" > "$DATA_DIR/lists/noise_music.txt"
+  "$DATA_DIR/lists/fsd50k_filtered.txt" > "$DATA_DIR/lists/noise_all.txt"
+cat "$DATA_DIR/lists/musan_music.txt" > "$DATA_DIR/lists/background_music.txt"
+cat "$DATA_DIR/lists/noise_all.txt" \
+  "$DATA_DIR/lists/background_music.txt" > "$DATA_DIR/lists/noise_music.txt"
 cat "$DATA_DIR/lists/air_rir.txt" \
     "$DATA_DIR/lists/openair_rir.txt" \
     "$DATA_DIR/lists/acousticrooms_rir.txt" > "$DATA_DIR/lists/rir_all.txt"
@@ -168,6 +182,9 @@ OUTPUT_DIR=/path/to/cache \
 Notes:
 - `--merge-short` is recommended when you want to preserve more short utterances
   instead of skipping speech clips shorter than `--min-duration`.
+- When `lists/background_music.txt` exists, `build_mlx_datastore.sh` forwards it as a
+  dedicated `--music-list` so music can be sampled intentionally via `p_background_music`
+  instead of only appearing inside the generic noise pool.
 - If you already ran standalone clean-speech preprocessing, you can point
   `--clean-list` at the resulting list instead of enabling
   `--preprocess-clean-speech` again.
@@ -191,6 +208,16 @@ training command uses the datastore you just built:
 python -m df_mlx.train_dynamic \
   --run-config df_mlx/configs/run_profiles/baseline_dfn3_gan_vad_speech_full_vadlite.toml \
   --cache-dir /path/to/cache
+```
+
+To emphasize loud background-music suppression while keeping speech intact, use
+the dedicated music path and music-specific gain controls:
+
+```bash
+python -m df_mlx.train_dynamic \
+  --cache-dir /path/to/cache \
+  --p-background-music 0.5 \
+  --background-music-gain-range 0 12
 ```
 
 ## Step 5: Build HDF5 files (48 kHz)

@@ -239,6 +239,34 @@ the exclusion list in `setup.sh` and add a `--with-<crate>` maturin flag.
 
 ---
 
+### Dataset List Separation for Dedicated Music Training
+
+**Status:** REQUIRED
+
+**Scope:** `scripts/datasets/`, `DATASETS.md`, and `DeepFilterNet/df_mlx/` dynamic-training dataset setup
+
+**Rule:**
+
+- Keep generic environmental noise and dedicated music in separate list artifacts.
+- `noise_all.txt` is the canonical generic-noise list for new MLX datastore builds.
+- `background_music.txt` is the canonical music-only list used with `--music-list` / `p_background_music`.
+- `noise_music.txt` remains a backward-compatible combined list for legacy HDF5 and older workflows, but new dedicated-music training flows must not use it as both the generic noise source and the dedicated music source.
+
+**Rationale:**
+
+- Prevents double-counting the same music clips as both generic noise and intentional background-music sources.
+- Keeps the loud-background-music training path explicit and tunable via music-specific probability and gain controls.
+- Preserves older workflows without blocking newer cache-backed training setups.
+
+**Related Files:**
+
+- [DATASETS.md](../DATASETS.md)
+- [scripts/datasets/download_datasets.sh](../scripts/datasets/download_datasets.sh)
+- [scripts/datasets/build_mlx_datastore.sh](../scripts/datasets/build_mlx_datastore.sh)
+- [DeepFilterNet/df_mlx/dynamic_dataset.py](../DeepFilterNet/df_mlx/dynamic_dataset.py)
+
+---
+
 ### Epoch-Boundary Training Mode Switch (Compiled → Eager with GAN)
 
 **Status:** REQUIRED
@@ -500,6 +528,7 @@ _None documented yet._
 - **2026-02-26**: Added compiled loss control-flow invariant forbidding Python branches on runtime MLX weight arrays in compiled paths.
 - **2026-03-06**: Clarified that resumed `batch_idx` persists cumulative micro-batch progress, trailing accumulation windows flush at epoch end, and step checkpoints only fire on real optimizer-step transitions.
 - **2026-03-06**: Added Rust ndarray workspace-pin convention documenting the mandatory shared `ndarray = "=0.15.6"` dependency across tract/hdf5-related crates.
+- **2026-03-15**: Added dataset-list separation convention documenting `noise_all.txt` vs `background_music.txt` for dedicated loud-background-music training without double-counting music as generic noise.
 
 ---
 

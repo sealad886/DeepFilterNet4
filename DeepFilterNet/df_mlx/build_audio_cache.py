@@ -15,6 +15,7 @@ Usage:
     python -m df_mlx.build_audio_cache \
         --speech-list /path/to/speech_files.txt \
         --noise-list /path/to/noise_files.txt \
+        --music-list /path/to/background_music_files.txt \
         --rir-list /path/to/rir_files.txt \
         --output-dir /path/to/audio_cache \
         --sample-rate 48000 \
@@ -27,6 +28,9 @@ Output structure:
             shard_0001.npz
             ...
         noise/
+            shard_0000.npz
+            ...
+        music/
             shard_0000.npz
             ...
         rir/
@@ -56,6 +60,8 @@ from tqdm import tqdm
 from ._audio_io import load_audio_file_safe as load_audio_file
 from .file_lists import read_file_list as _read_file_list
 
+_CACHE_CATEGORIES = ("speech", "noise", "music", "rir")
+
 
 @dataclass
 class AsyncShardWriter:
@@ -73,7 +79,7 @@ class AsyncShardWriter:
     """
 
     output_dir: Path
-    category: str  # 'speech', 'noise', or 'rir'
+    category: str  # 'speech', 'noise', 'music', or 'rir'
     shard_size: int = 500  # Files per shard
     resume_from_shard: int = 0  # Starting shard index when resuming
     base_dir: Optional[str] = None  # Base dir for relative paths in index
@@ -198,7 +204,7 @@ class ShardWriter:
     """
 
     output_dir: Path
-    category: str  # 'speech', 'noise', or 'rir'
+    category: str  # 'speech', 'noise', 'music', or 'rir'
     shard_size: int = 500  # Files per shard
     resume_from_shard: int = 0  # Starting shard index when resuming
     base_dir: Optional[str] = None  # Base dir for relative paths in index
@@ -410,7 +416,7 @@ def build_cache_for_category(
 
     Args:
         file_list: List of file paths to process
-        category: Category name ('speech', 'noise', or 'rir')
+        category: Category name ('speech', 'noise', 'music', or 'rir')
         output_dir: Output directory for cache
         sample_rate: Target sample rate
         shard_size: Files per shard
@@ -658,7 +664,7 @@ def cleanup_temp_files(output_dir: Path) -> int:
     Returns the number of temp files removed.
     """
     removed = 0
-    for category in ["speech", "noise", "rir"]:
+    for category in _CACHE_CATEGORIES:
         shard_dir = output_dir / category
         if not shard_dir.exists():
             continue
@@ -682,7 +688,7 @@ def compact_shards(output_dir: Path) -> Dict[str, int]:
     print("Checking for legacy/corrupt shards to remove...")
     removed_counts: Dict[str, int] = {}
 
-    for category in ["speech", "noise", "rir"]:
+    for category in _CACHE_CATEGORIES:
         shard_dir = output_dir / category
         if not shard_dir.exists():
             continue
@@ -778,7 +784,7 @@ def rebuild_index_from_shards(output_dir: Path) -> Dict[str, Dict[str, Tuple[str
 
     all_indices: Dict[str, Dict[str, Tuple[str, str]]] = {}
 
-    for category in ["speech", "noise", "rir"]:
+    for category in _CACHE_CATEGORIES:
         shard_dir = output_dir / category
         if not shard_dir.exists():
             continue
@@ -835,6 +841,11 @@ def main():
         type=str,
         required=True,
         help="Text file with noise audio paths",
+    )
+    parser.add_argument(
+        "--music-list",
+        type=str,
+        help="Text file with dedicated background-music audio paths (optional)",
     )
     parser.add_argument(
         "--rir-list",
@@ -961,7 +972,7 @@ def main():
     # Rebuild index from shards if requested or if resuming without index
     if args.rebuild_index or (args.resume and not index_path.exists()):
         # Check if any shards exist
-        has_shards = any((output_dir / cat).exists() for cat in ["speech", "noise", "rir"])
+        has_shards = any((output_dir / cat).exists() for cat in _CACHE_CATEGORIES)
         if has_shards:
             if not args.rebuild_index:
                 print("\nResume mode: No index.json found but shards exist - rebuilding index...")
@@ -989,7 +1000,7 @@ def main():
 
         # Check if index is stale (more shards on disk than index knows about)
         index_is_stale = False
-        for category in ["speech", "noise", "rir"]:
+        for category in _CACHE_CATEGORIES:
             disk_count = count_shards_on_disk(category)
             index_count = count_shards_in_index(existing_indices.get(category, {}), category)
             if disk_count > index_count:
@@ -1014,10 +1025,12 @@ def main():
     print("\nReading file lists...")
     speech_files = read_file_list(args.speech_list)
     noise_files = read_file_list(args.noise_list)
+    music_files = read_file_list(args.music_list) if args.music_list else []
     rir_files = read_file_list(args.rir_list) if args.rir_list else []
 
     print(f"  Speech files: {len(speech_files):,}")
     print(f"  Noise files: {len(noise_files):,}")
+    print(f"  Music files: {len(music_files):,}")
     print(f"  RIR files: {len(rir_files):,}")
 
     if not speech_files:
@@ -1039,7 +1052,7 @@ def main():
     bg_workers = max(1, args.num_workers // 4)
     # NOTE: noise/rir each use bg_workers threads concurrently with speech's
     # num_workers threads, so peak threads ≈ num_workers + 2*bg_workers.
-    bg_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="cat")
+    bg_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="cat")
 
     noise_future = bg_executor.submit(
         build_cache_for_category,
@@ -1055,6 +1068,23 @@ def main():
         max_writer_bytes,
         show_progress=False,
     )
+
+    music_future: Future | None = None
+    if music_files:
+        music_future = bg_executor.submit(
+            build_cache_for_category,
+            music_files,
+            "music",
+            output_dir,
+            args.sample_rate,
+            args.shard_size,
+            bg_workers,
+            True,
+            existing_indices.get("music"),
+            args.base_dir,
+            max_writer_bytes,
+            show_progress=False,
+        )
 
     rir_future: Future | None = None
     if rir_files:
@@ -1094,6 +1124,14 @@ def main():
     all_indices["noise"] = noise_index
     all_stats["noise"] = noise_stats
 
+    if music_future is not None:
+        music_index, music_stats = music_future.result()
+        all_indices["music"] = music_index
+        all_stats["music"] = music_stats
+    elif "music" in existing_indices:
+        all_indices["music"] = existing_indices["music"]
+        print(f"  Preserved {len(existing_indices['music']):,} existing music index entries")
+
     if rir_future is not None:
         rir_index, rir_stats = rir_future.result()
         all_indices["rir"] = rir_index
@@ -1130,6 +1168,8 @@ def main():
         "gain_range": [-6.0, 6.0],
         "speech_gain_range": [-12.0, 12.0],
         "noise_gain_range": [-12.0, 12.0],
+        "p_background_music": 0.0,
+        "background_music_gain_range": [0.0, 12.0],
         "p_reverb": args.p_reverb if rir_files else 0.0,
         "p_clipping": args.p_clipping,
         "n_noise_min": 2,

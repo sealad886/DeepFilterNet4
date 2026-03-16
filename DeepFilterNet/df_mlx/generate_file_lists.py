@@ -23,6 +23,7 @@ Outputs:
     output_dir/
         speech_files.txt
         noise_files.txt
+        background_music_files.txt
         rir_files.txt
         config.json  (for use with train_dynamic.py --config)
 """
@@ -121,6 +122,7 @@ def write_file_list(files: List[str], output_path: Path) -> None:
 def generate_config(
     speech_files: List[str],
     noise_files: List[str],
+    music_files: List[str],
     rir_files: List[str],
     output_dir: Path,
     sample_rate: int = 48000,
@@ -131,6 +133,7 @@ def generate_config(
     config = {
         "speech_files": speech_files,
         "noise_files": noise_files,
+        "music_files": music_files,
         "rir_files": rir_files,
         "sample_rate": sample_rate,
         "segment_length": segment_length,
@@ -144,6 +147,8 @@ def generate_config(
         "gain_range": [-6.0, 6.0],
         "speech_gain_range": [-12.0, 12.0],
         "noise_gain_range": [-12.0, 12.0],
+        "p_background_music": 0.0,
+        "background_music_gain_range": [0.0, 12.0],
         "p_reverb": p_reverb,
         "p_clipping": 0.0,
         "p_bandwidth_ext": 0.0,
@@ -187,6 +192,12 @@ def main():
         help="Directories containing noise audio files",
     )
     parser.add_argument(
+        "--music-dirs",
+        nargs="+",
+        type=str,
+        help="Directories containing dedicated background-music audio files",
+    )
+    parser.add_argument(
         "--rir-dirs",
         nargs="+",
         type=str,
@@ -205,6 +216,11 @@ def main():
         help="Text file containing noise audio file paths (one per line)",
     )
     parser.add_argument(
+        "--music-list",
+        type=str,
+        help="Text file containing background-music audio file paths (one per line)",
+    )
+    parser.add_argument(
         "--rir-list",
         type=str,
         help="Text file containing RIR audio file paths (one per line)",
@@ -220,6 +236,11 @@ def main():
         "--noise-hdf5",
         type=str,
         help="HDF5 file containing noise audio",
+    )
+    parser.add_argument(
+        "--music-hdf5",
+        type=str,
+        help="HDF5 file containing background music audio",
     )
     parser.add_argument(
         "--rir-hdf5",
@@ -297,6 +318,18 @@ def main():
         print(f"Extracting from HDF5: {args.noise_hdf5}")
         noise_files = extract_from_hdf5(args.noise_hdf5)
 
+    # Collect music files
+    music_files = []
+    if args.music_list:
+        print(f"Reading music file list: {args.music_list}")
+        music_files = read_file_list(args.music_list)
+    elif args.music_dirs:
+        print(f"Scanning music directories: {args.music_dirs}")
+        music_files = find_audio_files(args.music_dirs, recursive=not args.no_recursive)
+    elif args.music_hdf5:
+        print(f"Extracting from HDF5: {args.music_hdf5}")
+        music_files = extract_from_hdf5(args.music_hdf5)
+
     # Collect RIR files
     rir_files = []
     if args.rir_list:
@@ -324,6 +357,11 @@ def main():
     else:
         print("  Warning: No noise files found")
 
+    if music_files:
+        write_file_list(music_files, output_dir / "background_music_files.txt")
+    else:
+        print("  Info: No background music files found")
+
     if rir_files:
         write_file_list(rir_files, output_dir / "rir_files.txt")
     else:
@@ -336,6 +374,7 @@ def main():
         generate_config(
             speech_files,
             noise_files,
+            music_files,
             rir_files,
             output_dir,
             sample_rate=args.sample_rate,
@@ -348,6 +387,7 @@ def main():
     print("Summary:")
     print(f"  Speech files: {len(speech_files):,}")
     print(f"  Noise files:  {len(noise_files):,}")
+    print(f"  Music files:  {len(music_files):,}")
     print(f"  RIR files:    {len(rir_files):,}")
     print(f"  Output dir:   {output_dir}")
 
@@ -356,6 +396,8 @@ def main():
     print("  python -m df_mlx.train_dynamic \\")
     print(f"      --speech-list {output_dir}/speech_files.txt \\")
     print(f"      --noise-list {output_dir}/noise_files.txt \\")
+    if music_files:
+        print(f"      --music-list {output_dir}/background_music_files.txt \\")
     if rir_files:
         print(f"      --rir-list {output_dir}/rir_files.txt \\")
     print("      --epochs 100 --batch-size 8")

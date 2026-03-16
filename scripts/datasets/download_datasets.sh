@@ -20,9 +20,9 @@ usage_helptext() {
 Usage:
   ./download_datasets.sh [options]
 
-Download/extract the speech, noise, and RIR corpora used for DeepFilterNet
-training, then generate the combined file lists consumed by the datastore and
-HDF5 builders.
+Download/extract the speech, noise, background-music, and RIR corpora used for
+DeepFilterNet training, then generate the file lists consumed by the datastore
+and HDF5 builders.
 
 Core options:
   --data-dir PATH                 Base dataset directory (default: ${DEFAULT_DATA_DIR})
@@ -1418,16 +1418,33 @@ echo "[info] combining lists for profile=${PROFILE}..."
 } | write_atomic_file "${LIST_DIR}/clean_all.txt"
 echo "[ok] wrote $(wc -l < "${LIST_DIR}/clean_all.txt") entries -> ${LIST_DIR}/clean_all.txt"
 
-# Noise + music: MUSAN noise/music + FSD50K filtered
+# Generic noise only: MUSAN noise + FSD50K filtered
 {
   if [[ -f "${LIST_DIR}/musan_noise.txt" ]]; then
     cat "${LIST_DIR}/musan_noise.txt"
   fi
+  if [[ -f "${LIST_DIR}/fsd50k_filtered.txt" ]]; then
+    cat "${LIST_DIR}/fsd50k_filtered.txt"
+  fi
+} | write_atomic_file "${LIST_DIR}/noise_all.txt"
+echo "[ok] wrote $(wc -l < "${LIST_DIR}/noise_all.txt") entries -> ${LIST_DIR}/noise_all.txt"
+
+# Dedicated background music: MUSAN music (kept separate so cache builders can
+# avoid double-counting music as generic noise when --music-list is used).
+{
   if [[ -f "${LIST_DIR}/musan_music.txt" ]]; then
     cat "${LIST_DIR}/musan_music.txt"
   fi
-  if [[ -f "${LIST_DIR}/fsd50k_filtered.txt" ]]; then
-    cat "${LIST_DIR}/fsd50k_filtered.txt"
+} | write_atomic_file "${LIST_DIR}/background_music.txt"
+echo "[ok] wrote $(wc -l < "${LIST_DIR}/background_music.txt") entries -> ${LIST_DIR}/background_music.txt"
+
+# Backward-compatible combined noise+music list.
+{
+  if [[ -f "${LIST_DIR}/noise_all.txt" ]]; then
+    cat "${LIST_DIR}/noise_all.txt"
+  fi
+  if [[ -f "${LIST_DIR}/background_music.txt" ]]; then
+    cat "${LIST_DIR}/background_music.txt"
   fi
 } | write_atomic_file "${LIST_DIR}/noise_music.txt"
 echo "[ok] wrote $(wc -l < "${LIST_DIR}/noise_music.txt") entries -> ${LIST_DIR}/noise_music.txt"
@@ -1469,6 +1486,8 @@ cat <<'MSG'
 Done.
 Combined lists ready for downstream builders:
   - clean_all.txt (speech)
+  - noise_all.txt (generic noise, excludes dedicated music)
+  - background_music.txt (dedicated music)
   - noise_music.txt (noise + music)
   - rir_all.txt (room impulse responses)
 

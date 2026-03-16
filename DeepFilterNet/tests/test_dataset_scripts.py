@@ -131,7 +131,10 @@ if len(args) >= 2 and args[0] == "-m" and args[1] == "df_mlx.build_audio_cache":
     output_dir = Path(arg_value("--output-dir"))
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "config.json").write_text("{{}}\\n", encoding="utf-8")
-    (output_dir / "index.json").write_text('{{"speech": {{}}, "noise": {{}}, "rir": {{}}}}\\n', encoding="utf-8")
+    index = {{"speech": {{}}, "noise": {{}}, "rir": {{}}}}
+    if "--music-list" in args:
+        index["music"] = {{}}
+    (output_dir / "index.json").write_text(json.dumps(index) + "\\n", encoding="utf-8")
     raise SystemExit(0)
 
 raise SystemExit(subprocess.call([REAL_PYTHON, *args]))
@@ -158,6 +161,7 @@ def test_build_mlx_datastore_help_mentions_preprocess_and_merge_short() -> None:
     assert "--merge-short" in result.stdout
     assert "--include-chains" in result.stdout
     assert "--chains-dir PATH" in result.stdout
+    assert "--music-list PATH" in result.stdout
     assert "Examples:" in result.stdout
 
 
@@ -238,9 +242,11 @@ def test_build_mlx_datastore_include_chains_builds_combined_cache(tmp_path: Path
     lists_dir.mkdir(parents=True, exist_ok=True)
     clean_list = lists_dir / "clean_all.txt"
     noise_list = lists_dir / "noise_music.txt"
+    music_list = lists_dir / "background_music.txt"
     rir_list = lists_dir / "rir_all.txt"
     clean_list.write_text(f"{speech_file}\n", encoding="utf-8")
     noise_list.write_text(f"{noise_file}\n", encoding="utf-8")
+    music_list.write_text(f"{noise_file}\n", encoding="utf-8")
     rir_list.write_text(f"{rir_file}\n", encoding="utf-8")
 
     result = subprocess.run(
@@ -313,9 +319,11 @@ def test_build_mlx_datastore_include_chains_preprocess_uses_combined_list_and_co
     lists_dir.mkdir(parents=True, exist_ok=True)
     clean_list = lists_dir / "clean_all.txt"
     noise_list = lists_dir / "noise_music.txt"
+    music_list = lists_dir / "background_music.txt"
     rir_list = lists_dir / "rir_all.txt"
     clean_list.write_text(f"{speech_file}\n", encoding="utf-8")
     noise_list.write_text(f"{noise_file}\n", encoding="utf-8")
+    music_list.write_text(f"{noise_file}\n", encoding="utf-8")
     rir_list.write_text(f"{rir_file}\n", encoding="utf-8")
 
     fake_python = tmp_path / "fake_python.py"
@@ -380,6 +388,7 @@ def test_build_mlx_datastore_include_chains_preprocess_uses_combined_list_and_co
 
     build_args = build_call["args"]
     assert build_args[build_args.index("--speech-list") + 1] == str(lists_dir / "clean_all.preprocessed.txt")
+    assert build_args[build_args.index("--music-list") + 1] == str(music_list)
 
 
 def test_build_mlx_datastore_smoke_prints_cache_dir_override(tmp_path: Path) -> None:
@@ -583,9 +592,14 @@ def test_download_datasets_no_download_accepts_cli_overrides(tmp_path: Path) -> 
     assert f"[config] profile=production download=0 data_dir={data_dir}" in result.stdout
     assert f"[config] download_dir={downloads_dir} extract_dir={extract_dir} list_dir={lists_dir}" in result.stdout
     assert (lists_dir / "clean_all.txt").exists(), result.stdout
+    assert (lists_dir / "noise_all.txt").exists(), result.stdout
+    assert (lists_dir / "background_music.txt").exists(), result.stdout
     assert (lists_dir / "noise_music.txt").exists(), result.stdout
     assert (lists_dir / "rir_all.txt").exists(), result.stdout
     assert str(vctk_dir / "wav48_silence_trimmed" / "p001" / "sample.flac") in (lists_dir / "clean_all.txt").read_text()
+    assert str(musan_dir / "noise" / "noise.wav") in (lists_dir / "noise_all.txt").read_text()
+    assert str(musan_dir / "music" / "music.wav") not in (lists_dir / "noise_all.txt").read_text()
+    assert str(musan_dir / "music" / "music.wav") in (lists_dir / "background_music.txt").read_text()
     combined_noise = (lists_dir / "noise_music.txt").read_text()
     assert str(musan_dir / "noise" / "noise.wav") in combined_noise
     assert str(musan_dir / "music" / "music.wav") in combined_noise
