@@ -217,6 +217,19 @@ def test_contrastive_run_profile_loads() -> None:
     assert cfg.loss.contrastive.loss_weight == 0.15
 
 
+def test_contrastive_dfn3_full_vadlite_profile_loads() -> None:
+    profiles_dir = Path(__file__).resolve().parents[1] / "df_mlx" / "configs" / "run_profiles"
+    profile_path = profiles_dir / "contrastive_awesome_dfn3_gan_vad_speech_full_vadlite.toml"
+    cfg = load_run_config(profile_path)
+
+    assert cfg.loss.dynamic_loss == "contrastive_awesome"
+    assert cfg.training.batch_size == 28
+    assert cfg.vad.speech_loss_weight == 0.4
+    assert cfg.vad.train.prob == 1.0
+    assert cfg.gan.enabled is True
+    assert cfg.loss.mrstft.factor == 0.0
+
+
 def test_setup_dataset_falls_back_from_removed_cleaned_cache_dir(tmp_path: Path, capsys) -> None:
     actual_cache_dir = tmp_path / "mlx_datastore"
     actual_cache_dir.mkdir()
