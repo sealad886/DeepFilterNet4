@@ -529,6 +529,7 @@ _None documented yet._
 - **2026-03-06**: Clarified that resumed `batch_idx` persists cumulative micro-batch progress, trailing accumulation windows flush at epoch end, and step checkpoints only fire on real optimizer-step transitions.
 - **2026-03-06**: Added Rust ndarray workspace-pin convention documenting the mandatory shared `ndarray = "=0.15.6"` dependency across tract/hdf5-related crates.
 - **2026-03-15**: Added dataset-list separation convention documenting `noise_all.txt` vs `background_music.txt` for dedicated loud-background-music training without double-counting music as generic noise.
+- **2026-03-16**: Added split epsilon convention documenting `1e-10` for magnitude/log-magnitude paths, `1e-8` for band-energy/reduction guards, and the requirement that benchmark tooling expose `mag_eps` and `band_eps` separately.
 
 ---
 
@@ -634,6 +635,35 @@ def _my_vjp(primals, cotangents, _outputs):
 - [DeepFilterNet/df_mlx/ops.py](../DeepFilterNet/df_mlx/ops.py) — `istft` Metal kernel path (differentiable)
 - [DeepFilterNet/df_mlx/dnsmos_proxy.py](../DeepFilterNet/df_mlx/dnsmos_proxy.py) — `MelSpectrogram` uses Metal kernel in all modes
 - [DeepFilterNet/tests/test_metal_kernel_training_guard.py](../DeepFilterNet/tests/test_metal_kernel_training_guard.py) — VJP correctness tests
+
+---
+
+### Split Epsilon Policy for Magnitude vs Reductions
+
+**Status:** REQUIRED
+**Scope:** Active `DeepFilterNet/df_mlx/` magnitude, log-magnitude, band-energy, and kernel benchmark code paths
+
+**Rule:**
+
+- Use `df_mlx.metal_kernels._EPS_F = 1e-10` for complex magnitude and log-magnitude computations, including `sqrt(real^2 + imag^2 + eps)` and `log1p` magnitude feature builders.
+- Use `df_mlx.metal_kernels._BAND_ENERGY_EPS_F = 1e-8` (plus the existing `_EPS = 1e-8` reduction guards in `training_losses.py`) for band-energy reductions, variance floors, ratio denominators, and log-energy style reductions.
+- Do not collapse these constants back into a single shared epsilon unless a repo-wide training-objective review reruns the adversarial quiet-bin analysis and updates all affected callers together.
+- Benchmark code must expose both knobs separately (`mag_eps` vs `band_eps`) rather than one generic `eps` flag.
+
+**Rationale:**
+
+- Adversarial quiet-bin sweeps showed that `1e-8` imposes a `1e-4` magnitude floor and stays above 1% relative bias until roughly scale `1e-3`, which is too intrusive for low-energy magnitude features.
+- Lowering the magnitude epsilon to `1e-10` reduces the artificial floor to `1e-5` and drops below 1% bias by roughly scale `1e-4`, preserving quiet-bin structure much better.
+- Band-energy and z-score style reductions still need the stronger `1e-8` denominator/log guard, so one constant is doing two different jobs if the policy is not split.
+
+**Related Files:**
+
+- [DeepFilterNet/df_mlx/metal_kernels.py](../DeepFilterNet/df_mlx/metal_kernels.py)
+- [DeepFilterNet/df_mlx/training_losses.py](../DeepFilterNet/df_mlx/training_losses.py)
+- [DeepFilterNet/df_mlx/train.py](../DeepFilterNet/df_mlx/train.py)
+- [DeepFilterNet/df_mlx/model.py](../DeepFilterNet/df_mlx/model.py)
+- [DeepFilterNet/df_mlx/benchmark_metal_kernels.py](../DeepFilterNet/df_mlx/benchmark_metal_kernels.py)
+- [DeepFilterNet/tests/test_metal_kernels.py](../DeepFilterNet/tests/test_metal_kernels.py)
 
 ---
 

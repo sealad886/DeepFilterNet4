@@ -11,6 +11,7 @@ import mlx.core as mx
 import numpy as np
 
 from df_mlx.metal_kernels import (
+    _BAND_ENERGY_EPS_F,
     _EPS_F,
     _ref_band_energy,
     _ref_complex_mag,
@@ -67,6 +68,15 @@ class TestFusedLog1pMag:
         ref = _ref_log1p_mag(real, imag)
         mx.eval(fused, ref)
         np.testing.assert_allclose(np.array(fused), np.array(ref), rtol=1e-5, atol=1e-6)
+
+    def test_default_eps_uses_magnitude_floor_constant(self):
+        """Default log1p magnitude should use the dedicated magnitude epsilon."""
+        real = mx.zeros((1, 2, 3), dtype=mx.float32)
+        imag = mx.zeros((1, 2, 3), dtype=mx.float32)
+        fused = fused_log1p_mag(real, imag)
+        mx.eval(fused)
+        expected = np.full((1, 2, 3), np.log1p(np.sqrt(_EPS_F)), dtype=np.float32)
+        np.testing.assert_allclose(np.array(fused), expected, rtol=1e-6, atol=1e-7)
 
     def test_forward_respects_custom_eps(self):
         """Kernel output changes with caller-provided epsilon."""
@@ -249,6 +259,17 @@ class TestFusedBandEnergy:
         mx.eval(f_band, f_log, r_band, r_log)
         np.testing.assert_allclose(np.array(f_band), np.array(r_band), rtol=1e-5, atol=1e-6)
         np.testing.assert_allclose(np.array(f_log), np.array(r_log), rtol=1e-5, atol=1e-6)
+
+    def test_default_eps_uses_band_energy_floor_constant(self):
+        """Band-energy defaults should keep the stronger reduction epsilon."""
+        real = mx.zeros((1, 2, 16), dtype=mx.float32)
+        imag = mx.zeros((1, 2, 16), dtype=mx.float32)
+        mask, bins = self._make_band_mask(16, active_bins=8)
+        _band, log_band = fused_band_energy(real, imag, mask, bins)
+        mx.eval(log_band)
+        expected = np.full((1, 2), np.log10(_BAND_ENERGY_EPS_F), dtype=np.float32)
+        np.testing.assert_allclose(np.array(log_band), expected, rtol=1e-6, atol=1e-7)
+        assert not np.isclose(np.log10(_BAND_ENERGY_EPS_F), np.log10(_EPS_F))
 
     def test_single_frame(self):
         """B=1, T=1 edge case."""
