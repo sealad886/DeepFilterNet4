@@ -24,6 +24,7 @@ import numpy as np
 from loguru import logger
 
 from ._audio_io import resample_audio
+from .checkpoint import load_model as load_checkpoint_model
 from .config import ModelParams4, load_config
 from .deepfilternet3 import DFNet3, ModelParams3, build_dfnet3_model, load_dfnet3_config
 from .model import DfNet4, StreamingDfNet4
@@ -264,8 +265,7 @@ def load_model(
     if checkpoint_dir.exists() and epoch != "none":
         checkpoint_path = find_checkpoint(checkpoint_dir, epoch)
         if checkpoint_path:
-            weights: Dict[str, mx.array] = mx.load(str(checkpoint_path))  # type: ignore[assignment]
-            model.load_weights(list(weights.items()))
+            load_checkpoint_model(model, checkpoint_path, strict=True)
             loaded_epoch = parse_epoch_from_checkpoint_name(checkpoint_path.name)
             logger.info(f"Loaded checkpoint from {checkpoint_path.name}")
         else:

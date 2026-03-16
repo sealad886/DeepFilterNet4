@@ -26,6 +26,7 @@ import mlx.optimizers as optim
 import numpy as np
 
 from .config import LossConfig, TrainConfig
+from .checkpoint import _filter_checkpoint_weights_for_model
 from .loss import SpectralLoss
 from .model import DfNet4, count_parameters
 
@@ -610,7 +611,8 @@ def load_checkpoint(
 
     # Load model weights - mx.load returns Dict[str, mx.array] for safetensors
     weights: Dict[str, mx.array] = mx.load(str(path))  # type: ignore[assignment]
-    model.load_weights(list(weights.items()))
+    weights, _ = _filter_checkpoint_weights_for_model(model, weights)
+    model.load_weights(list(weights.items()), strict=strict)
 
     # Load training state
     state_path = path.with_suffix(".json")
