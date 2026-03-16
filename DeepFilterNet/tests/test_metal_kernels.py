@@ -15,6 +15,7 @@ from df_mlx.metal_kernels import (
     _ref_complex_mag,
     _ref_log1p_mag,
     _select_complex_mag_threadgroup,
+    _select_log1p_mag_threadgroup,
     fused_band_energy,
     fused_complex_mag,
     fused_log1p_mag,
@@ -100,6 +101,17 @@ class TestFusedLog1pMag:
 
         np.testing.assert_allclose(np.array(fg_r), np.array(rg_r), rtol=1e-4, atol=1e-5)
         np.testing.assert_allclose(np.array(fg_i), np.array(rg_i), rtol=1e-4, atol=1e-5)
+
+    def test_batching_matches_per_item(self):
+        """Batched log1p magnitude should match concatenated per-item execution."""
+        B, T, F = 12, 180, 481
+        real, imag = _rand_complex((B, T, F))
+        batched = fused_log1p_mag(real, imag, eps=1e-8)
+        pieces = [fused_log1p_mag(real[i : i + 1], imag[i : i + 1], eps=1e-8) for i in range(B)]
+        stacked = mx.concatenate(pieces, axis=0)
+        mx.eval(batched, stacked)
+        assert _select_log1p_mag_threadgroup(real) == 512
+        np.testing.assert_allclose(np.array(batched), np.array(stacked), rtol=1e-5, atol=1e-6)
 
 
 # ==================================================================

@@ -31,7 +31,7 @@ import mlx.core as mx
 
 # Numerical stability constant (matches training_losses._EPS and train.spectral_loss)
 _EPS_F = 1e-8
-_DEFAULT_LOG1P_MAG_THREADGROUP = 256
+_DEFAULT_LOG1P_MAG_THREADGROUP = 512
 _DEFAULT_COMPLEX_MAG_THREADGROUP = 512
 _COMPLEX_MAG_LARGE_WORKLOAD_THRESHOLD = 1_000_000
 _BAND_ENERGY_FUSED_BT_THRESHOLD = 1800
@@ -91,6 +91,16 @@ def _make_params(real: mx.array, eps: float) -> mx.array:
 def _native_complex_mag(real: mx.array, imag: mx.array, eps: float = _EPS_F) -> mx.array:
     """Native MLX reference for magnitude, kept internal for adaptive validation."""
     return mx.sqrt(real * real + imag * imag + eps)
+
+
+def _select_log1p_mag_threadgroup(real: mx.array) -> int:
+    """Choose the threadgroup size for fused_log1p_mag.
+
+    A dedicated sweep over representative DF training shapes showed the 512-wide
+    launch to be the most robust default for this kernel, with no evidence that
+    a native fallback is beneficial.
+    """
+    return _DEFAULT_LOG1P_MAG_THREADGROUP
 
 
 def _select_complex_mag_threadgroup(real: mx.array) -> int:
@@ -178,7 +188,8 @@ def fused_log1p_mag(real: mx.array, imag: mx.array, eps: float = _EPS_F) -> mx.a
     Supports reverse-mode autodiff via a fused backward kernel.
     """
     params = _make_params(real, eps)
-    return _get_log1p_mag_impl(_DEFAULT_LOG1P_MAG_THREADGROUP)(real, imag, params)
+    threadgroup_size = _select_log1p_mag_threadgroup(real)
+    return _get_log1p_mag_impl(threadgroup_size)(real, imag, params)
 
 
 # ====================================================================
