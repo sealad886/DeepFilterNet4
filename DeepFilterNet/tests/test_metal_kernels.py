@@ -21,6 +21,7 @@ from df_mlx.metal_kernels import (
     fused_log1p_mag,
 )
 from df_mlx.train import spectral_loss
+from df_mlx.training_losses import _log1p_mag as _training_log1p_mag
 
 
 def _rand_complex(shape, dtype=mx.float32):
@@ -71,7 +72,7 @@ class TestFusedLog1pMag:
         real, imag = _rand_complex((2, 8, 8))
         eps = 1e-4
         fused = fused_log1p_mag(real, imag, eps=eps)
-        ref = mx.log1p(mx.sqrt(real * real + imag * imag + eps))
+        ref = _ref_log1p_mag(real, imag, eps=eps)
         mx.eval(fused, ref)
         np.testing.assert_allclose(np.array(fused), np.array(ref), rtol=1e-5, atol=1e-6)
 
@@ -101,6 +102,15 @@ class TestFusedLog1pMag:
 
         np.testing.assert_allclose(np.array(fg_r), np.array(rg_r), rtol=1e-4, atol=1e-5)
         np.testing.assert_allclose(np.array(fg_i), np.array(rg_i), rtol=1e-4, atol=1e-5)
+
+    def test_training_wrapper_forwards_eps(self):
+        """The training helper must preserve caller-provided epsilon."""
+        real, imag = _rand_complex((2, 8, 8))
+        eps = 1e-4
+        fused = _training_log1p_mag(real, imag, eps=eps, _assume_float32=True)
+        ref = _ref_log1p_mag(real, imag, eps=eps)
+        mx.eval(fused, ref)
+        np.testing.assert_allclose(np.array(fused), np.array(ref), rtol=1e-5, atol=1e-6)
 
     def test_batching_matches_per_item(self):
         """Batched log1p magnitude should match concatenated per-item execution."""

@@ -93,6 +93,11 @@ def _native_complex_mag(real: mx.array, imag: mx.array, eps: float = _EPS_F) -> 
     return mx.sqrt(real * real + imag * imag + eps)
 
 
+def _native_log1p_mag(real: mx.array, imag: mx.array, eps: float = _EPS_F) -> mx.array:
+    """Native MLX reference for log1p magnitude."""
+    return mx.log1p(_native_complex_mag(real, imag, eps))
+
+
 def _select_log1p_mag_threadgroup(real: mx.array) -> int:
     """Choose the threadgroup size for fused_log1p_mag.
 
@@ -419,10 +424,9 @@ def fused_band_energy(
 # ====================================================================
 
 
-def _ref_log1p_mag(real: mx.array, imag: mx.array) -> mx.array:
+def _ref_log1p_mag(real: mx.array, imag: mx.array, eps: float = _EPS_F) -> mx.array:
     """Reference (standard MLX ops) for fused_log1p_mag."""
-    mag = mx.sqrt(real * real + imag * imag + _EPS_F)
-    return mx.log1p(mag)
+    return _native_log1p_mag(real, imag, eps)
 
 
 def _ref_complex_mag(real: mx.array, imag: mx.array, eps: float = _EPS_F) -> mx.array:

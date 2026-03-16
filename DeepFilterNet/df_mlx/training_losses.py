@@ -338,7 +338,7 @@ def _log1p_mag(
             real = real.astype(mx.float32)
         if imag.dtype != mx.float32:
             imag = imag.astype(mx.float32)
-    return fused_log1p_mag(real, imag)
+    return fused_log1p_mag(real, imag, eps=eps)
 
 
 def _compute_musicness(
