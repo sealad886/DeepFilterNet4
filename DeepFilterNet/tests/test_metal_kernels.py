@@ -14,6 +14,7 @@ from df_mlx.metal_kernels import (
     _ref_band_energy,
     _ref_complex_mag,
     _ref_log1p_mag,
+    _select_complex_mag_threadgroup,
     fused_band_energy,
     fused_complex_mag,
     fused_log1p_mag,
@@ -149,6 +150,22 @@ class TestFusedComplexMag:
         np.testing.assert_allclose(np.array(fg_r), np.array(rg_r), rtol=1e-4, atol=1e-5)
         np.testing.assert_allclose(np.array(fg_i), np.array(rg_i), rtol=1e-4, atol=1e-5)
 
+    def test_batching_matches_per_item_with_adaptive_threadgroup(self):
+        """Batched execution should match concatenated per-item execution.
+
+        This intentionally crosses the adaptive threadgroup threshold so the
+        batched tensor can use a different launch size than each per-item call.
+        """
+        B, T, F = 12, 180, 481
+        real, imag = _rand_complex((B, T, F))
+        batched = fused_complex_mag(real, imag, eps=1e-8)
+        pieces = [fused_complex_mag(real[i : i + 1], imag[i : i + 1], eps=1e-8) for i in range(B)]
+        stacked = mx.concatenate(pieces, axis=0)
+        mx.eval(batched, stacked)
+        assert _select_complex_mag_threadgroup(real) == 256
+        assert _select_complex_mag_threadgroup(real[:1]) == 512
+        np.testing.assert_allclose(np.array(batched), np.array(stacked), rtol=1e-5, atol=1e-6)
+
 
 class TestSpectralLossWiring:
     def test_train_spectral_loss_matches_reference(self):
@@ -233,6 +250,23 @@ class TestFusedBandEnergy:
         assert f_log.dtype == mx.float32
         np.testing.assert_allclose(np.array(f_band), np.array(r_band), rtol=2e-3, atol=2e-3)
         np.testing.assert_allclose(np.array(f_log), np.array(r_log), rtol=2e-3, atol=2e-3)
+
+    def test_batching_matches_per_item_across_native_and_fused_paths(self):
+        """Batched band-energy results should match per-item results across path selection.
+
+        The full batch should take the fused path while each per-item slice
+        falls back to native, ensuring batching remains semantically correct.
+        """
+        B, T, F = 12, 180, 64
+        real, imag = _rand_complex((B, T, F))
+        mask, bins = self._make_band_mask(F, active_bins=16)
+        batched_band, batched_log = fused_band_energy(real, imag, mask, bins)
+        per_item = [fused_band_energy(real[i : i + 1], imag[i : i + 1], mask, bins) for i in range(B)]
+        stacked_band = mx.concatenate([p[0] for p in per_item], axis=0)
+        stacked_log = mx.concatenate([p[1] for p in per_item], axis=0)
+        mx.eval(batched_band, batched_log, stacked_band, stacked_log)
+        np.testing.assert_allclose(np.array(batched_band), np.array(stacked_band), rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(np.array(batched_log), np.array(stacked_log), rtol=1e-5, atol=1e-6)
 
     def test_full_mask(self):
         """All bins active."""

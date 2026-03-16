@@ -33,6 +33,8 @@ import mlx.core as mx
 _EPS_F = 1e-8
 _DEFAULT_LOG1P_MAG_THREADGROUP = 256
 _DEFAULT_COMPLEX_MAG_THREADGROUP = 512
+_COMPLEX_MAG_LARGE_WORKLOAD_THRESHOLD = 1_000_000
+_BAND_ENERGY_FUSED_BT_THRESHOLD = 1800
 
 # ====================================================================
 # Kernel 1: fused_log1p_mag  —  log1p(sqrt(r² + i² + eps))
@@ -84,6 +86,21 @@ def _resolve_threadgroup_size(n: int, preferred: int = _DEFAULT_LOG1P_MAG_THREAD
 def _make_params(real: mx.array, eps: float) -> mx.array:
     """Build a dtype-aligned scalar parameter buffer for Metal kernels."""
     return mx.array([eps], dtype=real.dtype)
+
+
+def _native_complex_mag(real: mx.array, imag: mx.array, eps: float = _EPS_F) -> mx.array:
+    """Native MLX reference for magnitude, kept internal for adaptive validation."""
+    return mx.sqrt(real * real + imag * imag + eps)
+
+
+def _select_complex_mag_threadgroup(real: mx.array) -> int:
+    """Choose a threadgroup size based on measured flat-workload crossover.
+
+    Benchmarks on representative DF training spectra showed that 512 threads are
+    best below about 1M output elements, while 256 threads are more robust for
+    larger workloads.
+    """
+    return 256 if real.size >= _COMPLEX_MAG_LARGE_WORKLOAD_THRESHOLD else _DEFAULT_COMPLEX_MAG_THREADGROUP
 
 
 def _dispatch_log1p_mag_forward(
@@ -277,7 +294,8 @@ def fused_complex_mag(real: mx.array, imag: mx.array, eps: float = _EPS_F) -> mx
     Supports reverse-mode autodiff via a fused backward kernel.
     """
     params = _make_params(real, eps)
-    return _get_complex_mag_impl(_DEFAULT_COMPLEX_MAG_THREADGROUP)(real, imag, params)
+    threadgroup_size = _select_complex_mag_threadgroup(real)
+    return _get_complex_mag_impl(threadgroup_size)(real, imag, params)
 
 
 # ====================================================================
@@ -314,6 +332,31 @@ _band_energy_kernel = mx.fast.metal_kernel(
 )
 
 
+def _native_band_energy(
+    real: mx.array,
+    imag: mx.array,
+    band_mask: mx.array,
+    band_bins: float,
+    eps: float = _EPS_F,
+) -> tuple[mx.array, mx.array]:
+    """Numerically stable native MLX implementation used for tiny workloads."""
+    real_f32 = real.astype(mx.float32) if real.dtype != mx.float32 else real
+    imag_f32 = imag.astype(mx.float32) if imag.dtype != mx.float32 else imag
+    mask_f32 = band_mask.astype(mx.float32) if band_mask.dtype != mx.float32 else band_mask
+    return _ref_band_energy(real_f32, imag_f32, mask_f32, band_bins, eps)
+
+
+def _should_use_fused_band_energy(real: mx.array) -> bool:
+    """Return True when the fused band-energy kernel amortizes launch overhead.
+
+    Benchmarks show the native path wins for tiny workloads, while fused wins
+    reliably once the batched frame count reaches roughly 1800.
+    """
+    if real.ndim < 3:
+        return True
+    return (real.shape[0] * real.shape[1]) >= _BAND_ENERGY_FUSED_BT_THRESHOLD
+
+
 def fused_band_energy(
     real: mx.array,
     imag: mx.array,
@@ -342,6 +385,8 @@ def fused_band_energy(
         compilation errors during accumulation.
     """
     B, T, F = real.shape
+    if not _should_use_fused_band_energy(real):
+        return _native_band_energy(real, imag, band_mask, band_bins, eps)
     n_out = B * T
     if n_out == 0:
         empty = mx.zeros((B, T), dtype=mx.float32)
@@ -371,7 +416,7 @@ def _ref_log1p_mag(real: mx.array, imag: mx.array) -> mx.array:
 
 def _ref_complex_mag(real: mx.array, imag: mx.array, eps: float = _EPS_F) -> mx.array:
     """Reference (standard MLX ops) for fused_complex_mag."""
-    return mx.sqrt(real * real + imag * imag + eps)
+    return _native_complex_mag(real, imag, eps)
 
 
 def _ref_band_energy(
