@@ -13,6 +13,7 @@ from df_mlx.run_config import (
     generate_run_config_example,
     load_run_config,
     set_by_path,
+    validate_run_config,
 )
 from df_mlx.training_setup import setup_dataset
 
@@ -76,6 +77,67 @@ def test_run_config_accepts_pipeline_awesome_dynamic_loss():
     assert cfg.loss.dynamic_loss == "pipeline_awesome"
 
 
+def test_run_config_accepts_contrastive_awesome_dynamic_loss():
+    cfg = RunConfig()
+    apply_run_config_dict(cfg, {"loss": {"dynamic_loss": "contrastive_awesome"}})
+    assert cfg.loss.dynamic_loss == "contrastive_awesome"
+
+
+def test_run_config_accepts_contrastive_loss_block():
+    cfg = RunConfig()
+    apply_run_config_dict(
+        cfg,
+        {
+            "loss": {
+                "dynamic_loss": "contrastive_awesome",
+                "contrastive": {
+                    "loss_weight": 0.2,
+                    "warmup_steps": 1234,
+                    "temperature": 0.2,
+                    "embedding_dim": 96,
+                    "hidden_dim": 192,
+                    "speech_frames_per_sample": 12,
+                    "interference_frames_per_sample": 8,
+                    "speech_mask_min": 0.75,
+                    "interference_mask_max": 0.2,
+                    "quiet_weight": 0.4,
+                    "in_batch_negatives": False,
+                },
+            }
+        },
+    )
+
+    assert cfg.loss.dynamic_loss == "contrastive_awesome"
+    assert cfg.loss.contrastive.loss_weight == 0.2
+    assert cfg.loss.contrastive.warmup_steps == 1234
+    assert cfg.loss.contrastive.temperature == 0.2
+    assert cfg.loss.contrastive.embedding_dim == 96
+    assert cfg.loss.contrastive.hidden_dim == 192
+    assert cfg.loss.contrastive.speech_frames_per_sample == 12
+    assert cfg.loss.contrastive.interference_frames_per_sample == 8
+    assert cfg.loss.contrastive.speech_mask_min == 0.75
+    assert cfg.loss.contrastive.interference_mask_max == 0.2
+    assert cfg.loss.contrastive.quiet_weight == 0.4
+    assert cfg.loss.contrastive.in_batch_negatives is False
+
+
+def test_run_config_rejects_invalid_contrastive_mask_thresholds():
+    cfg = RunConfig()
+    apply_run_config_dict(
+        cfg,
+        {
+            "dataset": {"speech_list": "speech.txt"},
+            "loss": {
+                "dynamic_loss": "contrastive_awesome",
+                "contrastive": {"speech_mask_min": 0.3, "interference_mask_max": 0.4},
+            },
+        },
+    )
+
+    with pytest.raises(ValueError, match="interference_mask_max must be <= .*speech_mask_min"):
+        validate_run_config(cfg)
+
+
 def test_run_config_accepts_pipeline_stages_table_list():
     cfg = RunConfig()
     apply_run_config_dict(
@@ -133,10 +195,26 @@ def test_run_config_example_includes_speech_boost_descriptions():
     assert "speech_boost_threshold = 0.5" in text
 
 
+def test_run_config_example_includes_contrastive_section():
+    text = generate_run_config_example()
+    assert 'dynamic_loss = "baseline"' in text
+    assert "[loss.contrastive]" in text
+    assert "loss_weight = 0.15" in text
+    assert "temperature = 0.1" in text
+
+
 def test_run_profiles_do_not_reference_removed_cleaned_datastore() -> None:
     profiles_dir = Path(__file__).resolve().parents[1] / "df_mlx" / "configs" / "run_profiles"
     stale_profiles = [path.name for path in profiles_dir.glob("*.toml") if "mlx_datastore_cleaned" in path.read_text()]
     assert stale_profiles == []
+
+
+def test_contrastive_run_profile_loads() -> None:
+    profiles_dir = Path(__file__).resolve().parents[1] / "df_mlx" / "configs" / "run_profiles"
+    profile_path = profiles_dir / "contrastive_awesome_experimental.toml"
+    cfg = load_run_config(profile_path)
+    assert cfg.loss.dynamic_loss == "contrastive_awesome"
+    assert cfg.loss.contrastive.loss_weight == 0.15
 
 
 def test_setup_dataset_falls_back_from_removed_cleaned_cache_dir(tmp_path: Path, capsys) -> None:

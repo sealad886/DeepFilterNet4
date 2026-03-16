@@ -2,7 +2,7 @@
 
 This module provides dynamic audio mixing for training, matching the original
 DeepFilterNet training pipeline:
-- Dynamic speech + noise mixing at random SNR
+- Dynamic speech + noise/background-music mixing at random SNR
 - Random RIR convolution for reverb simulation
 - Full dataset diversity (all noise/RIR files available each epoch)
 - Various augmentations (clipping, bandwidth extension, etc.)
@@ -82,6 +82,7 @@ class DatasetConfig:
     # File lists (used if cache_dir is None - slower, loads raw audio)
     speech_files: List[str] = field(default_factory=list)
     noise_files: List[str] = field(default_factory=list)
+    music_files: List[str] = field(default_factory=list)
     rir_files: List[str] = field(default_factory=list)
 
     # Audio parameters
@@ -101,12 +102,14 @@ class DatasetConfig:
     gain_range: Tuple[float, float] = (-6.0, 6.0)  # dB (legacy; retained for compatibility)
     speech_gain_range: Tuple[float, float] = (-12.0, 12.0)  # dB, varies absolute speech loudness
     noise_gain_range: Tuple[float, float] = (-12.0, 12.0)  # dB, varies relative noise contributions
+    background_music_gain_range: Tuple[float, float] = (0.0, 12.0)  # dB, lets music sit loudly behind speech
 
     # Augmentation probabilities
     p_reverb: float = 0.5  # Probability of applying RIR
     p_clipping: float = 0.0  # Probability of clipping distortion
     p_bandwidth_ext: float = 0.0  # Probability of bandwidth extension
     p_interfer_speech: float = 0.0  # Probability of interfering speaker
+    p_background_music: float = 0.0  # Probability of injecting at least one dedicated music source
     interfer_speech_snr_range: Tuple[float, float] = (
         -10.0,
         10.0,
@@ -134,7 +137,8 @@ class DatasetConfig:
         # Handle cache_dir from build_audio_cache.py
         if "cache_dir" in data:
             data["cache_dir"] = data["cache_dir"]
-        return cls(**{k: v for k, v in data.items() if hasattr(cls, k) or k == "cache_dir"})
+        field_names = set(cls.__dataclass_fields__.keys()) | {"cache_dir"}
+        return cls(**{k: v for k, v in data.items() if k in field_names})
 
     def to_json(self, path: str) -> None:
         """Save config to JSON file."""
@@ -155,7 +159,7 @@ class ShardedAudioCache:
 
         Args:
             cache_dir: Path to cache directory (containing index.json)
-            category: 'speech', 'noise', or 'rir'
+            category: 'speech', 'noise', 'music', or 'rir'
         """
         self.cache_dir_str = normalize_hf_dataset_cache_dir(str(cache_dir))
         self.is_hf = self.cache_dir_str.startswith("hf://")
@@ -758,6 +762,7 @@ class Sample:
 
     noisy_spec: np.ndarray  # Complex STFT of noisy mixture
     clean_spec: np.ndarray  # Complex STFT of clean speech
+    interference_spec: np.ndarray  # Complex STFT of final combined interference before mix_audio()
     feat_erb: np.ndarray  # ERB features
     feat_spec: np.ndarray  # DF-band features
     snr: float
@@ -784,6 +789,8 @@ def _assemble_batch(samples: List[Sample]) -> Dict[str, mx.array]:
     noisy_imag = np.empty((n, *spec_shape), dtype=np.float32)
     clean_real = np.empty((n, *spec_shape), dtype=np.float32)
     clean_imag = np.empty((n, *spec_shape), dtype=np.float32)
+    interference_real = np.empty((n, *spec_shape), dtype=np.float32)
+    interference_imag = np.empty((n, *spec_shape), dtype=np.float32)
     feat_erb = np.empty((n, *erb_shape), dtype=np.float32)
     feat_spec = np.empty((n, *spec_feat_shape), dtype=np.float32)
     snr_arr = np.empty(n, dtype=np.float32)
@@ -793,6 +800,8 @@ def _assemble_batch(samples: List[Sample]) -> Dict[str, mx.array]:
         noisy_imag[i] = s.noisy_spec.imag
         clean_real[i] = s.clean_spec.real
         clean_imag[i] = s.clean_spec.imag
+        interference_real[i] = s.interference_spec.real
+        interference_imag[i] = s.interference_spec.imag
         feat_erb[i] = s.feat_erb
         feat_spec[i] = s.feat_spec
         snr_arr[i] = s.snr
@@ -802,6 +811,8 @@ def _assemble_batch(samples: List[Sample]) -> Dict[str, mx.array]:
         "noisy_imag": mx.array(noisy_imag),
         "clean_real": mx.array(clean_real),
         "clean_imag": mx.array(clean_imag),
+        "interference_real": mx.array(interference_real),
+        "interference_imag": mx.array(interference_imag),
         "feat_erb": mx.array(feat_erb),
         "feat_spec": mx.array(feat_spec),
         "snr": mx.array(snr_arr),
@@ -828,6 +839,8 @@ class DynamicDataset:
         self.segment_samples = int(config.segment_length * config.sample_rate)
         self.fft_size = config.fft_size
         self.hop_size = config.hop_size
+        self.music_cache: Optional[ShardedAudioCache] = None
+        self.rir_cache: Optional[ShardedAudioCache] = None
 
         # Determine loading mode
         self._use_cache = config.cache_dir is not None
@@ -840,33 +853,40 @@ class DynamicDataset:
             self.speech_cache = ShardedAudioCache(config.cache_dir, "speech")
             self.noise_cache = ShardedAudioCache(config.cache_dir, "noise")
 
-            # RIR cache is optional
-            if str(config.cache_dir).startswith("hf://"):
-                from huggingface_hub import HfFileSystem
+            def _cache_category_exists(category: str) -> bool:
+                if str(config.cache_dir).startswith("hf://"):
+                    from huggingface_hub import HfFileSystem
 
-                fs = HfFileSystem()
-                hf_path = hf_dataset_fsspec_path(str(config.cache_dir))
-                has_rir = fs.exists(f"{hf_path}/rir")
-            else:
-                rir_cache_dir = Path(config.cache_dir) / "rir"
-                has_rir = rir_cache_dir.exists()
+                    fs = HfFileSystem()
+                    hf_path = hf_dataset_fsspec_path(str(config.cache_dir))
+                    return fs.exists(f"{hf_path}/{category}")
+                return Path(config.cache_dir).joinpath(category).exists()
 
-            if has_rir:
-                self.rir_cache = ShardedAudioCache(config.cache_dir, "rir")
-                if not self.rir_cache.files:
-                    rir_shards = list(Path(config.cache_dir).joinpath("rir").glob("*.npz"))
-                    if rir_shards:
+            def _load_optional_cache(category: str, label: str) -> Optional[ShardedAudioCache]:
+                if not _cache_category_exists(category):
+                    return None
+
+                cache = ShardedAudioCache(config.cache_dir, category)
+                if cache.files:
+                    return cache
+
+                if not str(config.cache_dir).startswith("hf://"):
+                    shard_count = len(list(Path(config.cache_dir).joinpath(category).glob("*.npz")))
+                    if shard_count:
                         print(
-                            f"Warning: rir/ directory has {len(rir_shards)} shards but "
-                            "index.json has no RIR entries. Run build_audio_cache.py "
-                            "with --rir-list or --rebuild-index to fix."
+                            f"Warning: {category}/ directory has {shard_count} shards but index.json has no {label} "
+                            f"entries. Run build_audio_cache.py with --{category}-list or --rebuild-index to fix."
                         )
-            else:
-                self.rir_cache = None
+                return None
+
+            self.music_cache = _load_optional_cache("music", "music")
+            self.rir_cache = _load_optional_cache("rir", "RIR")
 
             # Use files from cache index
             config.speech_files = self.speech_cache.files
             config.noise_files = self.noise_cache.files
+            if self.music_cache:
+                config.music_files = self.music_cache.files
             if self.rir_cache:
                 config.rir_files = self.rir_cache.files
         else:
@@ -947,10 +967,13 @@ class DynamicDataset:
             cache_type: 'speech', 'noise', or 'rir'
         """
         if self._use_cache:
+            music_cache = self.music_cache
             if cache_type == "speech":
                 return self.speech_cache.load(path)
             elif cache_type == "noise":
                 return self.noise_cache.load(path)
+            elif cache_type == "music" and music_cache is not None:
+                return music_cache.load(path)
             elif cache_type == "rir" and self.rir_cache:
                 return self.rir_cache.load(path)
         return self.audio_cache.load(path)
@@ -1004,6 +1027,20 @@ class DynamicDataset:
             # Fallback
             return self.noise_generator.generate(0.0, self.segment_samples), 0.0
 
+    def _load_music(self, rng: random.Random) -> Optional[Tuple[np.ndarray, float]]:
+        """Load a random background-music sample when a dedicated corpus is available."""
+        music_files = self.config.music_files
+        if not music_files:
+            return None
+
+        path = rng.choice(music_files)
+        try:
+            music = self._load_audio(path, "music")
+            gain = rng.uniform(*self.config.background_music_gain_range)
+            return music, gain
+        except Exception:
+            return None
+
     def _load_rir(self, rng: random.Random) -> Optional[np.ndarray]:
         """Load a random RIR if available."""
         rir_files = self.config.rir_files
@@ -1054,7 +1091,7 @@ class DynamicDataset:
             snr = rng.uniform(*self.config.snr_range)
         gain = rng.uniform(*self.config.speech_gain_range)
 
-        # Load and combine multiple noises (2-5 like Rust)
+        # Load and combine multiple generic noises (2-5 like Rust)
         n_noises = rng.randint(self.config.n_noise_min, self.config.n_noise_max)
         noises = []
         noise_gains = []
@@ -1062,6 +1099,15 @@ class DynamicDataset:
             noise, ng = self._load_noise(rng)
             noises.append(noise)
             noise_gains.append(ng)
+
+        # Optionally guarantee a dedicated background-music stem in the mixture.
+        if self.config.p_background_music > 0 and self.config.music_files:
+            if rng.random() < self.config.p_background_music:
+                music_result = self._load_music(rng)
+                if music_result is not None:
+                    music, music_gain = music_result
+                    noises.append(music)
+                    noise_gains.append(music_gain)
 
         combined_noise = combine_noises(noises, self.segment_samples, noise_gains)
 
@@ -1113,6 +1159,7 @@ class DynamicDataset:
         # Compute spectrograms
         noisy_spec = compute_stft(noisy, self.fft_size, self.hop_size, self.window)
         clean_spec = compute_stft(clean_out, self.fft_size, self.hop_size, self.window)
+        interference_spec = compute_stft(combined_noise, self.fft_size, self.hop_size, self.window)
 
         # Compute features
         feat_erb = compute_erb_features(noisy_spec, self.erb_fb)
@@ -1121,6 +1168,7 @@ class DynamicDataset:
         return Sample(
             noisy_spec=noisy_spec,
             clean_spec=clean_spec,
+            interference_spec=interference_spec,
             feat_erb=feat_erb,
             feat_spec=feat_spec,
             snr=snr,
@@ -1327,6 +1375,7 @@ def create_dataset_from_lists(
     speech_list: str,
     noise_list: str,
     rir_list: Optional[str] = None,
+    music_list: Optional[str] = None,
     **kwargs,
 ) -> DynamicDataset:
     """Convenience function to create dataset from file lists.
@@ -1335,6 +1384,7 @@ def create_dataset_from_lists(
         speech_list: Path to speech file list
         noise_list: Path to noise file list
         rir_list: Optional path to RIR file list
+        music_list: Optional path to dedicated background-music file list
         **kwargs: Additional DatasetConfig arguments
 
     Returns:
@@ -1343,10 +1393,12 @@ def create_dataset_from_lists(
     speech_files = read_file_list(speech_list)
     noise_files = read_file_list(noise_list)
     rir_files = read_file_list(rir_list) if rir_list else []
+    music_files = read_file_list(music_list) if music_list else []
 
     config = DatasetConfig(
         speech_files=speech_files,
         noise_files=noise_files,
+        music_files=music_files,
         rir_files=rir_files,
         **kwargs,
     )
@@ -1566,11 +1618,15 @@ class MLXDataStream:
                 noisy_i = sample.noisy_spec.imag
                 clean_r = sample.clean_spec.real
                 clean_i = sample.clean_spec.imag
+                interference_r = sample.interference_spec.real
+                interference_i = sample.interference_spec.imag
                 return {
                     "noisy_real": np.require(noisy_r, dtype=np.float32, requirements="C"),
                     "noisy_imag": np.require(noisy_i, dtype=np.float32, requirements="C"),
                     "clean_real": np.require(clean_r, dtype=np.float32, requirements="C"),
                     "clean_imag": np.require(clean_i, dtype=np.float32, requirements="C"),
+                    "interference_real": np.require(interference_r, dtype=np.float32, requirements="C"),
+                    "interference_imag": np.require(interference_i, dtype=np.float32, requirements="C"),
                     "feat_erb": np.require(sample.feat_erb, dtype=np.float32, requirements="C"),
                     "feat_spec": np.require(sample.feat_spec, dtype=np.float32, requirements="C"),
                     "snr": np.array([sample.snr], dtype=np.float32),
@@ -1650,6 +1706,8 @@ class MLXDataStream:
             "noisy_imag": mx.array(batch["noisy_imag"]),
             "clean_real": mx.array(batch["clean_real"]),
             "clean_imag": mx.array(batch["clean_imag"]),
+            "interference_real": mx.array(batch["interference_real"]),
+            "interference_imag": mx.array(batch["interference_imag"]),
             "feat_erb": mx.array(batch["feat_erb"]),
             "feat_spec": mx.array(batch["feat_spec"]),
             "snr": mx.array(batch["snr"]).squeeze(-1),

@@ -22,6 +22,7 @@ Usage:
     python -m df_mlx.train_dynamic \\
         --speech-list /path/to/speech_files.txt \\
         --noise-list /path/to/noise_files.txt \\
+        --music-list /path/to/background_music_files.txt \
         --rir-list /path/to/rir_files.txt \\
         --epochs 100 --batch-size 8 --checkpoint-dir ./checkpoints
 """
@@ -38,6 +39,7 @@ import random
 import sys
 import time
 from itertools import islice
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, Tuple
 
 import mlx.core as mx
@@ -84,6 +86,7 @@ from df_mlx.training_helpers import (
 )
 from df_mlx.training_losses import (
     _compute_awesome_losses,
+    _compute_contrastive_awesome_losses,
     _compute_pipeline_awesome_losses,
     _compute_speech_band_logmag_loss,
     _compute_vad_loss,
@@ -243,6 +246,7 @@ def train(
     cache_dir: str | None = None,
     speech_list: str | None = None,
     noise_list: str | None = None,
+    music_list: str | None = None,
     rir_list: str | None = None,
     config_path: str | None = None,
     epochs: int = 100,
@@ -278,14 +282,27 @@ def train(
     p_extreme_snr: float | None = None,
     p_very_low_snr: float | None = None,
     p_interfer_speech: float | None = None,
+    p_background_music: float | None = None,
     curriculum_warmup_epochs: int = 0,
     speech_gain_range: Tuple[float, float] | None = None,
     noise_gain_range: Tuple[float, float] | None = None,
-    dynamic_loss: Literal["baseline", "awesome", "pipeline_awesome"] = "baseline",
+    background_music_gain_range: Tuple[float, float] | None = None,
+    dynamic_loss: Literal["baseline", "awesome", "pipeline_awesome", "contrastive_awesome"] = "baseline",
     pipeline_stages: list[dict[str, Any]] | None = None,
     awesome_loss_weight: float = 0.4,
     awesome_mask_sharpness: float = 6.0,
     awesome_warmup_steps: int = 0,
+    contrastive_loss_weight: float = 0.15,
+    contrastive_warmup_steps: int = 2500,
+    contrastive_temperature: float = 0.1,
+    contrastive_embedding_dim: int = 128,
+    contrastive_hidden_dim: int = 256,
+    contrastive_speech_frames_per_sample: int = 32,
+    contrastive_interference_frames_per_sample: int = 32,
+    contrastive_speech_mask_min: float = 0.7,
+    contrastive_interference_mask_max: float = 0.3,
+    contrastive_quiet_weight: float = 0.5,
+    contrastive_in_batch_negatives: bool = True,
     gan_enabled: bool = False,
     gan_start_epoch: int = 0,
     gan_ramp_epochs: int = 0,
@@ -350,6 +367,7 @@ def train(
         cache_dir: Path to pre-built audio cache (from build_audio_cache.py)
         speech_list: Path to file containing speech file paths (if no cache)
         noise_list: Path to file containing noise file paths (if no cache)
+        music_list: Optional path to file containing background-music file paths (if no cache)
         rir_list: Path to file containing RIR file paths (if no cache)
         config_path: Optional path to JSON config file
         epochs: Number of training epochs
@@ -384,17 +402,31 @@ def train(
         p_extreme_snr: Optional override for extreme SNR sampling probability
         p_very_low_snr: Optional override for very-low SNR sampling probability
         p_interfer_speech: Optional override for interfering speaker probability (simulates vocals/competing talker)
+        p_background_music: Optional override for the probability that a sample includes a background-music source
         curriculum_warmup_epochs: Number of warmup epochs for curriculum learning (0=disabled).
             During warmup, SNR/interferer probabilities ramp from 0 to target values.
         speech_gain_range: Optional override for speech gain range (dB)
         noise_gain_range: Optional override for noise gain range (dB)
-        dynamic_loss: Which dynamic loss to use ("baseline", "awesome", or "pipeline_awesome")
+        background_music_gain_range: Optional override for background-music source gain range (dB)
+        dynamic_loss: Which dynamic loss to use ("baseline", "awesome", "pipeline_awesome",
+            or "contrastive_awesome")
         pipeline_stages: Optional staged loss schedule with entries containing
             start_epoch and optional overrides for awesome_loss_weight,
             vad_loss_weight, and vad_speech_loss_weight.
         awesome_loss_weight: Weight for awesome loss term (only if enabled)
         awesome_mask_sharpness: Sharpness for speech/noise dominance mask
         awesome_warmup_steps: Warmup steps for awesome loss weight ramp
+        contrastive_loss_weight: Weight for contrastive_awesome local InfoNCE term
+        contrastive_warmup_steps: Warmup steps for contrastive_awesome
+        contrastive_temperature: InfoNCE temperature for contrastive_awesome
+        contrastive_embedding_dim: Embedding size for the train-only projector
+        contrastive_hidden_dim: Hidden size for the train-only projector
+        contrastive_speech_frames_per_sample: Speech-heavy frames mined per sample
+        contrastive_interference_frames_per_sample: Interference-heavy frames mined per sample
+        contrastive_speech_mask_min: Minimum mean speech mask for speech-frame mining
+        contrastive_interference_mask_max: Maximum mean speech mask for interference-frame mining
+        contrastive_quiet_weight: Relative weight for interference-selected contrastive loss
+        contrastive_in_batch_negatives: Use in-batch clean negatives for contrastive_awesome
         vad_proxy_enabled: Enable cheap VAD proxy gating for awesome loss
         vad_loss_weight: Weight for VAD speech-preservation loss
         vad_threshold: VAD probability threshold for speech gating
@@ -467,6 +499,7 @@ def train(
         config_path=config_path,
         speech_list=speech_list,
         noise_list=noise_list,
+        music_list=music_list,
         rir_list=rir_list,
         p_reverb=p_reverb,
         p_clipping=p_clipping,
@@ -478,8 +511,10 @@ def train(
         p_extreme_snr=p_extreme_snr,
         p_very_low_snr=p_very_low_snr,
         p_interfer_speech=p_interfer_speech,
+        p_background_music=p_background_music,
         speech_gain_range=speech_gain_range,
         noise_gain_range=noise_gain_range,
+        background_music_gain_range=background_music_gain_range,
         debug_numerics=debug_numerics,
         max_train_batches=max_train_batches,
         max_valid_batches=max_valid_batches,
@@ -538,6 +573,7 @@ def train(
     )
     use_awesome_loss = _aux.use_awesome_loss
     use_pipeline_awesome_loss = _aux.use_pipeline_awesome_loss
+    use_contrastive_awesome_loss = _aux.use_contrastive_awesome_loss
     pipeline_stage_defs = _aux.pipeline_stage_defs
     base_awesome_loss_weight = _aux.base_awesome_loss_weight
     base_vad_loss_weight = _aux.base_vad_loss_weight
@@ -565,6 +601,24 @@ def train(
     use_vad_train_reg = _aux.use_vad_train_reg
     del _aux
 
+    if use_contrastive_awesome_loss:
+        base_awesome_loss_weight = contrastive_loss_weight
+        pipeline_stage_defs = []
+
+    contrastive_cfg = SimpleNamespace(
+        loss_weight=contrastive_loss_weight,
+        warmup_steps=contrastive_warmup_steps,
+        temperature=contrastive_temperature,
+        embedding_dim=contrastive_embedding_dim,
+        hidden_dim=contrastive_hidden_dim,
+        speech_frames_per_sample=contrastive_speech_frames_per_sample,
+        interference_frames_per_sample=contrastive_interference_frames_per_sample,
+        speech_mask_min=contrastive_speech_mask_min,
+        interference_mask_max=contrastive_interference_mask_max,
+        quiet_weight=contrastive_quiet_weight,
+        in_batch_negatives=contrastive_in_batch_negatives,
+    )
+
     min_lr = learning_rate_min if learning_rate_min is not None else learning_rate * 0.01
 
     vad_enabled = print_training_config(
@@ -580,6 +634,7 @@ def train(
         awesome_loss_weight=awesome_loss_weight,
         awesome_mask_sharpness=awesome_mask_sharpness,
         awesome_warmup_steps=awesome_warmup_steps,
+        contrastive_cfg=contrastive_cfg,
         vad_proxy_enabled=vad_proxy_enabled,
         gan_enabled=gan_enabled,
         gan_adv_weight=gan_adv_weight,
@@ -650,6 +705,17 @@ def train(
         awesome_loss_weight=awesome_loss_weight,
         awesome_mask_sharpness=awesome_mask_sharpness,
         awesome_warmup_steps=awesome_warmup_steps,
+        contrastive_loss_weight=contrastive_loss_weight,
+        contrastive_warmup_steps=contrastive_warmup_steps,
+        contrastive_temperature=contrastive_temperature,
+        contrastive_embedding_dim=contrastive_embedding_dim,
+        contrastive_hidden_dim=contrastive_hidden_dim,
+        contrastive_speech_frames_per_sample=contrastive_speech_frames_per_sample,
+        contrastive_interference_frames_per_sample=contrastive_interference_frames_per_sample,
+        contrastive_speech_mask_min=contrastive_speech_mask_min,
+        contrastive_interference_mask_max=contrastive_interference_mask_max,
+        contrastive_quiet_weight=contrastive_quiet_weight,
+        contrastive_in_batch_negatives=contrastive_in_batch_negatives,
         vad_proxy_enabled=vad_proxy_enabled,
         gan_enabled=gan_enabled,
         gan_start_epoch=gan_start_epoch,
@@ -748,7 +814,12 @@ def train(
     _sync_model_config_with_dataset(model_config, config)
     model_config.backbone.backbone_type = backbone_type  # type: ignore[assignment]
     print(f"  Backbone type: {backbone_type} | Variant: {model_variant}")
-    model = init_model(config=model_config, variant=model_variant)
+    model = init_model(
+        config=model_config,
+        variant=model_variant,
+        contrastive_hidden_dim=(contrastive_hidden_dim if use_contrastive_awesome_loss else None),
+        contrastive_embedding_dim=(contrastive_embedding_dim if use_contrastive_awesome_loss else None),
+    )
     num_params = count_parameters(model)
     print(f"  Parameters: {num_params:,}")
 
@@ -776,6 +847,7 @@ def train(
     warmup_steps = warmup_epochs * optimizer_steps_per_epoch
     vad_warmup_steps = vad_warmup_epochs * optimizer_steps_per_epoch if use_vad_loss else 0
     awesome_warmup_steps = max(int(awesome_warmup_steps), 0) if (use_awesome_loss or use_pipeline_awesome_loss) else 0
+    contrastive_warmup_steps = max(int(contrastive_warmup_steps), 0) if use_contrastive_awesome_loss else 0
 
     schedule = WarmupCosineSchedule(
         base_lr=learning_rate,
@@ -847,6 +919,8 @@ def train(
         feat_spec,
         clean_real,
         clean_imag,
+        interference_real,
+        interference_imag,
         snr,
         vad_weight,
         speech_weight,
@@ -958,6 +1032,36 @@ def train(
             )
             total_loss = total_loss + awesome_weight * pipeline_loss
 
+        if use_contrastive_awesome_loss:
+            contrastive_loss, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _ = _compute_contrastive_awesome_losses(
+                noisy_real,
+                noisy_imag,
+                clean_real,
+                clean_imag,
+                interference_real,
+                interference_imag,
+                spec_out[0],
+                spec_out[1],
+                snr,
+                vad_band_mask,
+                vad_band_bins,
+                awesome_mask_sharpness,
+                vad_z_threshold,
+                vad_z_slope,
+                vad_snr_gate_db,
+                vad_snr_gate_width,
+                vad_proxy_enabled,
+                getattr(model, "contrastive_projector", None),
+                temperature=contrastive_temperature,
+                speech_frames_per_sample=contrastive_speech_frames_per_sample,
+                interference_frames_per_sample=contrastive_interference_frames_per_sample,
+                speech_mask_min=contrastive_speech_mask_min,
+                interference_mask_max=contrastive_interference_mask_max,
+                quiet_weight=contrastive_quiet_weight,
+                in_batch_negatives=contrastive_in_batch_negatives,
+            )
+            total_loss = total_loss + awesome_weight * contrastive_loss
+
         if use_vad_loss:
             vad_loss, p_ref, _, gate = _compute_vad_loss(
                 clean_real,
@@ -1045,6 +1149,8 @@ def train(
             feat_spec,
             clean_real,
             clean_imag,
+            interference_real,
+            interference_imag,
             snr,
             vad_weight,
             speech_weight,
@@ -1157,6 +1263,36 @@ def train(
                 )
                 total_loss = total_loss + awesome_weight * pipeline_loss
 
+            if use_contrastive_awesome_loss:
+                contrastive_loss, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _ = _compute_contrastive_awesome_losses(
+                    noisy_real,
+                    noisy_imag,
+                    clean_real,
+                    clean_imag,
+                    interference_real,
+                    interference_imag,
+                    spec_out[0],
+                    spec_out[1],
+                    snr,
+                    vad_band_mask,
+                    vad_band_bins,
+                    awesome_mask_sharpness,
+                    vad_z_threshold,
+                    vad_z_slope,
+                    vad_snr_gate_db,
+                    vad_snr_gate_width,
+                    vad_proxy_enabled,
+                    getattr(model, "contrastive_projector", None),
+                    temperature=contrastive_temperature,
+                    speech_frames_per_sample=contrastive_speech_frames_per_sample,
+                    interference_frames_per_sample=contrastive_interference_frames_per_sample,
+                    speech_mask_min=contrastive_speech_mask_min,
+                    interference_mask_max=contrastive_interference_mask_max,
+                    quiet_weight=contrastive_quiet_weight,
+                    in_batch_negatives=contrastive_in_batch_negatives,
+                )
+                total_loss = total_loss + awesome_weight * contrastive_loss
+
             if use_vad_loss:
                 vad_loss, p_ref, _, gate = _compute_vad_loss(
                     clean_real,
@@ -1238,6 +1374,7 @@ def train(
         clip_gan_scores_fn=_clip_gan_scores,
         use_awesome_loss=use_awesome_loss,
         use_pipeline_awesome_loss=use_pipeline_awesome_loss,
+        use_contrastive_awesome_loss=use_contrastive_awesome_loss,
         vad_band_mask=vad_band_mask,
         vad_band_bins=vad_band_bins,
         awesome_mask_sharpness=awesome_mask_sharpness,
@@ -1246,6 +1383,13 @@ def train(
         vad_snr_gate_db=vad_snr_gate_db,
         vad_snr_gate_width=vad_snr_gate_width,
         vad_proxy_enabled=vad_proxy_enabled,
+        contrastive_temperature=contrastive_temperature,
+        contrastive_speech_frames_per_sample=contrastive_speech_frames_per_sample,
+        contrastive_interference_frames_per_sample=contrastive_interference_frames_per_sample,
+        contrastive_speech_mask_min=contrastive_speech_mask_min,
+        contrastive_interference_mask_max=contrastive_interference_mask_max,
+        contrastive_quiet_weight=contrastive_quiet_weight,
+        contrastive_in_batch_negatives=contrastive_in_batch_negatives,
         use_vad_loss=use_vad_loss,
         vad_threshold=vad_threshold,
         vad_margin=vad_margin,
@@ -1260,6 +1404,8 @@ def train(
         feat_spec: mx.array,
         clean_real: mx.array,
         clean_imag: mx.array,
+        interference_real: mx.array,
+        interference_imag: mx.array,
         snr: mx.array,
         debug_ctx: dict[str, Any],
     ) -> None:
@@ -1272,6 +1418,8 @@ def train(
             feat_spec,
             clean_real,
             clean_imag,
+            interference_real,
+            interference_imag,
             snr,
             debug_ctx,
             gan_active=gan_active,
@@ -1329,6 +1477,8 @@ def train(
         feat_spec,
         clean_real,
         clean_imag,
+        interference_real,
+        interference_imag,
         snr,
         vad_weight,
         speech_weight,
@@ -1351,6 +1501,8 @@ def train(
             feat_spec,
             clean_real,
             clean_imag,
+            interference_real,
+            interference_imag,
             snr,
             vad_weight,
             speech_weight,
@@ -1376,6 +1528,8 @@ def train(
         feat_spec,
         clean_real,
         clean_imag,
+        interference_real,
+        interference_imag,
         snr,
         vad_weight,
         speech_weight,
@@ -1392,6 +1546,8 @@ def train(
             feat_spec,
             clean_real,
             clean_imag,
+            interference_real,
+            interference_imag,
             snr,
             vad_weight,
             speech_weight,
@@ -1420,6 +1576,8 @@ def train(
             feat_spec,
             clean_real,
             clean_imag,
+            interference_real,
+            interference_imag,
             snr,
             vad_weight,
             speech_weight,
@@ -1438,6 +1596,8 @@ def train(
                 feat_spec,
                 clean_real,
                 clean_imag,
+                interference_real,
+                interference_imag,
                 snr,
                 vad_weight,
                 speech_weight,
@@ -1459,6 +1619,8 @@ def train(
             feat_spec,
             clean_real,
             clean_imag,
+            interference_real,
+            interference_imag,
             snr,
             vad_weight,
             speech_weight,
@@ -1476,6 +1638,8 @@ def train(
                 feat_spec,
                 clean_real,
                 clean_imag,
+                interference_real,
+                interference_imag,
                 snr,
                 vad_weight,
                 speech_weight,
@@ -1648,6 +1812,7 @@ def train(
         spectral_loss_fn=spectral_loss,
         use_awesome_loss=use_awesome_loss,
         use_pipeline_awesome_loss=use_pipeline_awesome_loss,
+        use_contrastive_awesome_loss=use_contrastive_awesome_loss,
         use_vad_loss=use_vad_loss,
         use_vad_train_reg=use_vad_train_reg,
         use_mrstft_loss=use_mrstft_loss,
@@ -1656,6 +1821,15 @@ def train(
         mrstft_target_len=mrstft_target_len,
         awesome_mask_sharpness=awesome_mask_sharpness,
         awesome_warmup_steps=awesome_warmup_steps,
+        contrastive_loss_weight=contrastive_loss_weight,
+        contrastive_warmup_steps=contrastive_warmup_steps,
+        contrastive_temperature=contrastive_temperature,
+        contrastive_speech_frames_per_sample=contrastive_speech_frames_per_sample,
+        contrastive_interference_frames_per_sample=contrastive_interference_frames_per_sample,
+        contrastive_speech_mask_min=contrastive_speech_mask_min,
+        contrastive_interference_mask_max=contrastive_interference_mask_max,
+        contrastive_quiet_weight=contrastive_quiet_weight,
+        contrastive_in_batch_negatives=contrastive_in_batch_negatives,
         vad_band_mask=vad_band_mask,
         vad_band_bins=vad_band_bins,
         vad_z_threshold=vad_z_threshold,
@@ -1730,10 +1904,11 @@ def train(
             "vad_loss_weight": loop_state.epoch_vad_loss_weight,
             "vad_speech_loss_weight": loop_state.epoch_vad_speech_loss_weight,
         }
+        aux_weight_label = "contrastive_w" if use_contrastive_awesome_loss else "awesome_w"
         print(
             "  Stage "
             f"{loop_state.active_stage_index} ({loop_state.active_stage_name}) | "
-            f"awesome_w={loop_state.epoch_awesome_loss_weight:.4f} "
+            f"{aux_weight_label}={loop_state.epoch_awesome_loss_weight:.4f} "
             f"vad_w={loop_state.epoch_vad_loss_weight:.4f} speech_w={loop_state.epoch_vad_speech_loss_weight:.4f}"
         )
         _sync_data_stream_stage(loop_state.active_stage_index, loop_state.active_stage_name)
@@ -1971,6 +2146,8 @@ def train(
             noisy_imag = batch["noisy_imag"]
             clean_real = batch["clean_real"]
             clean_imag = batch["clean_imag"]
+            interference_real = batch["interference_real"]
+            interference_imag = batch["interference_imag"]
             feat_erb = batch["feat_erb"]
             feat_spec = batch["feat_spec"]
             snr = batch["snr"]
@@ -1986,6 +2163,8 @@ def train(
                 debugger.check("batch.noisy_imag", noisy_imag, debug_ctx)
                 debugger.check("batch.clean_real", clean_real, debug_ctx)
                 debugger.check("batch.clean_imag", clean_imag, debug_ctx)
+                debugger.check("batch.interference_real", interference_real, debug_ctx)
+                debugger.check("batch.interference_imag", interference_imag, debug_ctx)
                 debugger.check("batch.feat_erb", feat_erb, debug_ctx)
                 debugger.check("batch.feat_spec", feat_spec, debug_ctx)
                 debugger.check("batch.snr", snr, debug_ctx)
@@ -1998,6 +2177,8 @@ def train(
                 noisy_imag = noisy_imag.astype(mx.bfloat16)
                 clean_real = clean_real.astype(mx.bfloat16)
                 clean_imag = clean_imag.astype(mx.bfloat16)
+                interference_real = interference_real.astype(mx.bfloat16)
+                interference_imag = interference_imag.astype(mx.bfloat16)
                 feat_erb = feat_erb.astype(mx.bfloat16)
                 feat_spec = feat_spec.astype(mx.bfloat16)
 
@@ -2022,7 +2203,9 @@ def train(
                 _prev_speech_w_mx = mx.array(speech_weight, dtype=mx.float32)
             speech_weight_mx = _prev_speech_w_mx
             awesome_frac = 1.0
-            if (use_awesome_loss or use_pipeline_awesome_loss) and awesome_warmup_steps > 0:
+            if use_contrastive_awesome_loss and contrastive_warmup_steps > 0:
+                awesome_frac = min(1.0, loop_state.global_step / max(contrastive_warmup_steps, 1))
+            elif (use_awesome_loss or use_pipeline_awesome_loss) and awesome_warmup_steps > 0:
                 awesome_frac = min(1.0, loop_state.global_step / max(awesome_warmup_steps, 1))
             awesome_weight = loop_state.epoch_awesome_loss_weight * awesome_frac
             if awesome_weight != _prev_awesome_w:
@@ -2073,6 +2256,14 @@ def train(
                     check_dtype=use_fp16,
                     expected_dtype=mx.bfloat16 if use_fp16 else mx.float32,
                 )
+                if use_contrastive_awesome_loss:
+                    _assert_compile_boundary_shapes(
+                        interference_real,
+                        clean_real,
+                        batch_size,
+                        check_dtype=use_fp16,
+                        expected_dtype=mx.bfloat16 if use_fp16 else mx.float32,
+                    )
                 should_sync = (batch_idx + 1) % epoch_eval_frequency == 0
 
                 # Select the appropriate compiled functions. When the
@@ -2093,6 +2284,8 @@ def train(
                         feat_spec,
                         clean_real,
                         clean_imag,
+                        interference_real,
+                        interference_imag,
                         snr,
                         vad_weight_mx,
                         speech_weight_mx,
@@ -2144,6 +2337,8 @@ def train(
                         feat_spec,
                         clean_real,
                         clean_imag,
+                        interference_real,
+                        interference_imag,
                         snr,
                         vad_weight_mx,
                         speech_weight_mx,
@@ -2170,6 +2365,8 @@ def train(
                             feat_spec,
                             clean_real,
                             clean_imag,
+                            interference_real,
+                            interference_imag,
                             snr,
                             vad_weight_mx,
                             speech_weight_mx,
@@ -2209,6 +2406,8 @@ def train(
                     feat_spec,
                     clean_real,
                     clean_imag,
+                    interference_real,
+                    interference_imag,
                     snr,
                     vad_weight_mx,
                     speech_weight_mx,
@@ -2308,6 +2507,8 @@ def train(
                                 feat_spec,
                                 clean_real,
                                 clean_imag,
+                                interference_real,
+                                interference_imag,
                                 snr,
                                 debug_ctx,
                             )
@@ -2487,6 +2688,8 @@ def train(
                     noisy_imag=noisy_imag,
                     clean_real=clean_real,
                     clean_imag=clean_imag,
+                    interference_real=interference_real,
+                    interference_imag=interference_imag,
                     snr=snr,
                     model=model,
                     feat_erb=feat_erb,
@@ -2499,6 +2702,7 @@ def train(
                     use_vad_loss=use_vad_loss,
                     use_awesome_loss=use_awesome_loss,
                     use_pipeline_awesome_loss=use_pipeline_awesome_loss,
+                    use_contrastive_awesome_loss=use_contrastive_awesome_loss,
                     use_vad_train_reg=use_vad_train_reg,
                     use_fp16=use_fp16,
                     gan_active=gan_active,
@@ -2530,6 +2734,13 @@ def train(
                     vad_z_slope=vad_z_slope,
                     awesome_mask_sharpness=awesome_mask_sharpness,
                     vad_proxy_enabled=vad_proxy_enabled,
+                    contrastive_temperature=contrastive_temperature,
+                    contrastive_speech_frames_per_sample=contrastive_speech_frames_per_sample,
+                    contrastive_interference_frames_per_sample=contrastive_interference_frames_per_sample,
+                    contrastive_speech_mask_min=contrastive_speech_mask_min,
+                    contrastive_interference_mask_max=contrastive_interference_mask_max,
+                    contrastive_quiet_weight=contrastive_quiet_weight,
+                    contrastive_in_batch_negatives=contrastive_in_batch_negatives,
                     debugger=debugger,
                     debug_ctx=debug_ctx,
                     accums=_epoch_accums,
@@ -2553,6 +2764,7 @@ def train(
                     use_vad_loss=use_vad_loss,
                     use_awesome_loss=use_awesome_loss,
                     use_pipeline_awesome_loss=use_pipeline_awesome_loss,
+                    use_contrastive_awesome_loss=use_contrastive_awesome_loss,
                     use_vad_train_reg=use_vad_train_reg,
                     gan_active=gan_active,
                 )
@@ -2731,6 +2943,7 @@ def train(
             use_vad_loss=use_vad_loss,
             use_awesome_loss=use_awesome_loss,
             use_pipeline_awesome_loss=use_pipeline_awesome_loss,
+            use_contrastive_awesome_loss=use_contrastive_awesome_loss,
             use_mrstft_loss=use_mrstft_loss,
             use_vad_train_reg=use_vad_train_reg,
             gan_enabled=gan_enabled,

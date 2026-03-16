@@ -18,7 +18,7 @@ backbone_type = "attention"
 variant = "full"
 
 [loss]
-# Try typing 'dynamic_loss = ' and you'll see: "baseline", "awesome", "pipeline_awesome"
+# Try typing 'dynamic_loss = ' and you'll see: "baseline", "awesome", "pipeline_awesome", "contrastive_awesome"
 dynamic_loss = "pipeline_awesome"
 
 [loss.awesome]
@@ -26,6 +26,19 @@ loss_weight = 0.4
 mask_sharpness = 6.0
 warmup_steps = 2000
 proxy_enabled = true
+
+[loss.contrastive]
+loss_weight = 0.15
+warmup_steps = 2500
+temperature = 0.1
+embedding_dim = 128
+hidden_dim = 256
+speech_frames_per_sample = 32
+interference_frames_per_sample = 32
+speech_mask_min = 0.7
+interference_mask_max = 0.3
+quiet_weight = 0.5
+in_batch_negatives = true
 
 [loss.mrstft]
 factor = 0.2

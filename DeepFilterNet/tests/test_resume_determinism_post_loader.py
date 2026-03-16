@@ -28,9 +28,11 @@ def _make_sample(
     rng = np.random.RandomState(seed)
     spec = (rng.randn(time_frames, n_freqs) + 1j * rng.randn(time_frames, n_freqs)).astype(np.complex64)
     clean = (rng.randn(time_frames, n_freqs) + 1j * rng.randn(time_frames, n_freqs)).astype(np.complex64)
+    interference = (rng.randn(time_frames, n_freqs) + 1j * rng.randn(time_frames, n_freqs)).astype(np.complex64)
     return Sample(
         noisy_spec=spec,
         clean_spec=clean,
+        interference_spec=interference,
         feat_erb=rng.randn(time_frames, n_erb).astype(np.float32),
         feat_spec=rng.randn(time_frames, n_df, 2).astype(np.float32),
         snr=float(rng.uniform(-5, 30)),
@@ -44,6 +46,8 @@ def _old_stack_assemble(samples):
     noisy_imag = np.stack([s.noisy_spec.imag for s in samples])
     clean_real = np.stack([s.clean_spec.real for s in samples])
     clean_imag = np.stack([s.clean_spec.imag for s in samples])
+    interference_real = np.stack([s.interference_spec.real for s in samples])
+    interference_imag = np.stack([s.interference_spec.imag for s in samples])
     feat_erb = np.stack([s.feat_erb for s in samples])
     feat_spec = np.stack([s.feat_spec for s in samples])
     snr_arr = np.array([s.snr for s in samples], dtype=np.float32)
@@ -52,6 +56,8 @@ def _old_stack_assemble(samples):
         "noisy_imag": mx.array(noisy_imag),
         "clean_real": mx.array(clean_real),
         "clean_imag": mx.array(clean_imag),
+        "interference_real": mx.array(interference_real),
+        "interference_imag": mx.array(interference_imag),
         "feat_erb": mx.array(feat_erb),
         "feat_spec": mx.array(feat_spec),
         "snr": mx.array(snr_arr),
@@ -345,6 +351,7 @@ class TestSnrDtypeConsistency:
             s = Sample(
                 noisy_spec=s.noisy_spec,
                 clean_spec=s.clean_spec,
+                interference_spec=s.interference_spec,
                 feat_erb=s.feat_erb,
                 feat_spec=s.feat_spec,
                 snr=snr_val,

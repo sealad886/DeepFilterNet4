@@ -10,7 +10,7 @@ The MLX training pipeline (`df_mlx/train_dynamic.py`) computes a composite loss 
 
 The total generator loss is:
 
-$$L_{total} = L_{spec} + L_{mrstft} + w_{gan} \cdot L_{gen} + w_{fm} \cdot L_{fm} + w_{awesome} \cdot L_{awesome} + w_{vad} \cdot L_{vad\_proxy} + w_{vad} \cdot L_{vad\_head} + w_{speech} \cdot L_{speech} + w_{vad\_reg} \cdot L_{vad\_reg}$$
+$$L_{total} = L_{spec} + L_{mrstft} + w_{gan} \cdot L_{gen} + w_{fm} \cdot L_{fm} + w_{awesome} \cdot L_{awesome} + w_{ctr} \cdot L_{contrastive} + w_{vad} \cdot L_{vad\_proxy} + w_{vad} \cdot L_{vad\_head} + w_{speech} \cdot L_{speech} + w_{vad\_reg} \cdot L_{vad\_reg}$$
 
 Each component is optionally enabled by config flags. The discriminator has a separate loss and optimizer (§2.5, §3.6).
 
@@ -63,7 +63,7 @@ Magnitude-only losses can produce "right energy, wrong texture" audio. Adding co
 |---|---|
 | **Source** | [df_mlx/train.py](../DeepFilterNet/df_mlx/train.py#L416-L575) — `MultiResolutionSTFTLoss` class |
 | **Measures** | Spectral fidelity at multiple frequency resolutions simultaneously. |
-| **Operates on** | Waveforms (requires iSTFT conversion from spectrogram domain first; see §2.11). |
+| **Operates on** | Waveforms (requires iSTFT conversion from spectrogram domain first; see §2.12). |
 
 **Formula:**
 
@@ -229,7 +229,7 @@ Hinge GAN objectives often train more stably than vanilla BCE GANs in speech/aud
 | | |
 |---|---|
 | **Source** | [df_mlx/training_losses.py](../DeepFilterNet/df_mlx/training_losses.py#L398-L499) — `_compute_awesome_losses()` |
-| **Measures** | Speech-preserving contrastive quality via three sub-components. |
+| **Measures** | Speech-preserving weighted reconstruction quality via three sub-components. |
 
 **Sub-components:**
 
@@ -259,7 +259,7 @@ $$L_{awesome} = L_{speech} + L_{noise} + 0.2 \cdot L_{smooth}$$
 	- **How chosen:** empirical compromise; enough to reduce musical noise without over-smoothing consonants.
 
 **Real-world connection:**
-This is effectively a hand-crafted multi-objective balancing intelligibility (speech term), comfort (noise term), and artifact control (smoothness).
+This is effectively a hand-crafted multi-objective balancing intelligibility (speech term), comfort (noise term), and artifact control (smoothness). Despite the name, it is **not** a modern contrastive objective; it is a weighted reconstruction loss.
 
 **Mask computation:** $m = \sigma\!\bigl(\text{sharpness} \cdot (\text{clean\_log} - \text{noise\_log})\bigr)$, clamped to $\pm 30$ logits, then `stop_gradient`.
 
@@ -282,7 +282,79 @@ This is effectively a hand-crafted multi-objective balancing intelligibility (sp
 
 ---
 
-### 2.7 Pipeline Awesome Loss
+### 2.7 Contrastive Awesome Loss
+
+| | |
+|---|---|
+| **Source** | [df_mlx/training_losses.py](../DeepFilterNet/df_mlx/training_losses.py#L788-L989) — `_compute_contrastive_awesome_losses()` |
+| **Measures** | Local embedding-space InfoNCE on aligned enhanced/clean/noisy/interference frames. |
+
+`contrastive_awesome` is an **experimental, train_dynamic-only** auxiliary loss. It reuses the legacy AWESOME teacher mask and proxy gates only for **frame mining and weighting**, then applies a true contrastive objective in a learned frame-embedding space.
+
+**Frame feature construction:**
+
+For each frame, the projector consumes the full-frequency concatenation of real, imaginary, and log-magnitude channels:
+
+$$x_t = [R_t \;\|\; I_t \;\|\; \log(1 + |S_t|)]$$
+
+The train-only `ContrastiveFrameProjector` maps this feature to a normalized embedding:
+
+$$z_t = \frac{P(x_t)}{\|P(x_t)\|_2}$$
+
+with the implemented MLP:
+
+$$P(x) = W_2 \cdot \mathrm{LayerNorm}(\mathrm{GELU}(W_1 x + b_1)) + b_2$$
+
+**Frame mining:**
+
+- Speech-heavy frames: top-k by `mean(mask_t) * proxy_frame_t`
+- Interference-heavy frames: top-k by `mean(1 - mask_t)`
+- `mask` and `proxy_frame` are wrapped in `stop_gradient`, so they act as non-learned teacher signals
+
+**Per-frame contrastive objective:**
+
+For each selected frame:
+- **query** = enhanced embedding
+- **positive** = aligned clean embedding
+- **negatives** = aligned noisy-mixture embedding, aligned combined-interference embedding, and optional in-batch clean embeddings from other samples
+
+The local InfoNCE term is:
+
+$$L_{ctr}(q, p, \mathcal{N}) = -\log \frac{\exp(\mathrm{sim}(q, p) / \tau)}{\exp(\mathrm{sim}(q, p) / \tau) + \sum_{n \in \mathcal{N}} \exp(\mathrm{sim}(q, n) / \tau)}$$
+
+with cosine similarity and temperature $\tau$.
+
+**Sub-components:**
+
+| Sub-loss | Purpose |
+|----------|---------|
+| Speech contrastive | Align enhanced speech-heavy frames with clean speech, repel noisy/interference frames |
+| Quiet/interference contrastive | Keep interference-heavy regions close to clean targets while repelling noisy/interference embeddings |
+
+**Total:**
+
+$$L_{contrastive} = L_{speech\_ctr} + w_{quiet} \cdot L_{quiet\_ctr}$$
+
+**Config options:**
+
+| Parameter | Description |
+|-----------|-------------|
+| `dynamic_loss = "contrastive_awesome"` | Enables the mode |
+| `loss.contrastive.loss_weight` | Multiplier in total loss |
+| `loss.contrastive.warmup_steps` | Linear ramp for the contrastive weight |
+| `loss.contrastive.temperature` | InfoNCE temperature |
+| `loss.contrastive.embedding_dim` / `hidden_dim` | Train-only projector dimensions |
+| `loss.contrastive.speech_frames_per_sample` | Speech-side top-k mining |
+| `loss.contrastive.interference_frames_per_sample` | Interference-side top-k mining |
+| `loss.contrastive.speech_mask_min` / `interference_mask_max` | Eligibility thresholds for frame mining |
+| `loss.contrastive.quiet_weight` | Weight on the quiet/interference branch |
+| `loss.contrastive.in_batch_negatives` | Whether to use other samples' clean frames as extra negatives |
+
+**Important scope note:** V1 contrastive AWESOME is supported only in `train_dynamic.py`. The precomputed datastore path (`train_with_data.py`) does not provide the required `interference_real`/`interference_imag` batch contract.
+
+---
+
+### 2.8 Pipeline Awesome Loss
 
 | | |
 |---|---|
@@ -335,7 +407,7 @@ Useful in mixed-content audio (speech + background media/music), where naive den
 
 ---
 
-### 2.8 VAD Losses (Proxy + Multi-task Head)
+### 2.9 VAD Losses (Proxy + Multi-task Head)
 
 | | |
 |---|---|
@@ -389,7 +461,7 @@ Proxy term protects speech regions from being erased; head term learns deployabl
 
 ---
 
-### 2.9 Speech Band Log-Magnitude Loss
+### 2.10 Speech Band Log-Magnitude Loss
 
 | | |
 |---|---|
@@ -420,7 +492,7 @@ Directly protects intelligibility-critical telephone band cues (vowels/formants/
 
 ---
 
-### 2.10 VAD Regulariser
+### 2.11 VAD Regulariser
 
 | | |
 |---|---|
@@ -455,13 +527,13 @@ Acts like a targeted safety regularizer: it is not always-on, but periodically n
 | `vad_train_every_steps` | Deterministic step cadence for applying the regularizer |
 | `vad_loss_weight` | Base coefficient reused as `vad_reg_weight` when the sparse gate fires |
 
-**Effect of weight change:** Complements VAD loss (§2.8) with finer-grained speech-ratio–aware control. Increasing adds stronger regularisation pressure on speech-present frames.
+**Effect of weight change:** Complements VAD loss (§2.9) with finer-grained speech-ratio–aware control. Increasing adds stronger regularisation pressure on speech-present frames.
 
 **Objective note:** This term is applied sparsely during training. Validation logs `vad_reg` as a separate metric but does not include it in the early-stopping validation objective.
 
 ---
 
-### 2.11 MRSTFT Helper (Waveform Wrapper)
+### 2.12 MRSTFT Helper (Waveform Wrapper)
 
 | | |
 |---|---|

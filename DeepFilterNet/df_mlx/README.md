@@ -217,9 +217,9 @@ Supported sections:
 Unsupported sections (e.g. `[ASRLoss]`, `[MaskLoss]`, `[SpectralLoss]`) are ignored with warnings.
 Use `df/train.py` for ASR loss; GAN training is supported directly in `train_dynamic`.
 
-#### Awesome dynamic loss (speech-preserving)
+#### Awesome dynamic loss (weighted reconstruction)
 
-Enable the speech-preserving contrastive loss and cheap VAD proxy gating:
+Enable the weighted-reconstruction AWESOME loss and cheap VAD proxy gating:
 
 ```bash
 python -m df_mlx.train_dynamic \
@@ -250,6 +250,42 @@ Optional VAD controls (all optional; defaults are safe):
 
 # Disable proxy gating if needed
 --no-vad-proxy
+```
+
+#### Experimental contrastive AWESOME (local InfoNCE)
+
+Enable the experimental `contrastive_awesome` mode to add a train-only frame
+projector and local embedding-space InfoNCE over aligned clean / noisy /
+combined-interference frames. This mode is currently supported **only** in
+`train_dynamic`; it is not wired into `train_with_data`.
+
+```bash
+python -m df_mlx.train_dynamic \
+    --config ./file_lists/config.json \
+    --epochs 100 \
+    --batch-size 8 \
+    --dynamic-loss contrastive_awesome \
+    --contrastive-loss-weight 0.15 \
+    --contrastive-warmup-steps 2500 \
+    --contrastive-temperature 0.1 \
+    --contrastive-embedding-dim 128 \
+    --contrastive-hidden-dim 256 \
+    --contrastive-speech-frames-per-sample 32 \
+    --contrastive-interference-frames-per-sample 32
+```
+
+Useful controls:
+
+```bash
+# Tighten or relax frame-mining thresholds
+--contrastive-speech-mask-min 0.7 \
+--contrastive-interference-mask-max 0.3
+
+# Reweight the quiet/interference branch
+--contrastive-quiet-weight 0.5
+
+# Disable in-batch clean-frame negatives
+--no-contrastive-in-batch-negatives
 ```
 
 #### Multi-res STFT loss (speech clarity)

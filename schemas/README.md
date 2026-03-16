@@ -71,7 +71,7 @@ JSON Schema for `df_mlx.train_dynamic` run configurations.
 - `[dataloader]` - Workers, prefetch, MLX data settings
 - `[checkpoint]` - Save/resume strategy and directory
 - `[model]` - Backbone type and variant
-- `[loss]` - Dynamic loss type, awesome loss, multi-res STFT
+- `[loss]` - Dynamic loss type, awesome loss, contrastive awesome, multi-res STFT
 - `[gan]` - GAN training configuration
 - `[vad]` - Voice activity detection settings
 - `[metrics]` - Evaluation metrics
@@ -95,7 +95,13 @@ fp16 = "auto"  # IDE will suggest: "auto", true, false
 backbone_type = "attention"  # Options: "mamba", "gru", "attention"
 
 [loss]
-dynamic_loss = "pipeline_awesome"  # Options: "baseline", "awesome", "pipeline_awesome"
+dynamic_loss = "contrastive_awesome"  # Options: "baseline", "awesome", "pipeline_awesome", "contrastive_awesome"
+
+[loss.contrastive]
+loss_weight = 0.15
+temperature = 0.1
+embedding_dim = 128
+speech_frames_per_sample = 32
 
 [gan]
 enabled = true

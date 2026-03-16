@@ -929,6 +929,46 @@ class HybridEncoder(nn.Module):
 # ============================================================================
 
 
+class ContrastiveFrameProjector(nn.Module):
+    """Train-only projector for local contrastive frame embeddings.
+
+    The projector is intentionally decoupled from the inference forward path.
+    It consumes per-frame complex STFT features built from the concatenation of
+    ``[real, imag, log1p_mag]`` over the frequency axis and returns L2-normalized
+    embeddings suitable for cosine-similarity / InfoNCE losses.
+    """
+
+    def __init__(self, n_freqs: int, hidden_dim: int = 256, embedding_dim: int = 128):
+        super().__init__()
+        self.n_freqs = int(n_freqs)
+        self.input_dim = int(3 * n_freqs)
+        self.hidden_dim = int(hidden_dim)
+        self.embedding_dim = int(embedding_dim)
+        self.fc_in = nn.Linear(self.input_dim, self.hidden_dim)
+        self.norm = nn.LayerNorm(self.hidden_dim)
+        self.fc_out = nn.Linear(self.hidden_dim, self.embedding_dim)
+
+    def build_features(self, real: mx.array, imag: mx.array) -> mx.array:
+        """Build per-frame projector inputs from complex STFT frames."""
+        real_f32 = real.astype(mx.float32) if real.dtype != mx.float32 else real
+        imag_f32 = imag.astype(mx.float32) if imag.dtype != mx.float32 else imag
+        log_mag = mx.log1p(mx.sqrt(real_f32**2 + imag_f32**2 + 1e-8))
+        return mx.concatenate([real_f32, imag_f32, log_mag], axis=-1)
+
+    def __call__(self, frame_features: mx.array) -> mx.array:
+        """Project per-frame features to normalized contrastive embeddings."""
+        x = self.fc_in(frame_features)
+        x = nn.gelu(x)
+        x = self.norm(x)
+        x = self.fc_out(x)
+        denom = mx.sqrt(mx.sum(x * x, axis=-1, keepdims=True) + 1e-8)
+        return x / denom
+
+    def project_complex_frames(self, real: mx.array, imag: mx.array) -> mx.array:
+        """Project complex STFT frames directly."""
+        return self(self.build_features(real, imag))
+
+
 class DfNet4(nn.Module):
     """DeepFilterNet4 main model.
 
@@ -946,6 +986,8 @@ class DfNet4(nn.Module):
         p: Optional[ModelParams4] = None,
         lsnr_dropout: Optional[bool] = None,
         lsnr_dropout_threshold: Optional[float] = None,
+        contrastive_hidden_dim: int | None = None,
+        contrastive_embedding_dim: int | None = None,
     ):
         super().__init__()
 
@@ -1044,6 +1086,17 @@ class DfNet4(nn.Module):
             )
         else:
             self.df_op = None
+
+        self.contrastive_projector: ContrastiveFrameProjector | None = None
+        if contrastive_hidden_dim is not None or contrastive_embedding_dim is not None:
+            hidden_dim = 256 if contrastive_hidden_dim is None else int(contrastive_hidden_dim)
+            embedding_dim = 128 if contrastive_embedding_dim is None else int(contrastive_embedding_dim)
+            n_freqs = p.fft_size // 2 + 1
+            self.contrastive_projector = ContrastiveFrameProjector(
+                n_freqs=n_freqs,
+                hidden_dim=hidden_dim,
+                embedding_dim=embedding_dim,
+            )
 
     def _pad_features(self, x: mx.array, lookahead: int) -> mx.array:
         """Apply lookahead padding to features.
@@ -1332,6 +1385,17 @@ class DfNet4(nn.Module):
 
         return spec_out, lsnr
 
+    @property
+    def has_contrastive_projector(self) -> bool:
+        """Whether a train-only contrastive projector is attached."""
+        return self.contrastive_projector is not None
+
+    def project_contrastive_frames(self, real: mx.array, imag: mx.array) -> mx.array:
+        """Project complex STFT frames using the optional train-only head."""
+        if self.contrastive_projector is None:
+            raise RuntimeError("Contrastive projector requested but not initialized on the model")
+        return self.contrastive_projector.project_complex_frames(real, imag)
+
     def enhance(
         self,
         noisy_audio: mx.array,
@@ -1393,7 +1457,12 @@ class DfNet4Lite(DfNet4):
     Uses smaller hidden dimensions and fewer layers.
     """
 
-    def __init__(self, p: Optional[ModelParams4] = None):
+    def __init__(
+        self,
+        p: Optional[ModelParams4] = None,
+        contrastive_hidden_dim: int | None = None,
+        contrastive_embedding_dim: int | None = None,
+    ):
         if p is None:
             p = get_default_config()
 
@@ -1408,7 +1477,11 @@ class DfNet4Lite(DfNet4):
         p.erb.erb_hidden = 32
         p.backbone.nb_layers = 2
 
-        super().__init__(p)
+        super().__init__(
+            p,
+            contrastive_hidden_dim=contrastive_hidden_dim,
+            contrastive_embedding_dim=contrastive_embedding_dim,
+        )
 
 
 # ============================================================================
@@ -1988,6 +2061,8 @@ class StreamingDfNet4(nn.Module):
 def init_model(
     config: Optional[ModelParams4] = None,
     variant: Literal["full", "lite"] = "full",
+    contrastive_hidden_dim: int | None = None,
+    contrastive_embedding_dim: int | None = None,
 ) -> DfNet4:
     """Initialize a DeepFilterNet4 model.
 
@@ -1999,8 +2074,16 @@ def init_model(
         Initialized model
     """
     if variant == "lite":
-        return DfNet4Lite(config)
-    return DfNet4(config)
+        return DfNet4Lite(
+            config,
+            contrastive_hidden_dim=contrastive_hidden_dim,
+            contrastive_embedding_dim=contrastive_embedding_dim,
+        )
+    return DfNet4(
+        config,
+        contrastive_hidden_dim=contrastive_hidden_dim,
+        contrastive_embedding_dim=contrastive_embedding_dim,
+    )
 
 
 def count_parameters(model: nn.Module) -> int:

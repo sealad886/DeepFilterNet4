@@ -122,6 +122,7 @@ def _apply_cli_overrides(cfg: RunConfig, args: argparse.Namespace, argv: list[st
         (["--cache-dir"], "dataset.cache_dir", getattr(args, "cache_dir", None)),
         (["--speech-list"], "dataset.speech_list", getattr(args, "speech_list", None)),
         (["--noise-list"], "dataset.noise_list", getattr(args, "noise_list", None)),
+        (["--music-list"], "dataset.music_list", getattr(args, "music_list", None)),
         (["--rir-list"], "dataset.rir_list", getattr(args, "rir_list", None)),
         (["--config"], "dataset.config", getattr(args, "config", None)),
         (["--train-config"], "training.train_config", getattr(args, "train_config", None)),
@@ -144,6 +145,11 @@ def _apply_cli_overrides(cfg: RunConfig, args: argparse.Namespace, argv: list[st
             getattr(args, "p_interfer_speech", None),
         ),
         (
+            ["--p-background-music"],
+            "dataset.p_background_music",
+            getattr(args, "p_background_music", None),
+        ),
+        (
             ["--curriculum-warmup-epochs"],
             "training.curriculum_warmup_epochs",
             getattr(args, "curriculum_warmup_epochs", None),
@@ -157,6 +163,11 @@ def _apply_cli_overrides(cfg: RunConfig, args: argparse.Namespace, argv: list[st
             ["--noise-gain-range"],
             "dataset.noise_gain_range",
             getattr(args, "noise_gain_range", None),
+        ),
+        (
+            ["--background-music-gain-range"],
+            "dataset.background_music_gain_range",
+            getattr(args, "background_music_gain_range", None),
         ),
         (["--p-reverb"], "augmentation.p_reverb", getattr(args, "p_reverb", None)),
         (["--p-clipping"], "augmentation.p_clipping", getattr(args, "p_clipping", None)),
@@ -229,6 +240,56 @@ def _apply_cli_overrides(cfg: RunConfig, args: argparse.Namespace, argv: list[st
             ["--awesome-warmup-steps"],
             "loss.awesome.warmup_steps",
             getattr(args, "awesome_warmup_steps", None),
+        ),
+        (
+            ["--contrastive-loss-weight"],
+            "loss.contrastive.loss_weight",
+            getattr(args, "contrastive_loss_weight", None),
+        ),
+        (
+            ["--contrastive-warmup-steps"],
+            "loss.contrastive.warmup_steps",
+            getattr(args, "contrastive_warmup_steps", None),
+        ),
+        (
+            ["--contrastive-temperature"],
+            "loss.contrastive.temperature",
+            getattr(args, "contrastive_temperature", None),
+        ),
+        (
+            ["--contrastive-embedding-dim"],
+            "loss.contrastive.embedding_dim",
+            getattr(args, "contrastive_embedding_dim", None),
+        ),
+        (
+            ["--contrastive-hidden-dim"],
+            "loss.contrastive.hidden_dim",
+            getattr(args, "contrastive_hidden_dim", None),
+        ),
+        (
+            ["--contrastive-speech-frames-per-sample"],
+            "loss.contrastive.speech_frames_per_sample",
+            getattr(args, "contrastive_speech_frames_per_sample", None),
+        ),
+        (
+            ["--contrastive-interference-frames-per-sample"],
+            "loss.contrastive.interference_frames_per_sample",
+            getattr(args, "contrastive_interference_frames_per_sample", None),
+        ),
+        (
+            ["--contrastive-speech-mask-min"],
+            "loss.contrastive.speech_mask_min",
+            getattr(args, "contrastive_speech_mask_min", None),
+        ),
+        (
+            ["--contrastive-interference-mask-max"],
+            "loss.contrastive.interference_mask_max",
+            getattr(args, "contrastive_interference_mask_max", None),
+        ),
+        (
+            ["--contrastive-quiet-weight"],
+            "loss.contrastive.quiet_weight",
+            getattr(args, "contrastive_quiet_weight", None),
         ),
         (["--mrstft-factor"], "loss.mrstft.factor", getattr(args, "mrstft_factor", None)),
         (["--mrstft-gamma"], "loss.mrstft.gamma", getattr(args, "mrstft_gamma", None)),
@@ -335,6 +396,8 @@ def _apply_cli_overrides(cfg: RunConfig, args: argparse.Namespace, argv: list[st
         set_by_path(cfg, "dataloader.use_mlx_data", False)
     if _flag_in_argv(["--no-vad-proxy"], argv):
         set_by_path(cfg, "loss.awesome.proxy_enabled", False)
+    if _flag_in_argv(["--no-contrastive-in-batch-negatives"], argv):
+        set_by_path(cfg, "loss.contrastive.in_batch_negatives", False)
     if _flag_in_argv(["--cache-hf"], argv):
         set_by_path(
             cfg,
