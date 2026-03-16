@@ -548,6 +548,7 @@ def train(
         dynamic_loss=dynamic_loss,
         pipeline_stages=pipeline_stages,
         awesome_loss_weight=awesome_loss_weight,
+        contrastive_loss_weight=contrastive_loss_weight,
         vad_loss_weight=vad_loss_weight,
         vad_speech_loss_weight=vad_speech_loss_weight,
         mrstft_config=mrstft_config,
@@ -1033,7 +1034,7 @@ def train(
             total_loss = total_loss + awesome_weight * pipeline_loss
 
         if use_contrastive_awesome_loss:
-            contrastive_loss, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _ = _compute_contrastive_awesome_losses(
+            contrastive_loss, _, _, _, _, _, _, _, _, _, _, _, _, _, _ = _compute_contrastive_awesome_losses(
                 noisy_real,
                 noisy_imag,
                 clean_real,
@@ -1264,7 +1265,7 @@ def train(
                 total_loss = total_loss + awesome_weight * pipeline_loss
 
             if use_contrastive_awesome_loss:
-                contrastive_loss, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _ = _compute_contrastive_awesome_losses(
+                contrastive_loss, _, _, _, _, _, _, _, _, _, _, _, _, _, _ = _compute_contrastive_awesome_losses(
                     noisy_real,
                     noisy_imag,
                     clean_real,
