@@ -28,7 +28,7 @@ import numpy as np
 from .checkpoint import _filter_checkpoint_weights_for_model
 from .config import LossConfig, TrainConfig
 from .loss import SpectralLoss
-from .metal_kernels import fused_complex_mag
+from .metal_kernels import _EPS_F, fused_complex_mag
 from .model import DfNet4, count_parameters
 
 # ============================================================================
@@ -377,8 +377,8 @@ def spectral_loss(
     # Magnitude loss — tuned Metal kernel benchmarked faster than native MLX
     # across representative training shapes, with the largest gains on larger
     # spectra. Keep eps aligned with the reference implementation.
-    pred_mag = fused_complex_mag(pred_real, pred_imag, eps=1e-8)
-    target_mag = fused_complex_mag(target_real, target_imag, eps=1e-8)
+    pred_mag = fused_complex_mag(pred_real, pred_imag, eps=_EPS_F)
+    target_mag = fused_complex_mag(target_real, target_imag, eps=_EPS_F)
     mag_loss = mx.mean(mx.abs(pred_mag - target_mag))
 
     # Complex loss

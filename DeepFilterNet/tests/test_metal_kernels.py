@@ -11,6 +11,7 @@ import mlx.core as mx
 import numpy as np
 
 from df_mlx.metal_kernels import (
+    _EPS_F,
     _ref_band_energy,
     _ref_complex_mag,
     _ref_log1p_mag,
@@ -116,8 +117,8 @@ class TestFusedLog1pMag:
         """Batched log1p magnitude should match concatenated per-item execution."""
         B, T, F = 12, 180, 481
         real, imag = _rand_complex((B, T, F))
-        batched = fused_log1p_mag(real, imag, eps=1e-8)
-        pieces = [fused_log1p_mag(real[i : i + 1], imag[i : i + 1], eps=1e-8) for i in range(B)]
+        batched = fused_log1p_mag(real, imag, eps=_EPS_F)
+        pieces = [fused_log1p_mag(real[i : i + 1], imag[i : i + 1], eps=_EPS_F) for i in range(B)]
         stacked = mx.concatenate(pieces, axis=0)
         mx.eval(batched, stacked)
         assert _select_log1p_mag_threadgroup(real) == 512
@@ -180,8 +181,8 @@ class TestFusedComplexMag:
         """
         B, T, F = 12, 180, 481
         real, imag = _rand_complex((B, T, F))
-        batched = fused_complex_mag(real, imag, eps=1e-8)
-        pieces = [fused_complex_mag(real[i : i + 1], imag[i : i + 1], eps=1e-8) for i in range(B)]
+        batched = fused_complex_mag(real, imag, eps=_EPS_F)
+        pieces = [fused_complex_mag(real[i : i + 1], imag[i : i + 1], eps=_EPS_F) for i in range(B)]
         stacked = mx.concatenate(pieces, axis=0)
         mx.eval(batched, stacked)
         assert _select_complex_mag_threadgroup(real) == 256
@@ -196,8 +197,8 @@ class TestSpectralLossWiring:
 
         fused = spectral_loss((real_pred, imag_pred), (real_target, imag_target), alpha=0.5)
 
-        pred_mag = _ref_complex_mag(real_pred, imag_pred, eps=1e-8)
-        target_mag = _ref_complex_mag(real_target, imag_target, eps=1e-8)
+        pred_mag = _ref_complex_mag(real_pred, imag_pred, eps=_EPS_F)
+        target_mag = _ref_complex_mag(real_target, imag_target, eps=_EPS_F)
         ref_mag_loss = mx.mean(mx.abs(pred_mag - target_mag))
         ref_complex_loss = mx.mean(mx.abs(real_pred - real_target) + mx.abs(imag_pred - imag_target))
         ref = 0.5 * ref_mag_loss + 0.5 * ref_complex_loss

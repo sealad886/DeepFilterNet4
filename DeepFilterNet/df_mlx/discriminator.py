@@ -19,6 +19,8 @@ from typing import List, Tuple
 import mlx.core as mx
 import mlx.nn as nn
 
+from .metal_kernels import _EPS_F
+
 # ============================================================================
 # Utility Functions
 # ============================================================================
@@ -514,7 +516,7 @@ class SpectralDiscriminator(nn.Module):
         from .ops import stft
 
         real, imag = stft(x, n_fft=self.n_fft, hop_length=self.hop_length)
-        mag = mx.sqrt(real**2 + imag**2 + 1e-8)
+        mag = mx.sqrt(real**2 + imag**2 + _EPS_F)
         # (batch, freq, time) -> (batch, time, freq, 1)
         mag = mx.transpose(mag, (0, 2, 1))
         return mx.expand_dims(mag, axis=-1)

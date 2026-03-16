@@ -29,8 +29,15 @@ from functools import lru_cache
 
 import mlx.core as mx
 
-# Numerical stability constant (matches training_losses._EPS and train.spectral_loss)
-_EPS_F = 1e-8
+# Magnitude/log-magnitude stability constant.
+# Tuned via adversarial quiet-bin bias analysis: 1e-10 materially reduces
+# artificial floors for very low-energy bins while remaining numerically safe
+# for the complex-magnitude and log1p-magnitude kernels.
+_EPS_F = 1e-10
+# Reduction/statistics epsilon used by fused_band_energy and log-energy style
+# reductions. This remains higher because it protects denominators and log10
+# energy reductions rather than directly flooring complex magnitudes.
+_BAND_ENERGY_EPS_F = 1e-8
 _DEFAULT_LOG1P_MAG_THREADGROUP = 512
 _DEFAULT_COMPLEX_MAG_THREADGROUP = 512
 _COMPLEX_MAG_LARGE_WORKLOAD_THRESHOLD = 1_000_000
@@ -353,7 +360,7 @@ def _native_band_energy(
     imag: mx.array,
     band_mask: mx.array,
     band_bins: float,
-    eps: float = _EPS_F,
+    eps: float = _BAND_ENERGY_EPS_F,
 ) -> tuple[mx.array, mx.array]:
     """Numerically stable native MLX implementation used for tiny workloads."""
     real_f32 = real.astype(mx.float32) if real.dtype != mx.float32 else real
@@ -378,7 +385,7 @@ def fused_band_energy(
     imag: mx.array,
     band_mask: mx.array,
     band_bins: float,
-    eps: float = _EPS_F,
+    eps: float = _BAND_ENERGY_EPS_F,
 ) -> tuple[mx.array, mx.array]:
     """Fused power → masked-sum-over-F → log10 in a single GPU kernel.
 
@@ -439,7 +446,7 @@ def _ref_band_energy(
     imag: mx.array,
     band_mask: mx.array,
     band_bins: float,
-    eps: float = _EPS_F,
+    eps: float = _BAND_ENERGY_EPS_F,
 ) -> tuple[mx.array, mx.array]:
     """Reference (standard MLX ops) for fused_band_energy."""
     power = real * real + imag * imag

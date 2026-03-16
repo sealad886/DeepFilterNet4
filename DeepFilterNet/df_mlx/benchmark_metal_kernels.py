@@ -27,6 +27,7 @@ import numpy as np
 from df_mlx.benchmark_common import parse_float_list, parse_int_list, safe_percentile
 from df_mlx.benchmark_train_step import collect_reproducibility_metadata
 from df_mlx.metal_kernels import (
+    _BAND_ENERGY_EPS_F,
     _EPS_F,
     _dispatch_complex_mag_forward,
     _dispatch_log1p_mag_forward,
@@ -116,7 +117,8 @@ def run_path_benchmarks(
     warmup: int,
     iters: int,
     threadgroups: list[int],
-    eps: float,
+    mag_eps: float,
+    band_eps: float,
 ) -> list[dict[str, Any]]:
     rng = np.random.default_rng(42)
     results: list[dict[str, Any]] = []
@@ -125,15 +127,19 @@ def run_path_benchmarks(
         real = mx.array(rng.standard_normal((bsz, frames, n_freqs)).astype(np.float32))
         imag = mx.array(rng.standard_normal((bsz, frames, n_freqs)).astype(np.float32))
         mask, bins = _band_mask(n_freqs)
-        params = _make_params(real, eps)
+        params = _make_params(real, mag_eps)
         mx.eval(real, imag, mask, params)
 
-        log1p_native = _benchmark(lambda: mx.eval(_ref_log1p_mag(real, imag, eps=eps)), warmup, iters)
-        log1p_fused = _benchmark(lambda: mx.eval(fused_log1p_mag(real, imag, eps=eps)), warmup, iters)
-        complex_native = _benchmark(lambda: mx.eval(_ref_complex_mag(real, imag, eps=eps)), warmup, iters)
-        complex_fused = _benchmark(lambda: mx.eval(fused_complex_mag(real, imag, eps=eps)), warmup, iters)
-        band_native = _benchmark(lambda: mx.eval(*_ref_band_energy(real, imag, mask, bins, eps=eps)), warmup, iters)
-        band_fused = _benchmark(lambda: mx.eval(*fused_band_energy(real, imag, mask, bins, eps=eps)), warmup, iters)
+        log1p_native = _benchmark(lambda: mx.eval(_ref_log1p_mag(real, imag, eps=mag_eps)), warmup, iters)
+        log1p_fused = _benchmark(lambda: mx.eval(fused_log1p_mag(real, imag, eps=mag_eps)), warmup, iters)
+        complex_native = _benchmark(lambda: mx.eval(_ref_complex_mag(real, imag, eps=mag_eps)), warmup, iters)
+        complex_fused = _benchmark(lambda: mx.eval(fused_complex_mag(real, imag, eps=mag_eps)), warmup, iters)
+        band_native = _benchmark(
+            lambda: mx.eval(*_ref_band_energy(real, imag, mask, bins, eps=band_eps)), warmup, iters
+        )
+        band_fused = _benchmark(
+            lambda: mx.eval(*fused_band_energy(real, imag, mask, bins, eps=band_eps)), warmup, iters
+        )
 
         log1p_tgs = {
             str(tg): asdict(
@@ -244,7 +250,8 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--iters", type=int, default=35)
     parser.add_argument("--threadgroups", type=parse_int_list, default=parse_int_list(DEFAULT_THREADGROUPS))
-    parser.add_argument("--eps", type=float, default=_EPS_F)
+    parser.add_argument("--mag-eps", type=float, default=_EPS_F)
+    parser.add_argument("--band-eps", type=float, default=_BAND_ENERGY_EPS_F)
     parser.add_argument("--eps-values", type=parse_float_list, default=parse_float_list(DEFAULT_EPS_VALUES))
     parser.add_argument("--scales", type=parse_float_list, default=parse_float_list(DEFAULT_SCALES))
     parser.add_argument("--output", type=Path, default=Path("logs") / "metal_kernel_benchmark_latest.json")
@@ -258,7 +265,8 @@ def main() -> None:
                 "warmup": args.warmup,
                 "iters": args.iters,
                 "threadgroups": args.threadgroups,
-                "eps": args.eps,
+                "mag_eps": args.mag_eps,
+                "band_eps": args.band_eps,
                 "eps_values": args.eps_values,
                 "scales": args.scales,
             }
@@ -271,7 +279,8 @@ def main() -> None:
             warmup=args.warmup,
             iters=args.iters,
             threadgroups=args.threadgroups,
-            eps=args.eps,
+            mag_eps=args.mag_eps,
+            band_eps=args.band_eps,
         )
 
     if args.mode in {"eps", "all"}:

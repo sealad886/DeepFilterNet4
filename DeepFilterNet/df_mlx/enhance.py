@@ -17,7 +17,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Tuple, Union
+from typing import Iterator, List, Optional, Tuple, Union
 
 import mlx.core as mx
 import numpy as np
@@ -27,6 +27,7 @@ from ._audio_io import resample_audio
 from .checkpoint import load_model as load_checkpoint_model
 from .config import ModelParams4, load_config
 from .deepfilternet3 import DFNet3, ModelParams3, build_dfnet3_model, load_dfnet3_config
+from .metal_kernels import _EPS_F
 from .model import DfNet4, StreamingDfNet4
 from .vad_silero import SileroVAD, SileroVADConfig
 
@@ -557,7 +558,7 @@ def enhance(
     spec_real, spec_imag = stft(audio, n_fft=n_fft, hop_length=hop)
 
     # Compute features
-    mag = mx.sqrt(spec_real**2 + spec_imag**2 + 1e-8)
+    mag = mx.sqrt(spec_real**2 + spec_imag**2 + _EPS_F)
     erb_fb = model._erb_fb
     feat_erb = mx.matmul(mag, erb_fb)
 

@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 import mlx.core as mx
 import numpy as np
 
+from df_mlx.metal_kernels import _EPS_F as _MAG_EPS
 from df_mlx.metal_kernels import fused_band_energy, fused_log1p_mag
 from df_mlx.model import ContrastiveFrameProjector
 
@@ -305,11 +306,11 @@ def _compute_speech_band_logmag_loss(
             out_real = out_real.astype(mx.float32)
         if out_imag.dtype != mx.float32:
             out_imag = out_imag.astype(mx.float32)
-    clean_mag = mx.sqrt(clean_real**2 + clean_imag**2 + eps)
-    out_mag = mx.sqrt(out_real**2 + out_imag**2 + eps)
+    clean_mag = mx.sqrt(clean_real**2 + clean_imag**2 + _MAG_EPS)
+    out_mag = mx.sqrt(out_real**2 + out_imag**2 + _MAG_EPS)
 
-    clean_log = mx.log10(clean_mag + eps)
-    out_log = mx.log10(out_mag + eps)
+    clean_log = mx.log10(clean_mag + _MAG_EPS)
+    out_log = mx.log10(out_mag + _MAG_EPS)
 
     clean_band = mx.sum(clean_log * band_mask, axis=-1) / (band_bins + eps)
     out_band = mx.sum(out_log * band_mask, axis=-1) / (band_bins + eps)
@@ -325,7 +326,7 @@ def _compute_speech_band_logmag_loss(
 def _log1p_mag(
     real: mx.array,
     imag: mx.array,
-    eps: float = _EPS,
+    eps: float = _MAG_EPS,
     _assume_float32: bool = False,
 ) -> mx.array:
     """Compute log1p magnitude for complex STFT.
@@ -358,7 +359,7 @@ def _compute_musicness(
     # Spectral flatness over speech band
     if not _assume_float32 and mag.dtype != mx.float32:
         mag = mag.astype(mx.float32)
-    log_mag = mx.log(mag + eps)
+    log_mag = mx.log(mag + _MAG_EPS)
     mean_log = mx.sum(log_mag * band_mask, axis=-1) / (band_bins + eps)
     geom_mean = mx.exp(mean_log)
     arith_mean = mx.sum(mag * band_mask, axis=-1) / (band_bins + eps)
@@ -472,7 +473,7 @@ def _compute_proxy_gates(
     snr_boost = mx.sigmoid((vad_snr_gate_db - snr[:, None]) / snr_scale)
 
     # Musicness gate from noisy magnitude
-    noisy_mag = mx.sqrt(noisy_real**2 + noisy_imag**2 + eps)
+    noisy_mag = mx.sqrt(noisy_real**2 + noisy_imag**2 + _MAG_EPS)
     musicness, music_gate = _compute_musicness(
         noisy_mag,
         band_mask,
@@ -530,10 +531,10 @@ def _compute_awesome_teacher_signals(
     noisy_real_f32 = noisy_real.astype(mx.float32) if noisy_real.dtype != mx.float32 else noisy_real
     noisy_imag_f32 = noisy_imag.astype(mx.float32) if noisy_imag.dtype != mx.float32 else noisy_imag
 
-    clean_log = _log1p_mag(clean_real_f32, clean_imag_f32, eps=eps, _assume_float32=True)
+    clean_log = _log1p_mag(clean_real_f32, clean_imag_f32, eps=_MAG_EPS, _assume_float32=True)
     noise_real = noisy_real_f32 - clean_real_f32
     noise_imag = noisy_imag_f32 - clean_imag_f32
-    noise_log = _log1p_mag(noise_real, noise_imag, eps=eps, _assume_float32=True)
+    noise_log = _log1p_mag(noise_real, noise_imag, eps=_MAG_EPS, _assume_float32=True)
 
     mask_logits = mx.clip(
         mask_sharpness * (clean_log - noise_log),
@@ -628,7 +629,7 @@ def _compute_awesome_losses(
     out_real_f32 = out_real.astype(mx.float32) if out_real.dtype != mx.float32 else out_real
     out_imag_f32 = out_imag.astype(mx.float32) if out_imag.dtype != mx.float32 else out_imag
 
-    out_log = _log1p_mag(out_real_f32, out_imag_f32, eps=eps, _assume_float32=True)
+    out_log = _log1p_mag(out_real_f32, out_imag_f32, eps=_MAG_EPS, _assume_float32=True)
     (
         clean_log,
         _noise_log,
@@ -700,7 +701,7 @@ def _build_contrastive_frame_features(
     """Build per-frame contrastive features from complex STFT components."""
     real_f32 = real.astype(mx.float32) if real.dtype != mx.float32 else real
     imag_f32 = imag.astype(mx.float32) if imag.dtype != mx.float32 else imag
-    log_mag = _log1p_mag(real_f32, imag_f32, eps=eps, _assume_float32=True)
+    log_mag = _log1p_mag(real_f32, imag_f32, eps=_MAG_EPS, _assume_float32=True)
     return mx.concatenate([real_f32, imag_f32, log_mag], axis=-1)
 
 
@@ -857,8 +858,8 @@ def _compute_contrastive_awesome_losses(
     out_real_f32 = out_real.astype(mx.float32) if out_real.dtype != mx.float32 else out_real
     out_imag_f32 = out_imag.astype(mx.float32) if out_imag.dtype != mx.float32 else out_imag
 
-    clean_log = _log1p_mag(clean_real_f32, clean_imag_f32, eps=eps, _assume_float32=True)
-    noise_log = _log1p_mag(interference_real_f32, interference_imag_f32, eps=eps, _assume_float32=True)
+    clean_log = _log1p_mag(clean_real_f32, clean_imag_f32, eps=_MAG_EPS, _assume_float32=True)
+    noise_log = _log1p_mag(interference_real_f32, interference_imag_f32, eps=_MAG_EPS, _assume_float32=True)
     mask_logits = mx.clip(
         mask_sharpness * (clean_log - noise_log),
         -_AWESOME_MASK_LOGIT_CLAMP,
@@ -1073,7 +1074,7 @@ def _compute_improved_musicness(
         mag = mag.astype(mx.float32)
 
     # Original spectral flatness
-    log_mag = mx.log(mag + eps)
+    log_mag = mx.log(mag + _MAG_EPS)
     mean_log = mx.sum(log_mag * band_mask, axis=-1) / (band_bins + eps)
     geom_mean = mx.exp(mean_log)
     arith_mean = mx.sum(mag * band_mask, axis=-1) / (band_bins + eps)
@@ -1184,12 +1185,12 @@ def _compute_pipeline_awesome_losses(
     out_imag_f32 = out_imag.astype(mx.float32) if out_imag.dtype != mx.float32 else out_imag
 
     # Compute log magnitudes using pre-cast FP32 values (no redundant casts in _log1p_mag)
-    clean_log = _log1p_mag(clean_real_f32, clean_imag_f32, eps=eps, _assume_float32=True)
-    out_log = _log1p_mag(out_real_f32, out_imag_f32, eps=eps, _assume_float32=True)
+    clean_log = _log1p_mag(clean_real_f32, clean_imag_f32, eps=_MAG_EPS, _assume_float32=True)
+    out_log = _log1p_mag(out_real_f32, out_imag_f32, eps=_MAG_EPS, _assume_float32=True)
 
     noise_real = noisy_real_f32 - clean_real_f32
     noise_imag = noisy_imag_f32 - clean_imag_f32
-    noise_log = _log1p_mag(noise_real, noise_imag, eps=eps, _assume_float32=True)
+    noise_log = _log1p_mag(noise_real, noise_imag, eps=_MAG_EPS, _assume_float32=True)
 
     # Compute speech/noise dominance mask with floor
     mask_logits = mx.clip(
@@ -1246,7 +1247,7 @@ def _compute_pipeline_awesome_losses(
     snr_boost = mx.sigmoid((vad_snr_gate_db - snr[:, None]) / snr_scale)
 
     # Improved musicness detection
-    noisy_mag = mx.sqrt(noisy_real_f32**2 + noisy_imag_f32**2 + eps)
+    noisy_mag = mx.sqrt(noisy_real_f32**2 + noisy_imag_f32**2 + _MAG_EPS)
     musicness, vocal_gate, instrument_gate = _compute_improved_musicness(
         noisy_mag,
         band_mask,

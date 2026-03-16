@@ -21,6 +21,7 @@ import mlx.nn as nn
 from .config import ModelParams4, get_default_config
 from .kernels import metal_kernels_available, post_filter_kernel
 from .mamba import GroupedLinear, SqueezedMamba
+from .metal_kernels import _EPS_F
 from .modules import Conv2dNormAct, ConvTranspose2dNormAct, DfOp, Mask, SqueezedGRU_S, erb_fb
 
 # ============================================================================
@@ -952,7 +953,7 @@ class ContrastiveFrameProjector(nn.Module):
         """Build per-frame projector inputs from complex STFT frames."""
         real_f32 = real.astype(mx.float32) if real.dtype != mx.float32 else real
         imag_f32 = imag.astype(mx.float32) if imag.dtype != mx.float32 else imag
-        log_mag = mx.log1p(mx.sqrt(real_f32**2 + imag_f32**2 + 1e-8))
+        log_mag = mx.log1p(mx.sqrt(real_f32**2 + imag_f32**2 + _EPS_F))
         return mx.concatenate([real_f32, imag_f32, log_mag], axis=-1)
 
     def __call__(self, frame_features: mx.array) -> mx.array:
@@ -1425,7 +1426,7 @@ class DfNet4(nn.Module):
         )
 
         # Compute features
-        mag = mx.sqrt(spec_real**2 + spec_imag**2 + 1e-8)
+        mag = mx.sqrt(spec_real**2 + spec_imag**2 + _EPS_F)
         feat_erb = mx.matmul(mag, self._erb_fb)
         feat_spec = mx.stack([spec_real[:, :, : self.p.nb_df], spec_imag[:, :, : self.p.nb_df]], axis=-1)
 
@@ -1820,7 +1821,7 @@ class StreamingDfNet4(nn.Module):
             new_input_buffer = mx.concatenate([input_buffer[:, hop_length:], audio_frame], axis=1)
 
             # --- Features ---
-            mag = mx.sqrt(spec_real**2 + spec_imag**2 + 1e-8)
+            mag = mx.sqrt(spec_real**2 + spec_imag**2 + _EPS_F)
             feat_erb = mx.matmul(mag, erb_fb)
             feat_spec = mx.stack(
                 [spec_real[:, :, :nb_df], spec_imag[:, :, :nb_df]],
@@ -1952,7 +1953,7 @@ class StreamingDfNet4(nn.Module):
                 axis=1,
             )
 
-            mag = mx.sqrt(spec_real**2 + spec_imag**2 + 1e-8)
+            mag = mx.sqrt(spec_real**2 + spec_imag**2 + _EPS_F)
             feat_erb = mx.matmul(mag, self.model._erb_fb)
             feat_spec = mx.stack(
                 [
