@@ -25,10 +25,14 @@ fused_band_energy
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 import mlx.core as mx
 
-# Numerical stability constant (matches training_losses._EPS)
-_EPS_F = 1e-10
+# Numerical stability constant (matches training_losses._EPS and train.spectral_loss)
+_EPS_F = 1e-8
+_DEFAULT_LOG1P_MAG_THREADGROUP = 256
+_DEFAULT_COMPLEX_MAG_THREADGROUP = 512
 
 # ====================================================================
 # Kernel 1: fused_log1p_mag  —  log1p(sqrt(r² + i² + eps))
@@ -38,7 +42,8 @@ _LOG1P_MAG_FWD_SRC = """
     uint elem = thread_position_in_grid.x;
     T r = real[elem];
     T i = imag[elem];
-    T mag = metal::sqrt(r * r + i * i + T(1e-10));
+    T eps_val = params[0];
+    T mag = metal::sqrt(r * r + i * i + eps_val);
     out[elem] = metal::log(T(1) + mag);
 """
 
@@ -47,7 +52,8 @@ _LOG1P_MAG_BWD_SRC = """
     T g = grad[elem];
     T r = real[elem];
     T i = imag[elem];
-    T mag = metal::sqrt(r * r + i * i + T(1e-10));
+    T eps_val = params[0];
+    T mag = metal::sqrt(r * r + i * i + eps_val);
     T inv = g / (mag * (T(1) + mag));
     grad_real[elem] = inv * r;
     grad_imag[elem] = inv * i;
@@ -55,56 +61,107 @@ _LOG1P_MAG_BWD_SRC = """
 
 _log1p_mag_fwd_kernel = mx.fast.metal_kernel(
     name="fused_log1p_mag_fwd",
-    input_names=["real", "imag"],
+    input_names=["real", "imag", "params"],
     output_names=["out"],
     source=_LOG1P_MAG_FWD_SRC,
 )
 
 _log1p_mag_bwd_kernel = mx.fast.metal_kernel(
     name="fused_log1p_mag_bwd",
-    input_names=["grad", "real", "imag"],
+    input_names=["grad", "real", "imag", "params"],
     output_names=["grad_real", "grad_imag"],
     source=_LOG1P_MAG_BWD_SRC,
 )
 
 
-@mx.custom_function
-def fused_log1p_mag(real: mx.array, imag: mx.array) -> mx.array:
-    """Compute ``log1p(sqrt(real² + imag² + eps))`` in a single GPU kernel.
+def _resolve_threadgroup_size(n: int, preferred: int = _DEFAULT_LOG1P_MAG_THREADGROUP) -> int:
+    """Return a safe 1D threadgroup size for flat elementwise kernels."""
+    if n <= 0:
+        return 1
+    return max(1, min(n, preferred))
 
-    Supports reverse-mode autodiff via a fused backward kernel.
-    """
+
+def _make_params(real: mx.array, eps: float) -> mx.array:
+    """Build a dtype-aligned scalar parameter buffer for Metal kernels."""
+    return mx.array([eps], dtype=real.dtype)
+
+
+def _dispatch_log1p_mag_forward(
+    real: mx.array,
+    imag: mx.array,
+    params: mx.array,
+    *,
+    threadgroup_size: int = _DEFAULT_LOG1P_MAG_THREADGROUP,
+) -> mx.array:
+    """Raw forward dispatch for fused_log1p_mag with configurable threadgroup size."""
     shape = real.shape
     n = real.size
     if n == 0:
         return mx.zeros(shape, dtype=real.dtype)
     out = _log1p_mag_fwd_kernel(
-        inputs=[real.reshape(-1), imag.reshape(-1)],
+        inputs=[real.reshape(-1), imag.reshape(-1), params],
         template=[("T", real.dtype)],
         grid=(n, 1, 1),
-        threadgroup=(min(n, 256), 1, 1),
+        threadgroup=(_resolve_threadgroup_size(n, threadgroup_size), 1, 1),
         output_shapes=[(n,)],
         output_dtypes=[real.dtype],
     )[0]
     return out.reshape(shape)
 
 
-@fused_log1p_mag.vjp
-def _fused_log1p_mag_vjp(primals, cotangent, output):
-    real, imag = primals
+def _dispatch_log1p_mag_backward(
+    cotangent: mx.array,
+    real: mx.array,
+    imag: mx.array,
+    params: mx.array,
+    *,
+    threadgroup_size: int = _DEFAULT_LOG1P_MAG_THREADGROUP,
+) -> tuple[mx.array, mx.array]:
+    """Raw backward dispatch for fused_log1p_mag with configurable threadgroup size."""
     shape = real.shape
     n = real.size
     if n == 0:
-        return mx.zeros(shape, dtype=real.dtype), mx.zeros(shape, dtype=real.dtype)
+        zeros = mx.zeros(shape, dtype=real.dtype)
+        return zeros, zeros
     grad_r, grad_i = _log1p_mag_bwd_kernel(
-        inputs=[cotangent.reshape(-1), real.reshape(-1), imag.reshape(-1)],
+        inputs=[cotangent.reshape(-1), real.reshape(-1), imag.reshape(-1), params],
         template=[("T", real.dtype)],
         grid=(n, 1, 1),
-        threadgroup=(min(n, 256), 1, 1),
+        threadgroup=(_resolve_threadgroup_size(n, threadgroup_size), 1, 1),
         output_shapes=[(n,), (n,)],
         output_dtypes=[real.dtype, real.dtype],
     )
     return grad_r.reshape(shape), grad_i.reshape(shape)
+
+
+@lru_cache(maxsize=8)
+def _get_log1p_mag_impl(threadgroup_size: int):
+    @mx.custom_function
+    def _impl(real: mx.array, imag: mx.array, params: mx.array) -> mx.array:
+        return _dispatch_log1p_mag_forward(real, imag, params, threadgroup_size=threadgroup_size)
+
+    @_impl.vjp
+    def _impl_vjp(primals, cotangent, output):
+        real, imag, params = primals
+        grad_r, grad_i = _dispatch_log1p_mag_backward(
+            cotangent,
+            real,
+            imag,
+            params,
+            threadgroup_size=threadgroup_size,
+        )
+        return grad_r, grad_i, mx.zeros_like(params)
+
+    return _impl
+
+
+def fused_log1p_mag(real: mx.array, imag: mx.array, eps: float = _EPS_F) -> mx.array:
+    """Compute ``log1p(sqrt(real² + imag² + eps))`` in a single GPU kernel.
+
+    Supports reverse-mode autodiff via a fused backward kernel.
+    """
+    params = _make_params(real, eps)
+    return _get_log1p_mag_impl(_DEFAULT_LOG1P_MAG_THREADGROUP)(real, imag, params)
 
 
 # ====================================================================
@@ -115,7 +172,8 @@ _COMPLEX_MAG_FWD_SRC = """
     uint elem = thread_position_in_grid.x;
     T r = real[elem];
     T i = imag[elem];
-    out[elem] = metal::sqrt(r * r + i * i + T(1e-10));
+    T eps_val = params[0];
+    out[elem] = metal::sqrt(r * r + i * i + eps_val);
 """
 
 _COMPLEX_MAG_BWD_SRC = """
@@ -123,63 +181,103 @@ _COMPLEX_MAG_BWD_SRC = """
     T g = grad[elem];
     T r = real[elem];
     T i = imag[elem];
-    T mag = metal::sqrt(r * r + i * i + T(1e-10));
+    T eps_val = params[0];
+    T mag = metal::sqrt(r * r + i * i + eps_val);
     grad_real[elem] = g * r / mag;
     grad_imag[elem] = g * i / mag;
 """
 
 _complex_mag_fwd_kernel = mx.fast.metal_kernel(
     name="fused_complex_mag_fwd",
-    input_names=["real", "imag"],
+    input_names=["real", "imag", "params"],
     output_names=["out"],
     source=_COMPLEX_MAG_FWD_SRC,
 )
 
 _complex_mag_bwd_kernel = mx.fast.metal_kernel(
     name="fused_complex_mag_bwd",
-    input_names=["grad", "real", "imag"],
+    input_names=["grad", "real", "imag", "params"],
     output_names=["grad_real", "grad_imag"],
     source=_COMPLEX_MAG_BWD_SRC,
 )
 
 
-@mx.custom_function
-def fused_complex_mag(real: mx.array, imag: mx.array) -> mx.array:
-    """Compute ``sqrt(real² + imag² + eps)`` in a single GPU kernel.
-
-    Supports reverse-mode autodiff via a fused backward kernel.
-    """
+def _dispatch_complex_mag_forward(
+    real: mx.array,
+    imag: mx.array,
+    params: mx.array,
+    *,
+    threadgroup_size: int = _DEFAULT_COMPLEX_MAG_THREADGROUP,
+) -> mx.array:
+    """Raw forward dispatch for fused_complex_mag with configurable threadgroup size."""
     shape = real.shape
     n = real.size
     if n == 0:
         return mx.zeros(shape, dtype=real.dtype)
     out = _complex_mag_fwd_kernel(
-        inputs=[real.reshape(-1), imag.reshape(-1)],
+        inputs=[real.reshape(-1), imag.reshape(-1), params],
         template=[("T", real.dtype)],
         grid=(n, 1, 1),
-        threadgroup=(min(n, 256), 1, 1),
+        threadgroup=(_resolve_threadgroup_size(n, threadgroup_size), 1, 1),
         output_shapes=[(n,)],
         output_dtypes=[real.dtype],
     )[0]
     return out.reshape(shape)
 
 
-@fused_complex_mag.vjp
-def _fused_complex_mag_vjp(primals, cotangent, output):
-    real, imag = primals
+def _dispatch_complex_mag_backward(
+    cotangent: mx.array,
+    real: mx.array,
+    imag: mx.array,
+    params: mx.array,
+    *,
+    threadgroup_size: int = _DEFAULT_COMPLEX_MAG_THREADGROUP,
+) -> tuple[mx.array, mx.array]:
+    """Raw backward dispatch for fused_complex_mag with configurable threadgroup size."""
     shape = real.shape
     n = real.size
     if n == 0:
-        return mx.zeros(shape, dtype=real.dtype), mx.zeros(shape, dtype=real.dtype)
+        zeros = mx.zeros(shape, dtype=real.dtype)
+        return zeros, zeros
     grad_r, grad_i = _complex_mag_bwd_kernel(
-        inputs=[cotangent.reshape(-1), real.reshape(-1), imag.reshape(-1)],
+        inputs=[cotangent.reshape(-1), real.reshape(-1), imag.reshape(-1), params],
         template=[("T", real.dtype)],
         grid=(n, 1, 1),
-        threadgroup=(min(n, 256), 1, 1),
+        threadgroup=(_resolve_threadgroup_size(n, threadgroup_size), 1, 1),
         output_shapes=[(n,), (n,)],
         output_dtypes=[real.dtype, real.dtype],
     )
     return grad_r.reshape(shape), grad_i.reshape(shape)
+
+
+@lru_cache(maxsize=8)
+def _get_complex_mag_impl(threadgroup_size: int):
+    @mx.custom_function
+    def _impl(real: mx.array, imag: mx.array, params: mx.array) -> mx.array:
+        return _dispatch_complex_mag_forward(real, imag, params, threadgroup_size=threadgroup_size)
+
+    @_impl.vjp
+    def _impl_vjp(primals, cotangent, output):
+        real, imag, params = primals
+        grad_r, grad_i = _dispatch_complex_mag_backward(
+            cotangent,
+            real,
+            imag,
+            params,
+            threadgroup_size=threadgroup_size,
+        )
+        return grad_r, grad_i, mx.zeros_like(params)
+
+    return _impl
+
+
+def fused_complex_mag(real: mx.array, imag: mx.array, eps: float = _EPS_F) -> mx.array:
+    """Compute ``sqrt(real² + imag² + eps)`` in a single GPU kernel.
+
+    Supports reverse-mode autodiff via a fused backward kernel.
+    """
+    params = _make_params(real, eps)
+    return _get_complex_mag_impl(_DEFAULT_COMPLEX_MAG_THREADGROUP)(real, imag, params)
 
 
 # ====================================================================
@@ -266,9 +364,9 @@ def _ref_log1p_mag(real: mx.array, imag: mx.array) -> mx.array:
     return mx.log1p(mag)
 
 
-def _ref_complex_mag(real: mx.array, imag: mx.array) -> mx.array:
+def _ref_complex_mag(real: mx.array, imag: mx.array, eps: float = _EPS_F) -> mx.array:
     """Reference (standard MLX ops) for fused_complex_mag."""
-    return mx.sqrt(real * real + imag * imag + _EPS_F)
+    return mx.sqrt(real * real + imag * imag + eps)
 
 
 def _ref_band_energy(

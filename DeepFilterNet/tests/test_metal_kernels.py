@@ -18,6 +18,7 @@ from df_mlx.metal_kernels import (
     fused_complex_mag,
     fused_log1p_mag,
 )
+from df_mlx.train import spectral_loss
 
 
 def _rand_complex(shape, dtype=mx.float32):
@@ -60,6 +61,15 @@ class TestFusedLog1pMag:
         imag = mx.zeros((2, 10, 32))
         fused = fused_log1p_mag(real, imag)
         ref = _ref_log1p_mag(real, imag)
+        mx.eval(fused, ref)
+        np.testing.assert_allclose(np.array(fused), np.array(ref), rtol=1e-5, atol=1e-6)
+
+    def test_forward_respects_custom_eps(self):
+        """Kernel output changes with caller-provided epsilon."""
+        real, imag = _rand_complex((2, 8, 8))
+        eps = 1e-4
+        fused = fused_log1p_mag(real, imag, eps=eps)
+        ref = mx.log1p(mx.sqrt(real * real + imag * imag + eps))
         mx.eval(fused, ref)
         np.testing.assert_allclose(np.array(fused), np.array(ref), rtol=1e-5, atol=1e-6)
 
@@ -112,6 +122,14 @@ class TestFusedComplexMag:
         mx.eval(fused, ref)
         np.testing.assert_allclose(np.array(fused), np.array(ref), rtol=1e-5, atol=1e-6)
 
+    def test_forward_respects_custom_eps(self):
+        real, imag = _rand_complex((2, 8, 8))
+        eps = 1e-4
+        fused = fused_complex_mag(real, imag, eps=eps)
+        ref = _ref_complex_mag(real, imag, eps=eps)
+        mx.eval(fused, ref)
+        np.testing.assert_allclose(np.array(fused), np.array(ref), rtol=1e-5, atol=1e-6)
+
     def test_backward_matches_reference(self):
         real, imag = _rand_complex((2, 10, 16))
 
@@ -130,6 +148,23 @@ class TestFusedComplexMag:
 
         np.testing.assert_allclose(np.array(fg_r), np.array(rg_r), rtol=1e-4, atol=1e-5)
         np.testing.assert_allclose(np.array(fg_i), np.array(rg_i), rtol=1e-4, atol=1e-5)
+
+
+class TestSpectralLossWiring:
+    def test_train_spectral_loss_matches_reference(self):
+        real_pred, imag_pred = _rand_complex((2, 16, 32))
+        real_target, imag_target = _rand_complex((2, 16, 32))
+
+        fused = spectral_loss((real_pred, imag_pred), (real_target, imag_target), alpha=0.5)
+
+        pred_mag = _ref_complex_mag(real_pred, imag_pred, eps=1e-8)
+        target_mag = _ref_complex_mag(real_target, imag_target, eps=1e-8)
+        ref_mag_loss = mx.mean(mx.abs(pred_mag - target_mag))
+        ref_complex_loss = mx.mean(mx.abs(real_pred - real_target) + mx.abs(imag_pred - imag_target))
+        ref = 0.5 * ref_mag_loss + 0.5 * ref_complex_loss
+
+        mx.eval(fused, ref)
+        np.testing.assert_allclose(np.array(fused), np.array(ref), rtol=1e-5, atol=1e-6)
 
 
 # ==================================================================
