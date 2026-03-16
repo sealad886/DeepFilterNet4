@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import io
 import json
 import math
 import os
 import subprocess
 import sys
+import threading
 import wave
+import zipfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -483,6 +487,7 @@ def test_download_datasets_help_mentions_defaults_and_cli_env_flags() -> None:
     assert "default: 16" in result.stdout
     assert "default: 8" in result.stdout
     assert "default: none" in result.stdout
+    assert "Zenodo mirror of VCTK 0.92 zip" in result.stdout
 
 
 def test_download_datasets_uses_zip_merge_progress_helper() -> None:
@@ -663,3 +668,247 @@ def test_download_datasets_skips_completed_processing_for_existing_archive_outpu
         str(vctk_extract_dir / "wav48_silence_trimmed" / "p001" / "sample.flac")
         in (lists_dir / "clean_all.txt").read_text()
     )
+
+
+def test_download_datasets_zenodo_range_download_bypasses_aria2_and_extracts_vctk(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    lists_dir = data_dir / "lists"
+    downloads_dir = data_dir / "downloads"
+    extract_dir = data_dir / "raw"
+    musan_dir = tmp_path / "existing" / "musan"
+    air_rir_dir = tmp_path / "existing" / "air"
+    fake_bin_dir = tmp_path / "bin"
+    fake_aria2 = fake_bin_dir / "aria2c"
+    fake_aria2_log = tmp_path / "fake-aria2.log"
+
+    _touch(musan_dir / "noise" / "noise.wav")
+    _touch(musan_dir / "music" / "music.wav")
+    _touch(air_rir_dir / "room.wav")
+    fake_bin_dir.mkdir(parents=True, exist_ok=True)
+    fake_aria2.write_text('#!/bin/sh\necho invoked >> "$FAKE_ARIA2_LOG"\nexit 99\n', encoding="utf-8")
+    fake_aria2.chmod(0o755)
+
+    archive_buffer = io.BytesIO()
+    with zipfile.ZipFile(archive_buffer, "w") as archive:
+        archive.writestr("wav48_silence_trimmed/p001/sample.flac", b"fake-flac")
+        archive.writestr("speaker-info.txt", "speaker\n")
+    archive_bytes = archive_buffer.getvalue()
+    range_headers: list[str] = []
+
+    class ZenodoLikeRangeHandler(BaseHTTPRequestHandler):
+        def do_HEAD(self) -> None:  # noqa: N802 - stdlib handler naming
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(archive_bytes)))
+            self.end_headers()
+
+        def do_GET(self) -> None:  # noqa: N802 - stdlib handler naming
+            range_header = self.headers.get("Range")
+            if range_header:
+                range_headers.append(range_header)
+            if range_header == "bytes=0-0":
+                self.send_response(206)
+                self.send_header("Content-Length", "1")
+                self.send_header("Content-Range", f"bytes 0-0/{len(archive_bytes)}")
+                self.end_headers()
+                self.wfile.write(archive_bytes[:1])
+                return
+            if range_header and range_header.startswith("bytes="):
+                start_s, end_s = range_header.removeprefix("bytes=").split("-", 1)
+                start = int(start_s)
+                end = int(end_s)
+                chunk = archive_bytes[start : end + 1]
+                self.send_response(206)
+                self.send_header("Content-Length", str(len(chunk)))
+                self.send_header("Content-Range", f"bytes {start}-{end}/{len(archive_bytes)}")
+                self.end_headers()
+                self.wfile.write(chunk)
+                return
+
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(archive_bytes)))
+            self.end_headers()
+            self.wfile.write(archive_bytes)
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A003
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), ZenodoLikeRangeHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        zenodo_like_url = f"http://127.0.0.1:{server.server_port}/zenodo.org/VCTK-Corpus-0.92.zip?download=1"
+        env = os.environ.copy()
+        env["PATH"] = f"{fake_bin_dir}{os.pathsep}{env['PATH']}"
+        env["FAKE_ARIA2_LOG"] = str(fake_aria2_log)
+
+        result = subprocess.run(
+            [
+                "bash",
+                str(DOWNLOAD_SCRIPT),
+                "--data-dir",
+                str(data_dir),
+                "--list-dir",
+                str(lists_dir),
+                "--download-dir",
+                str(downloads_dir),
+                "--extract-dir",
+                str(extract_dir),
+                "--profile",
+                "production",
+                "--aria2-conn",
+                "4",
+                "--aria2-split",
+                "4",
+                "--aria2-max-concurrent",
+                "1",
+                "--vctk-url",
+                str(zenodo_like_url),
+                "--musan-dir",
+                str(musan_dir),
+                "--air-rir-dir",
+                str(air_rir_dir),
+                "--no-download-librispeech",
+                "--no-download-musan",
+                "--no-download-fsd50k",
+                "--no-download-air",
+                "--no-download-openair",
+                "--no-download-acousticrooms",
+                "--no-keep-archives",
+                "--zenodo-referer",
+                "https://example.com/zenodo-test",
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert result.returncode == 0, result.stderr
+    assert not fake_aria2_log.exists(), "Zenodo VCTK path should bypass aria2 and use curl range downloads"
+    assert "bytes=0-0" in range_headers
+    assert any(header != "bytes=0-0" for header in range_headers)
+    assert not (downloads_dir / "VCTK-Corpus-0.92.zip").exists()
+    clean_entries = (lists_dir / "clean_all.txt").read_text(encoding="utf-8")
+    assert str(extract_dir / "VCTK-Corpus-0.92" / "wav48_silence_trimmed" / "p001" / "sample.flac") in clean_entries
+
+
+def test_download_datasets_zenodo_parallel_range_failure_propagates(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    lists_dir = data_dir / "lists"
+    downloads_dir = data_dir / "downloads"
+    extract_dir = data_dir / "raw"
+    musan_dir = tmp_path / "existing" / "musan"
+    air_rir_dir = tmp_path / "existing" / "air"
+    fake_bin_dir = tmp_path / "bin"
+    fake_aria2 = fake_bin_dir / "aria2c"
+    fake_aria2_log = tmp_path / "fake-aria2.log"
+
+    _touch(musan_dir / "noise" / "noise.wav")
+    _touch(musan_dir / "music" / "music.wav")
+    _touch(air_rir_dir / "room.wav")
+    fake_bin_dir.mkdir(parents=True, exist_ok=True)
+    fake_aria2.write_text('#!/bin/sh\necho invoked >> "$FAKE_ARIA2_LOG"\nexit 99\n', encoding="utf-8")
+    fake_aria2.chmod(0o755)
+
+    archive_bytes = b"not-a-real-zip-but-long-enough"
+    range_headers: list[str] = []
+
+    class FailingZenodoRangeHandler(BaseHTTPRequestHandler):
+        def do_HEAD(self) -> None:  # noqa: N802 - stdlib handler naming
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(archive_bytes)))
+            self.end_headers()
+
+        def do_GET(self) -> None:  # noqa: N802 - stdlib handler naming
+            range_header = self.headers.get("Range")
+            if range_header:
+                range_headers.append(range_header)
+            if range_header == "bytes=0-0":
+                self.send_response(206)
+                self.send_header("Content-Length", "1")
+                self.send_header("Content-Range", f"bytes 0-0/{len(archive_bytes)}")
+                self.end_headers()
+                self.wfile.write(archive_bytes[:1])
+                return
+            if range_header and range_header.startswith("bytes="):
+                self.send_response(500)
+                self.end_headers()
+                return
+
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(archive_bytes)))
+            self.end_headers()
+            self.wfile.write(archive_bytes)
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A003
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), FailingZenodoRangeHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        zenodo_like_url = f"http://127.0.0.1:{server.server_port}/zenodo.org/VCTK-Corpus-0.92.zip?download=1"
+        env = os.environ.copy()
+        env["PATH"] = f"{fake_bin_dir}{os.pathsep}{env['PATH']}"
+        env["FAKE_ARIA2_LOG"] = str(fake_aria2_log)
+
+        result = subprocess.run(
+            [
+                "bash",
+                str(DOWNLOAD_SCRIPT),
+                "--data-dir",
+                str(data_dir),
+                "--list-dir",
+                str(lists_dir),
+                "--download-dir",
+                str(downloads_dir),
+                "--extract-dir",
+                str(extract_dir),
+                "--profile",
+                "production",
+                "--aria2-conn",
+                "4",
+                "--aria2-split",
+                "4",
+                "--aria2-max-concurrent",
+                "1",
+                "--vctk-url",
+                str(zenodo_like_url),
+                "--musan-dir",
+                str(musan_dir),
+                "--air-rir-dir",
+                str(air_rir_dir),
+                "--no-download-librispeech",
+                "--no-download-musan",
+                "--no-download-fsd50k",
+                "--no-download-air",
+                "--no-download-openair",
+                "--no-download-acousticrooms",
+                "--zenodo-referer",
+                "https://example.com/zenodo-test",
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert result.returncode != 0
+    assert not fake_aria2_log.exists(), "Zenodo VCTK path should fail before invoking aria2"
+    assert "bytes=0-0" in range_headers
+    assert any(header != "bytes=0-0" for header in range_headers)
+    assert "[error] parallel curl range download failed" in result.stderr

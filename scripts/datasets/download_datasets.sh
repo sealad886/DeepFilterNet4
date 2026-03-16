@@ -87,7 +87,7 @@ Dataset path overrides:
   --acousticrooms-dir PATH        Existing AcousticRooms root (default: EXTRACT_DIR/AcousticRooms)
 
 Source overrides:
-  --vctk-url URL                  VCTK archive URL (default: official VCTK 0.92 zip)
+  --vctk-url URL                  VCTK archive URL (default: Zenodo mirror of VCTK 0.92 zip; matches official MD5)
   --librispeech-parts STRING      Space-separated LibriSpeech parts (default: profile-specific)
   --fsd50k-base-url URL           FSD50K base URL (default: https://zenodo.org/records/4060432/files)
 
@@ -463,7 +463,7 @@ OPENAIR_DIR="${CLI_OPENAIR_DIR:-${OPENAIR_DIR:-${AUDB_DIR}/wav}}"
 ACOUSTICROOMS_DIR="${CLI_ACOUSTICROOMS_DIR:-${ACOUSTICROOMS_DIR:-${EXTRACT_DIR}/AcousticRooms}}"
 
 # Source overrides
-VCTK_URL="${CLI_VCTK_URL:-${VCTK_URL:-https://datashare.is.ed.ac.uk/bitstream/handle/10283/3443/VCTK-Corpus-0.92.zip}}"
+VCTK_URL="${CLI_VCTK_URL:-${VCTK_URL:-https://zenodo.org/records/10691876/files/VCTK-Corpus-0.92.zip?download=1}}"
 LIBRISPEECH_PARTS="${CLI_LIBRISPEECH_PARTS:-${LIBRISPEECH_PARTS:-}}"
 FSD50K_BASE_URL="${CLI_FSD50K_BASE_URL:-${FSD50K_BASE_URL:-https://zenodo.org/records/4060432/files}}"
 
@@ -594,11 +594,131 @@ checksum_file() {
 supports_range_requests() {
   local url="$1"
   local headers
-  headers=$(curl -sI -L --max-time 10 "${url}" 2>/dev/null | grep -Ei '^Accept-Ranges:')
+  headers=$(curl -sI -L --max-time 10 "${url}" 2>/dev/null | tr -d '\r' | grep -Ei '^Accept-Ranges:' || true)
   if [[ "${headers}" =~ [Bb]ytes ]]; then
     return 0
   fi
+  # Zenodo's HEAD responses do not always advertise range support even though
+  # ranged GET requests succeed. Probe a single byte so the downloader can use
+  # multipart range downloads when the mirror actually supports them.
+  if [[ "${url}" == *"zenodo.org"* ]]; then
+    local probe
+    probe=$(curl -L -r 0-0 -o /dev/null -D - -s --max-time 15 "${url}" 2>/dev/null | tr -d '\r')
+    if printf '%s\n' "${probe}" | grep -Eq '^HTTP/[0-9.]+ 206'; then
+      return 0
+    fi
+    if printf '%s\n' "${probe}" | grep -Eiq '^Content-Range:[[:space:]]*bytes[[:space:]]+0-0/'; then
+      return 0
+    fi
+    return 1
+  fi
   return 1
+}
+
+content_length_for_url() {
+  local url="$1"
+  curl -sI -L --max-time 15 "${url}" 2>/dev/null | tr -d '\r' | awk '
+    tolower($1) == "content-length:" {
+      print $2
+      exit
+    }
+  '
+}
+
+should_use_parallel_curl_download() {
+  local url="$1"
+  local out="$2"
+  [[ "$(basename "${out}")" == "VCTK-Corpus-0.92.zip" && "${url}" == *"zenodo.org"* ]] || return 1
+  command -v curl >/dev/null 2>&1 || return 1
+  supports_range_requests "${url}"
+}
+
+download_file_parallel_curl_ranges() {
+  local url="$1"
+  local out="$2"
+  local total_size
+  total_size="$(content_length_for_url "${url}")"
+  if [[ ! "${total_size}" =~ ^[0-9]+$ ]] || [[ "${total_size}" -le 0 ]]; then
+    echo "[warn] could not determine content length for parallel curl download, falling back: ${url}" >&2
+    curl -L --fail -H "Referer: ${ZENODO_REFERER}" -o "${out}" "${url}"
+    return
+  fi
+
+  local parts="${ARIA2_CONN}"
+  if [[ "${ARIA2_SPLIT}" -lt "${parts}" ]]; then
+    parts="${ARIA2_SPLIT}"
+  fi
+  if [[ "${parts}" -lt 2 ]]; then
+    curl -L --fail -H "Referer: ${ZENODO_REFERER}" -o "${out}" "${url}"
+    return
+  fi
+
+  local part_dir="${out}.parts"
+  local tmp_out="${out}.tmp"
+  local chunk_size=$(( (total_size + parts - 1) / parts ))
+  local -a pids=()
+  local part_idx start end expected_size part_file
+
+  if [[ "${RESUME}" != "1" ]]; then
+    rm -rf "${part_dir}"
+    rm -f "${tmp_out}" "${out}"
+  fi
+  mkdir -p "${part_dir}"
+
+  for ((part_idx = 0; part_idx < parts; part_idx++)); do
+    start=$(( part_idx * chunk_size ))
+    if [[ "${start}" -ge "${total_size}" ]]; then
+      break
+    fi
+    end=$(( start + chunk_size - 1 ))
+    if [[ "${end}" -ge "${total_size}" ]]; then
+      end=$(( total_size - 1 ))
+    fi
+    expected_size=$(( end - start + 1 ))
+    part_file="${part_dir}/part.$(printf '%03d' "${part_idx}")"
+
+    if [[ "${RESUME}" == "1" && -f "${part_file}" ]] && [[ "$(stat_size "${part_file}")" -eq "${expected_size}" ]]; then
+      continue
+    fi
+
+    rm -f "${part_file}"
+    curl -L --fail --silent --show-error \
+      --retry 5 --retry-delay 2 \
+      -H "Referer: ${ZENODO_REFERER}" \
+      --range "${start}-${end}" \
+      -o "${part_file}" \
+      "${url}" &
+    pids+=("$!")
+  done
+
+  local failed=0
+  local pid
+  for pid in "${pids[@]}"; do
+    if ! wait "${pid}"; then
+      failed=1
+    fi
+  done
+  if [[ "${failed}" -ne 0 ]]; then
+    echo "[error] parallel curl range download failed: ${url}" >&2
+    return 1
+  fi
+
+  rm -f "${tmp_out}"
+  for ((part_idx = 0; part_idx < parts; part_idx++)); do
+    part_file="${part_dir}/part.$(printf '%03d' "${part_idx}")"
+    if [[ ! -f "${part_file}" ]]; then
+      continue
+    fi
+    cat "${part_file}" >> "${tmp_out}"
+  done
+
+  if [[ "$(stat_size "${tmp_out}")" -ne "${total_size}" ]]; then
+    echo "[error] merged parallel download has wrong size: ${tmp_out}" >&2
+    return 1
+  fi
+
+  mv "${tmp_out}" "${out}"
+  rm -rf "${part_dir}"
 }
 
 get_gh_token() {
@@ -733,6 +853,10 @@ download_file() {
       echo "[warn] existing file failed verification, attempting resume: ${out}"
     fi
   fi
+  if should_use_parallel_curl_download "${url}" "${out}"; then
+    download_file_parallel_curl_ranges "${url}" "${out}"
+    return $?
+  fi
   if [[ "${force_curl}" != "1" && "${USE_ARIA2}" == "1" ]] && command -v aria2c >/dev/null 2>&1; then
     # Some hosts do not handle multi-range requests well (hardcoded fallbacks).
     if [[ "${url}" == *"datashare.ed.ac.uk"* || "${url}" == *"datashare.is.ed.ac.uk"* ]]; then
@@ -744,10 +868,6 @@ download_file() {
       if [[ -f "${out}" ]]; then
         rm -f "${out}"
       fi
-    elif [[ "${url}" == *"zenodo.org"* ]]; then
-      aria2_conn=1
-      aria2_split=1
-      aria2_file_alloc="none"
     elif ! supports_range_requests "${url}"; then
       # Server doesn't advertise range support; use single connection
       echo "[info] server does not support range requests, using single connection: ${url}" >&2
@@ -989,17 +1109,14 @@ queue_download() {
     if [[ -f "${out}" && ! -f "${out}.aria2" ]]; then
       rm -f "${out}"
     fi
-  elif [[ "${url}" == *"zenodo.org"* ]]; then
-    aria2_conn=1
-    aria2_split=1
-    aria2_file_alloc="none"
-    aria2_retry_wait="10"
-    aria2_max_tries="10"
   elif ! supports_range_requests "${url}"; then
     # Server doesn't advertise range support; use single connection
     echo "[info] server does not support range requests, using single connection: ${url}" >&2
     aria2_conn=1
     aria2_split=1
+  elif [[ "${url}" == *"zenodo.org"* ]]; then
+    aria2_retry_wait="10"
+    aria2_max_tries="10"
   fi
 
   mkdir -p "${out_dir}"
@@ -1117,6 +1234,20 @@ download_and_extract() {
   fi
   mkdir -p "${DOWNLOAD_DIR}"
   if [[ "${ARIA2_PARALLEL_ACTIVE}" == "1" && "${force_curl}" != "1" ]]; then
+    if should_use_parallel_curl_download "${url}" "${DOWNLOAD_DIR}/${filename}"; then
+      download_file "${url}" "${DOWNLOAD_DIR}/${filename}" "${force_curl}"
+      if ! verify_archive "${DOWNLOAD_DIR}/${filename}"; then
+        echo "[warn] archive failed verification, retrying: ${filename}" >&2
+        rm -f "${DOWNLOAD_DIR:?}/${filename}"
+        download_file "${url}" "${DOWNLOAD_DIR}/${filename}" "${force_curl}"
+        verify_archive "${DOWNLOAD_DIR}/${filename}"
+      fi
+      extract_archive "${DOWNLOAD_DIR}/${filename}" "${dest}"
+      if [[ "${KEEP_ARCHIVES}" == "0" ]]; then
+        rm -f "${DOWNLOAD_DIR:?}/${filename}"
+      fi
+      return 0
+    fi
     local archive_path="${DOWNLOAD_DIR}/${filename}"
     queue_download "${url}" "${archive_path}"
     queue_extract "${archive_path}" "${dest}" "${url}"
