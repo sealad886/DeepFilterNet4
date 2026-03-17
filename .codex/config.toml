@@ -1,3 +1,5 @@
+#:schema https://developers.openai.com/codex/config-schema.json
+
 # Repo-local Codex configuration for DeepFilterNet.
 # Keep this file portable: only relative paths and repo-scoped defaults live
 # here. User-specific model/provider/auth settings should stay in ~/.codex.
@@ -5,7 +7,7 @@
 # directory, so the sibling entrypoint is `AGENTS.md`, not `.codex/AGENTS.md`.
 
 model_instructions_file = "AGENTS.md"
-project_doc_fallback_filenames = ["AGENTS.md", "DeepFilterNet/AGENTS.md"]
+project_doc_fallback_filenames = ["../AGENTS.md", "../DeepFilterNet/AGENTS.md"]
 project_root_markers = [".git", ".beads", ".codex/config.toml", "AGENTS.md"]
 suppress_unstable_features_warning = true
 
