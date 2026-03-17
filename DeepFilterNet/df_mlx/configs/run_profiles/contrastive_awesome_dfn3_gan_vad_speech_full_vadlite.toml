@@ -37,7 +37,7 @@ seed = 42
 
 [dataloader]
 num_workers = 8
-prefetch_size = 16
+prefetch_size = 24
 use_mlx_data = true
 
 [checkpoint]
