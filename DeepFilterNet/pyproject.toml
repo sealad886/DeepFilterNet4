@@ -56,6 +56,7 @@ Repository = "https://github.com/sealad886/DeepFilterNet4"
 train = [
   "deepfilterdataloader @ file:../pyDF-data",
   "icecream>=2,<3",
+  "silero-vad",
 ]
 eval = [
   "pystoi>=0.3,<0.5",
@@ -70,6 +71,7 @@ mlx = [
   "mlx>=0.0.6; sys_platform == 'darwin' and platform_machine == 'arm64'",
   "mlx-whisper>=0.4.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
   "mlx-data>=0.2.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
+  "onnxruntime",
 ]
 # Combined ASR with MLX optimization
 asr-mlx = [
@@ -77,6 +79,7 @@ asr-mlx = [
   "mlx>=0.0.6; sys_platform == 'darwin' and platform_machine == 'arm64'",
   "mlx-whisper>=0.4.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
   "mlx-data>=0.2.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
+  "onnxruntime",
 ]
 dev = [
   "poethepoet>=0.26,<0.27",
