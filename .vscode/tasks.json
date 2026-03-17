@@ -20,6 +20,47 @@
 			"label": "Run Tests",
 			"type": "shell",
 			"command": "cd ${workspaceFolder} && .venv/bin/python -m pytest DeepFilterNet/tests/ -q 2>&1 | tee /tmp/dfn_test_output.txt"
+		},
+		{
+			"label": "Spectral Helper Tests",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && .venv/bin/python -m pytest DeepFilterNet/tests/test_metal_kernels.py -v 2>&1 | tee /tmp/metal_kernel_test_output.txt"
+		},
+		{
+			"label": "Full Test Suite",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && .venv/bin/python -m pytest DeepFilterNet/tests/ -q 2>&1 | tee /tmp/dfn_full_test_output.txt"
+		},
+		{
+			"label": "Full Test Suite v2",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && .venv/bin/python -m pytest DeepFilterNet/tests/ -q 2>&1 | tee /tmp/dfn_full_test_v2.txt"
+		},
+		{
+			"label": "Spectral Helper Tests v2",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && .venv/bin/python -m pytest DeepFilterNet/tests/test_metal_kernels.py -q 2>&1 | tee /tmp/metal_kernel_tests_v2.txt",
+			"isBackground": false
+		},
+		{
+			"label": "Focused Spectral Helper EPS Checks",
+			"type": "shell",
+			"command": "bash",
+			"args": [
+				"-lc",
+				"cd /Users/andrew/zRepos/DeepFilterNet && .venv/bin/python -m pytest DeepFilterNet/tests/test_metal_kernels.py -q 2>&1 | tee /tmp/metal_kernel_eps_checks.txt"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "Repo .venv Python Version",
+			"type": "shell",
+			"command": "bash",
+			"args": [
+				"-lc",
+				"cd /Users/andrew/zRepos/DeepFilterNet && .venv/bin/python -V 2>&1 | tee /tmp/repo_venv_python_version.txt"
+			],
+			"isBackground": false
 		}
 	]
 }

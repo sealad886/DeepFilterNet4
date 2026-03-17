@@ -51,7 +51,7 @@ Magnitude-only losses can produce "right energy, wrong texture" audio. Adding co
 **Details:**
 - Casts all inputs to FP32 internally for numerical stability.
 - The active MLX path now uses a split epsilon policy:
-	- $\varepsilon_{mag} = 10^{-10}$ inside complex-magnitude and `log1p`-magnitude paths (`fused_complex_mag`, `fused_log1p_mag`) to reduce artificial floors on very quiet bins.
+	- $\varepsilon_{mag} = 10^{-10}$ inside complex-magnitude and `log1p`-magnitude paths (`complex_mag`, `log1p_mag`) to reduce artificial floors on very quiet bins.
 	- $\varepsilon_{red} = 10^{-8}$ stays in band-energy, ratio, and log-energy reductions where denominator protection is the real concern.
 - Valid for all data including silence.
 

@@ -32,7 +32,7 @@ import mlx.core as mx
 import numpy as np
 
 from df_mlx.metal_kernels import _EPS_F as _MAG_EPS
-from df_mlx.metal_kernels import fused_band_energy, fused_log1p_mag
+from df_mlx.metal_kernels import band_energy, log1p_mag
 from df_mlx.model import ContrastiveFrameProjector
 
 if TYPE_CHECKING:
@@ -149,9 +149,7 @@ def _z_score_clean_energy(
 ) -> tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array]:
     """Shared z-scored clean energy computation used by VAD and proxy gates.
 
-    Uses fused_band_energy Metal kernel to compute power → masked reduction
-    → log10 in a single GPU dispatch, eliminating the (B,T,F) power
-    intermediate that standard ops would materialize.
+    Computes power → masked reduction → log10 using standard MLX ops.
 
     Returns:
         clean_power: Scalar placeholder (no caller uses this value)
@@ -161,7 +159,7 @@ def _z_score_clean_energy(
         z_ref: (B, T) clipped z-scored energy
         p_ref: (B, T) sigmoid VAD probability
     """
-    clean_band, log_clean = fused_band_energy(clean_real, clean_imag, band_mask, band_bins, eps)
+    clean_band, log_clean = band_energy(clean_real, clean_imag, band_mask, band_bins, eps)
     # Backward-compat placeholder: no downstream caller reads clean_power.
     clean_power = mx.array(0.0)
     mu = mx.mean(log_clean, axis=1, keepdims=True)
@@ -331,15 +329,14 @@ def _log1p_mag(
 ) -> mx.array:
     """Compute log1p magnitude for complex STFT.
 
-    Uses a fused Metal kernel that computes sqrt(r²+i²+eps) → log1p
-    in a single GPU dispatch, with a fused backward kernel for autodiff.
+    Computes ``log1p(sqrt(r² + i² + eps))`` using standard MLX ops.
     """
     if not _assume_float32:
         if real.dtype != mx.float32:
             real = real.astype(mx.float32)
         if imag.dtype != mx.float32:
             imag = imag.astype(mx.float32)
-    return fused_log1p_mag(real, imag, eps=eps)
+    return log1p_mag(real, imag, eps=eps)
 
 
 def _compute_musicness(
@@ -440,7 +437,7 @@ def _compute_proxy_gates(
     if _precomputed_z is not None:
         _unused, clean_band, log_clean, z_ref_raw, z_ref, p_ref = _precomputed_z
     else:
-        clean_band, log_clean = fused_band_energy(clean_real, clean_imag, band_mask, band_bins, eps)
+        clean_band, log_clean = band_energy(clean_real, clean_imag, band_mask, band_bins, eps)
         mu = mx.mean(log_clean, axis=1, keepdims=True)
         variance = mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True)
         sigma = mx.sqrt(mx.maximum(variance, _MIN_VARIANCE) + eps)
@@ -1211,8 +1208,7 @@ def _compute_pipeline_awesome_losses(
         debug.check("pipeline.mask", mask, debug_ctx)
 
     # Reuse pre-cast FP32 values for proxy gates (no duplicate casts)
-    # Fused band energy: eliminates (B,T,F) clean_power intermediate
-    clean_band, log_clean = fused_band_energy(clean_real_f32, clean_imag_f32, band_mask, band_bins, eps)
+    clean_band, log_clean = band_energy(clean_real_f32, clean_imag_f32, band_mask, band_bins, eps)
     # Noise still needs the standard path (different inputs, only used for ratio)
     noise_power = noise_real**2 + noise_imag**2
     noise_band = mx.sum(noise_power * band_mask, axis=-1) / (band_bins + eps)

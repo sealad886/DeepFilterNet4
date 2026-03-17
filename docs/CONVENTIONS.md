@@ -662,7 +662,6 @@ def _my_vjp(primals, cotangents, _outputs):
 - [DeepFilterNet/df_mlx/training_losses.py](../DeepFilterNet/df_mlx/training_losses.py)
 - [DeepFilterNet/df_mlx/train.py](../DeepFilterNet/df_mlx/train.py)
 - [DeepFilterNet/df_mlx/model.py](../DeepFilterNet/df_mlx/model.py)
-- [DeepFilterNet/df_mlx/benchmark_metal_kernels.py](../DeepFilterNet/df_mlx/benchmark_metal_kernels.py)
 - [DeepFilterNet/tests/test_metal_kernels.py](../DeepFilterNet/tests/test_metal_kernels.py)
 
 ---
