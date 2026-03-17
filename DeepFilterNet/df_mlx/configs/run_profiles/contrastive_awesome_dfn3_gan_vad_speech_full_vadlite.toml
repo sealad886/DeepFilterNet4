@@ -1,9 +1,13 @@
 # Contrastive AWESOME full-run profile derived from the VAD-lite DFN3+GAN winner
-# plus the commonly-used full-VAD CLI overrides:
+# plus the commonly-used full-VAD / background-music CLI overrides:
 #
 #   --batch-size 28
 #   --vad-train-prob 1.0
 #   --vad-speech-loss-weight 0.4
+#   --contrastive-loss-weight 0.4
+#   --p-background-music 0.2
+#   --background-music-gain-range 0 16
+#   --no-vad-proxy
 #
 # This keeps the delayed-GAN and VAD-lite baseline structure for a close
 # apples-to-apples comparison, but swaps the auxiliary objective over to the
@@ -15,6 +19,8 @@
 
 [dataset]
 cache_dir = "~/DataDump/datasets/mlx_datastore"
+p_background_music = 0.2
+background_music_gain_range = [0, 16]
 
 [training]
 epochs = 100
@@ -35,7 +41,7 @@ prefetch_size = 16
 use_mlx_data = true
 
 [checkpoint]
-checkpoint_dir = "./checkpoints/contrastive_awesome_dfn3_gan_vad_speech_full_vadlite"
+checkpoint_dir = "/Users/andrew/DataDump/checkpoints/contrastive_awesome_full_vadlite-contrastive_loss-0.4"
 save_strategy = "epoch"
 save_total_limit = 5
 validate_every = 1
@@ -51,8 +57,11 @@ variant = "full"
 [loss]
 dynamic_loss = "contrastive_awesome"
 
+[loss.awesome]
+proxy_enabled = false
+
 [loss.contrastive]
-loss_weight = 0.15
+loss_weight = 0.4
 warmup_steps = 2500
 temperature = 0.1
 embedding_dim = 128
@@ -75,13 +84,13 @@ hop_sizes = []
 enabled = true
 start_epoch = 50
 ramp_epochs = 24
-adv_weight = 0.08
+adv_weight = 0.03
 fm_weight = 0.6
 discriminator = "combined"
 mpd_periods = [2, 3, 5, 7, 11]
 msd_scales = 3
-disc_lr = 2e-5
-disc_weight_decay = 0.01
+disc_lr = 5e-5
+disc_weight_decay = 1e-5
 disc_grad_clip = 1.0
 disc_update_freq = 2
 disc_max_samples = 24000
