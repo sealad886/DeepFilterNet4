@@ -13,6 +13,25 @@ Key exports:
 Relationship to train_dynamic:
     All public symbols are re-exported via train_dynamic.py for backward
     compatibility.  TrainingSession.run() delegates directly to train().
+
+Architecture note — why closures stay in train():
+    The ``train()`` function necessarily defines loss closures (``loss_fn``,
+    ``loss_fn_gan``) and ``@mx.compile``-wrapped training-step functions as
+    inner closures.  These **cannot** be moved to class methods because:
+
+    1. ``mx.compile`` traces Python booleans/locals at compile time.  Config
+       flags (``use_awesome_loss``, ``gan_active``, ``use_fp16``, etc.) must be
+       frozen as Python locals in the closure's enclosing scope.
+    2. ``@functools.partial(mx.compile, inputs=state, outputs=state)`` requires
+       the state list reference in the closure's enclosing scope — not as
+       ``self.state``.
+    3. ``nn.value_and_grad(model, loss_fn)`` traces the loss function and
+       captures non-argument variables as compile-time constants.
+
+    The extensive decomposition into 13 ``training_*.py`` helper modules
+    (8,600+ lines) has already extracted everything that *can* be extracted.
+    What remains in ``train()`` is exactly what must remain: the compilation-
+    sensitive closures and the batch loop that orchestrates them.
 """
 
 from __future__ import annotations
@@ -281,14 +300,21 @@ class TrainingSession:
     """Class-based API for DfNet4 dynamic training.
 
     Wraps :func:`~df_mlx.train_dynamic.train` with an object-oriented
-    interface.  Currently a thin delegation layer; future phases will
-    incrementally migrate the ``train()`` body into class methods.
+    interface.  ``setup()`` initializes the model, optimizer, and hardware
+    config for pre-flight inspection; ``run()`` delegates the full training
+    loop to ``train()``.
+
+    After ``setup()``, callers can inspect ``session.model``,
+    ``session.optimizer``, ``session.param_count``, etc. before committing
+    to a full training run.
 
     Usage::
 
         # Direct keyword construction (mirrors train() signature)
         session = TrainingSession(epochs=50, batch_size=16, learning_rate=3e-4)
         session.setup()
+        print(f"Parameters: {session.param_count:,}")
+        print(f"Model: {session.model}")
         session.run()
 
         # From a RunConfig object
@@ -303,14 +329,11 @@ class TrainingSession:
             raise TypeError(f"TrainingSession received unexpected keyword arguments: {sorted(unknown)}")
         self._kwargs: dict[str, Any] = kwargs
         self._ready: bool = False
-        # Extension-point attributes — reserved for future refactoring phases
-        # that will move model init, dataset creation, and optimizer setup into
-        # the session object.  Kept as typed placeholders so the interface is
-        # stable when that work lands.
-        self.state: Any | None = None
-        self.step: Any | None = None
-        self.validation: Any | None = None
-        self.loop: Any | None = None
+        self.model: Any | None = None
+        self.model_config: Any | None = None
+        self.optimizer: Any | None = None
+        self.hw_config: Any | None = None
+        self.param_count: int = 0
 
     @classmethod
     def from_run_config(cls, run_config: RunConfig, **overrides: Any) -> TrainingSession:
@@ -326,13 +349,56 @@ class TrainingSession:
         return cls(**kwargs)
 
     def setup(self) -> None:
-        """Prepare the session for execution.
+        """Initialize model, optimizer, and hardware config for inspection.
 
-        For now this is intentionally lightweight and only marks the
-        session as ready — "ready" simply means ``setup()`` has been
-        called; no validation of arguments or initialisation of external
-        resources occurs here.  The heavy lifting remains in ``train()``.
+        After calling ``setup()``, the following attributes are populated:
+
+        - ``model``: The initialized :class:`~df_mlx.model.DfNet4` model.
+        - ``model_config``: The :class:`~df_mlx.config.ModelParams4` used.
+        - ``optimizer``: An ``mlx.optimizers.AdamW`` instance.
+        - ``hw_config``: Detected :class:`~df_mlx.hardware.HardwareConfig`.
+        - ``param_count``: Total trainable parameter count.
+
+        The model is created from ``model_config`` kwargs (or defaults) but
+        is **not** synced with dataset audio parameters — that happens inside
+        ``train()`` when the dataset is loaded.  For architecture inspection,
+        forward-pass smoke tests, or parameter counting, this is sufficient.
+
+        Calling ``run()`` after ``setup()`` still delegates the full training
+        loop to ``train()``, which independently initializes its own model,
+        optimizer, and datasets.  A future iteration may wire pre-initialized
+        objects through to ``train()`` to avoid re-creation.
         """
+        import mlx.optimizers as optim
+
+        from df_mlx.config import get_default_config
+        from df_mlx.hardware import HardwareConfig
+        from df_mlx.model import count_parameters, init_model
+
+        kw = self._kwargs
+
+        self.hw_config = HardwareConfig.detect(verbose=kw.get("verbose", False))
+
+        model_config = kw.get("model_config")
+        if model_config is None:
+            model_config = get_default_config()
+        model_config.backbone.backbone_type = kw.get("backbone_type", "mamba")
+        self.model_config = model_config
+
+        use_contrastive = kw.get("dynamic_loss") == "contrastive_awesome"
+        self.model = init_model(
+            config=model_config,
+            variant=kw.get("model_variant", "full"),
+            contrastive_hidden_dim=(kw.get("contrastive_hidden_dim", 256) if use_contrastive else None),
+            contrastive_embedding_dim=(kw.get("contrastive_embedding_dim", 128) if use_contrastive else None),
+        )
+        self.param_count = count_parameters(self.model)
+
+        self.optimizer = optim.AdamW(
+            learning_rate=kw.get("learning_rate", 1e-4),
+            weight_decay=kw.get("weight_decay", 0.0),
+        )
+
         self._ready = True
 
     def run(self) -> None:
