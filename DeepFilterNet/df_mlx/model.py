@@ -22,7 +22,14 @@ from .config import ModelParams4, get_default_config
 from .kernels import metal_kernels_available, post_filter_kernel
 from .mamba import GroupedLinear, SqueezedMamba
 from .metal_kernels import _EPS_F
-from .modules import Conv2dNormAct, ConvTranspose2dNormAct, DfOp, Mask, SqueezedGRU_S, erb_fb
+from .modules import (
+    Conv2dNormAct,
+    ConvTranspose2dNormAct,
+    DfOp,
+    Mask,
+    SqueezedGRU_S,
+    erb_fb,
+)
 
 # ============================================================================
 # Encoder
