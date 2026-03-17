@@ -28,12 +28,36 @@ _BAND_ENERGY_EPS_F = 1e-8
 
 
 def complex_mag(real: mx.array, imag: mx.array, eps: float = _EPS_F) -> mx.array:
-    """Compute ``sqrt(real² + imag² + eps)`` using standard MLX ops."""
+    """Return elementwise complex magnitude with a stability floor.
+
+    Args:
+        real: Real component of a complex-valued tensor.
+        imag: Imaginary component broadcast-compatible with ``real``.
+        eps: Non-negative stability term added inside the square root.
+
+    Returns:
+        Elementwise ``sqrt(real² + imag² + eps)`` with the broadcasted input
+        shape. The output dtype follows MLX elementwise promotion rules, so
+        reduced-precision inputs remain reduced precision unless callers cast
+        first.
+    """
     return mx.sqrt(real * real + imag * imag + eps)
 
 
 def log1p_mag(real: mx.array, imag: mx.array, eps: float = _EPS_F) -> mx.array:
-    """Compute ``log1p(sqrt(real² + imag² + eps))`` using standard MLX ops."""
+    """Return ``log1p`` of the elementwise complex magnitude.
+
+    Args:
+        real: Real component of a complex-valued tensor.
+        imag: Imaginary component broadcast-compatible with ``real``.
+        eps: Non-negative stability term forwarded to :func:`complex_mag`.
+
+    Returns:
+        Elementwise ``log1p(sqrt(real² + imag² + eps))`` with the broadcasted
+        input shape. The output dtype matches the dtype produced by
+        :func:`complex_mag`, so callers that need float32 numerics should cast
+        before calling this helper.
+    """
     return mx.log1p(complex_mag(real, imag, eps))
 
 
@@ -44,19 +68,28 @@ def band_energy(
     band_bins: float,
     eps: float = _BAND_ENERGY_EPS_F,
 ) -> tuple[mx.array, mx.array]:
-    """Compute band energy and its log10 using standard MLX ops.
+    """Compute masked band energy and log10 band energy.
 
     Args:
         real: Complex real part, shape (B, T, F).
         imag: Complex imaginary part, shape (B, T, F).
-        band_mask: Frequency-bin mask, shape (F,).
-        band_bins: Number of active bins in the mask.
+        band_mask: Float mask broadcast-compatible with ``real``/``imag`` over
+            the trailing frequency dimension.
+        band_bins: Positive number of active bins represented by
+            ``band_mask``.
         eps: Numerical stability constant.
 
     Returns:
         (band, log_band) where band = sum_f(power*mask)/band_bins
-        and log_band = log10(band + eps), both shape (B, T).
+        and log_band = log10(band + eps), both shape ``real.shape[:-1]``. The
+        reduction is accumulated in float32 for stable mixed-precision use.
+
+    Raises:
+        ValueError: If ``band_bins`` is not strictly positive.
     """
+    if band_bins <= 0:
+        raise ValueError(f"band_bins must be positive, got {band_bins!r}")
+
     real_f32 = real.astype(mx.float32) if real.dtype != mx.float32 else real
     imag_f32 = imag.astype(mx.float32) if imag.dtype != mx.float32 else imag
     mask_f32 = band_mask.astype(mx.float32) if band_mask.dtype != mx.float32 else band_mask

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import mlx.core as mx
 import numpy as np
+import pytest
 
 from df_mlx.metal_kernels import (
     _BAND_ENERGY_EPS_F,
@@ -79,6 +80,13 @@ class TestLog1pMag:
         mx.eval(result)
         assert result.shape == real.shape
 
+    def test_reduced_precision_dtype_is_preserved(self):
+        """Raw helper keeps reduced precision unless the caller upcasts first."""
+        real, imag = _rand_complex((2, 8, 8), dtype=mx.float16)
+        result = log1p_mag(real, imag)
+        mx.eval(result)
+        assert result.dtype == mx.float16
+
     def test_backward_produces_gradients(self):
         """Backward pass produces finite gradients."""
         real, imag = _rand_complex((2, 10, 16))
@@ -130,6 +138,13 @@ class TestComplexMag:
         ref = mx.sqrt(real * real + imag * imag + eps)
         mx.eval(result, ref)
         np.testing.assert_allclose(np.array(result), np.array(ref), rtol=1e-5, atol=1e-6)
+
+    def test_reduced_precision_dtype_is_preserved(self):
+        """Raw helper keeps reduced precision unless the caller upcasts first."""
+        real, imag = _rand_complex((2, 8, 8), dtype=mx.float16)
+        result = complex_mag(real, imag)
+        mx.eval(result)
+        assert result.dtype == mx.float16
 
     def test_backward_produces_gradients(self):
         real, imag = _rand_complex((2, 10, 16))
@@ -217,6 +232,15 @@ class TestBandEnergy:
         expected = np.full((1, 2), np.log10(_BAND_ENERGY_EPS_F), dtype=np.float32)
         np.testing.assert_allclose(np.array(log_band), expected, rtol=1e-6, atol=1e-7)
         assert not np.isclose(np.log10(_BAND_ENERGY_EPS_F), np.log10(_EPS_F))
+
+    @pytest.mark.parametrize("band_bins", [0.0, -1.0])
+    def test_rejects_non_positive_band_bins(self, band_bins: float):
+        """Invalid band definitions should fail loudly instead of masking bugs."""
+        real, imag = _rand_complex((1, 2, 16))
+        mask = mx.zeros((16,), dtype=mx.float32)
+
+        with pytest.raises(ValueError, match="band_bins must be positive"):
+            band_energy(real, imag, mask, band_bins)
 
     def test_bfloat16_inputs_accumulate_in_float32(self):
         """Reduced-precision inputs should produce stable float32 outputs."""
