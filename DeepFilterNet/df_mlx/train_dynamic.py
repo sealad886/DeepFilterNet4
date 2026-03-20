@@ -284,6 +284,8 @@ def train(
     p_interfer_speech: float | None = None,
     p_background_music: float | None = None,
     curriculum_warmup_epochs: int = 0,
+    music_start_epoch: int = 0,
+    music_ramp_epochs: int = 0,
     speech_gain_range: Tuple[float, float] | None = None,
     noise_gain_range: Tuple[float, float] | None = None,
     background_music_gain_range: Tuple[float, float] | None = None,
@@ -405,6 +407,8 @@ def train(
         p_background_music: Optional override for the probability that a sample includes a background-music source
         curriculum_warmup_epochs: Number of warmup epochs for curriculum learning (0=disabled).
             During warmup, SNR/interferer probabilities ramp from 0 to target values.
+        music_start_epoch: Epoch at which background-music injection begins (0=from start).
+        music_ramp_epochs: Epochs over which p_background_music ramps 0→target after music_start_epoch (0=instant).
         speech_gain_range: Optional override for speech gain range (dB)
         noise_gain_range: Optional override for noise gain range (dB)
         background_music_gain_range: Optional override for background-music source gain range (dB)
@@ -1949,6 +1953,23 @@ def train(
                 print(
                     f"  Curriculum (epoch {epoch + 1}/{curriculum_warmup_epochs}): "
                     f"p_extreme={cur_p_extreme:.3f}, p_very_low={cur_p_very_low:.3f}, p_interfer={cur_p_interfer:.3f}"
+                )
+
+        # ====== Background-Music Schedule ======
+        target_p_music = p_background_music if p_background_music is not None else config.p_background_music
+        if target_p_music > 0 and music_start_epoch > 0:
+            if epoch < music_start_epoch:
+                cur_p_music = 0.0
+            elif music_ramp_epochs > 0:
+                cur_p_music = min(target_p_music, target_p_music * (epoch - music_start_epoch + 1) / music_ramp_epochs)
+            else:
+                cur_p_music = target_p_music
+            dataset.config.p_background_music = cur_p_music
+            valid_dataset.config.p_background_music = cur_p_music
+            if epoch <= music_start_epoch + music_ramp_epochs or (epoch == music_start_epoch and verbose):
+                print(
+                    f"  Music schedule (epoch {epoch + 1}): "
+                    f"p_background_music={cur_p_music:.3f} (target={target_p_music:.3f})"
                 )
 
         gan_scale = 0.0

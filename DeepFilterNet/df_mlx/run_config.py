@@ -371,6 +371,16 @@ class TrainingConfig:
         help="Curriculum learning warmup epochs (0=disabled). SNR/interferer probabilities ramp from 0 to target.",
         normalize=lambda v: _normalize_int(v, min_value=0),
     )
+    music_start_epoch: int = cfg_field(
+        0,
+        help="Epoch at which background-music injection begins ramping (0=from start, requires p_background_music>0).",
+        normalize=lambda v: _normalize_int(v, min_value=0),
+    )
+    music_ramp_epochs: int = cfg_field(
+        0,
+        help="Epochs over which p_background_music ramps from 0 to target after music_start_epoch (0=instant).",
+        normalize=lambda v: _normalize_int(v, min_value=0),
+    )
     patience: int = cfg_field(10, help="Early stopping patience", normalize=lambda v: _normalize_int(v, min_value=0))
     grad_accumulation_steps: int = cfg_field(
         1, help="Gradient accumulation steps", normalize=lambda v: _normalize_int(v, min_value=1)

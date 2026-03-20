@@ -155,6 +155,16 @@ def _apply_cli_overrides(cfg: RunConfig, args: argparse.Namespace, argv: list[st
             getattr(args, "curriculum_warmup_epochs", None),
         ),
         (
+            ["--music-start-epoch"],
+            "training.music_start_epoch",
+            getattr(args, "music_start_epoch", None),
+        ),
+        (
+            ["--music-ramp-epochs"],
+            "training.music_ramp_epochs",
+            getattr(args, "music_ramp_epochs", None),
+        ),
+        (
             ["--speech-gain-range"],
             "dataset.speech_gain_range",
             getattr(args, "speech_gain_range", None),

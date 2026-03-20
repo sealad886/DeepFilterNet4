@@ -9,6 +9,8 @@
 
 [dataset]
 cache_dir = "/Users/andrew/DataDump/datasets/mlx_datastore"
+p_background_music = 0.35
+background_music_gain_range = [0, 16]
 
 [training]
 epochs = 100
@@ -21,6 +23,8 @@ grad_accumulation_steps = 2
 max_grad_norm = 0.8
 fp16 = true
 seed = 42
+music_start_epoch = 30
+music_ramp_epochs = 10
 
 [dataloader]
 num_workers = 8

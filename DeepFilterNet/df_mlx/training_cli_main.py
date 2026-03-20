@@ -334,6 +334,18 @@ def main():
         "SNR/interferer probabilities ramp linearly from 0 to target values.",
     )
     parser.add_argument(
+        "--music-start-epoch",
+        type=int,
+        default=0,
+        help="Epoch at which background-music injection begins (0=from start).",
+    )
+    parser.add_argument(
+        "--music-ramp-epochs",
+        type=int,
+        default=0,
+        help="Epochs over which p_background_music ramps from 0 to target after music_start_epoch (0=instant).",
+    )
+    parser.add_argument(
         "--speech-gain-range",
         type=float,
         nargs=2,
@@ -803,6 +815,8 @@ def main():
         p_interfer_speech=default_cfg.dataset.p_interfer_speech,
         p_background_music=default_cfg.dataset.p_background_music,
         curriculum_warmup_epochs=default_cfg.training.curriculum_warmup_epochs,
+        music_start_epoch=default_cfg.training.music_start_epoch,
+        music_ramp_epochs=default_cfg.training.music_ramp_epochs,
         speech_gain_range=default_cfg.dataset.speech_gain_range,
         noise_gain_range=default_cfg.dataset.noise_gain_range,
         background_music_gain_range=default_cfg.dataset.background_music_gain_range,
@@ -993,6 +1007,8 @@ def main():
         p_interfer_speech=run_cfg.dataset.p_interfer_speech,
         p_background_music=run_cfg.dataset.p_background_music,
         curriculum_warmup_epochs=run_cfg.training.curriculum_warmup_epochs,
+        music_start_epoch=run_cfg.training.music_start_epoch,
+        music_ramp_epochs=run_cfg.training.music_ramp_epochs,
         speech_gain_range=run_cfg.dataset.speech_gain_range,
         noise_gain_range=run_cfg.dataset.noise_gain_range,
         background_music_gain_range=run_cfg.dataset.background_music_gain_range,
