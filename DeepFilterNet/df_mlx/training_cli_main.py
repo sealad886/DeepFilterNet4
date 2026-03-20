@@ -577,6 +577,12 @@ def main():
         help="Update discriminator every N steps",
     )
     parser.add_argument(
+        "--gan-freeze-disc-after-epoch",
+        type=int,
+        default=-1,
+        help="Freeze discriminator weights after this epoch (-1 = never). Only FM loss used after freezing.",
+    )
+    parser.add_argument(
         "--no-vad-proxy",
         action="store_true",
         help="Disable cheap VAD proxy gating in awesome loss",
@@ -853,6 +859,7 @@ def main():
         gan_disc_weight_decay=default_cfg.gan.disc_weight_decay,
         gan_disc_grad_clip=default_cfg.gan.disc_grad_clip,
         gan_disc_update_freq=default_cfg.gan.disc_update_freq,
+        gan_freeze_disc_after_epoch=default_cfg.gan.freeze_disc_after_epoch,
         gan_cache_gen_waveforms=default_cfg.gan.cache_gen_waveforms,
         gan_disc_gradient_checkpoint=default_cfg.gan.disc_gradient_checkpoint,
         gan_gen_gradient_checkpoint=default_cfg.gan.gen_gradient_checkpoint,
@@ -1043,6 +1050,7 @@ def main():
         gan_disc_weight_decay=run_cfg.gan.disc_weight_decay,
         gan_disc_grad_clip=run_cfg.gan.disc_grad_clip,
         gan_disc_update_freq=run_cfg.gan.disc_update_freq,
+        gan_freeze_disc_after_epoch=run_cfg.gan.freeze_disc_after_epoch,
         gan_disc_max_samples=run_cfg.gan.disc_max_samples,
         gan_mpd_channels=run_cfg.gan.mpd_channels,
         gan_msd_channels=run_cfg.gan.msd_channels,

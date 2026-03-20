@@ -1,0 +1,104 @@
+# E3: Frozen-discriminator feature matching experiment
+# Uses full CombinedDiscriminator (MPD+MSD) identical to E0 baseline,
+# then freezes all disc weights after epoch 23.  After freezing:
+#   - Disc backward pass + optimizer updates stop  (saves ~50% GAN compute)
+#   - Adversarial loss zeroed (gan_weight=0)
+#   - Feature matching loss continues (fm_weight unchanged)
+# Expected: same quality as E0 with ~50% GAN-phase memory/compute savings post-freeze.
+#
+# Usage:
+#   python -m df_mlx.train_dynamic \
+#     --run-config DeepFilterNet/df_mlx/configs/run_profiles/frozen_disc_fm.toml
+
+[dataset]
+cache_dir = "/Users/andrew/DataDump/datasets/mlx_datastore"
+p_background_music = 0.35
+background_music_gain_range = [0, 16]
+
+[training]
+epochs = 100
+batch_size = 12
+learning_rate = 1e-6
+weight_decay = 0.0
+warmup_epochs = 5
+patience = 10
+grad_accumulation_steps = 2
+max_grad_norm = 0.8
+fp16 = true
+seed = 42
+music_start_epoch = 30
+music_ramp_epochs = 10
+
+[dataloader]
+num_workers = 8
+prefetch_size = 12
+use_mlx_data = true
+
+[checkpoint]
+checkpoint_dir = "/Users/andrew/DataDump/checkpoints/e3_frozen_disc_fm"
+save_strategy = "epoch"
+validate_every = 1
+checkpoint_batches = 200
+check_chkpts = false
+resume = true
+resume_data = true
+
+[model]
+backbone_type = "attention"
+variant = "full"
+
+[loss]
+dynamic_loss = "pipeline_awesome"
+
+[loss.awesome]
+loss_weight = 0.4
+mask_sharpness = 6.0
+warmup_steps = 2000
+proxy_enabled = false
+
+[loss.mrstft]
+factor = 0.2
+gamma = 0.7
+f_complex = 0.15
+fft_sizes = [512, 1024, 2048]
+hop_sizes = [128, 256, 512]
+
+[gan]
+enabled = true
+start_epoch = 20
+ramp_epochs = 5
+adv_weight = 0.06
+fm_weight = 1.0
+discriminator = "combined"       # Full CombinedDiscriminator (MPD+MSD) — same as E0
+mpd_periods = [2, 3, 5, 7, 11]
+msd_scales = 3
+disc_lr = 1e-5
+disc_weight_decay = 0.01
+disc_grad_clip = 1.0
+disc_update_freq = 2
+disc_max_samples = 48000
+mpd_channels = 16
+msd_channels = 64
+freeze_disc_after_epoch = 23     # Freeze disc at epoch 23 — only FM loss after this
+cache_gen_waveforms = true
+disc_gradient_checkpoint = true
+eval_frequency = 4
+
+[vad]
+loss_weight = 0.05
+threshold = 0.1
+margin = 0.05
+speech_loss_weight = 0.01
+warmup_epochs = 5
+snr_gate_db = -10.0
+snr_gate_width = 6.0
+band_low_hz = 300.0
+band_high_hz = 3400.0
+z_threshold = 0.0
+z_slope = 1.0
+
+[vad.eval]
+mode = "silero"
+every = 2
+batches = 4
+max_seconds = 0.0

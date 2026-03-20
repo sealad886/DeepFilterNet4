@@ -317,6 +317,7 @@ def train(
     gan_disc_weight_decay: float = 0.0,
     gan_disc_grad_clip: float = 1.0,
     gan_disc_update_freq: int = 1,
+    gan_freeze_disc_after_epoch: int = -1,
     gan_disc_max_samples: int = 48000,
     gan_cache_gen_waveforms: bool = True,
     gan_disc_gradient_checkpoint: bool = False,
@@ -1869,6 +1870,7 @@ def train(
     )
     print(f"Starting training at epoch {start_display} | last_completed_epoch={lc_display}")
 
+    disc_frozen = False
     for epoch in range(start_epoch, epochs):
         epoch_start = time.perf_counter()
         loop_state.final_epoch = epoch
@@ -1984,6 +1986,26 @@ def train(
         fm_weight_mx = mx.array(fm_weight, dtype=mx.float32)
         gan_active = gan_enabled and gan_scale > 0.0
         loop_state.gan_active = gan_active
+
+        # Freeze discriminator after the specified epoch: stop disc updates,
+        # zero adversarial weight, keep only feature-matching signal.
+        if (
+            gan_active
+            and not disc_frozen
+            and gan_freeze_disc_after_epoch >= 0
+            and epoch >= gan_freeze_disc_after_epoch
+            and discriminator is not None
+        ):
+            discriminator.freeze()
+            disc_frozen = True
+            print(
+                f"  \U0001f9ca Discriminator frozen at epoch {epoch + 1} "
+                f"(gan_freeze_disc_after_epoch={gan_freeze_disc_after_epoch}). "
+                f"Disc updates disabled; only FM loss remains."
+            )
+        if disc_frozen:
+            gan_weight = 0.0
+            gan_weight_mx = mx.array(0.0, dtype=mx.float32)
 
         # GAN epochs use a tighter eval_frequency to bound lazy-graph
         # accumulation.  With per-step compiled disc and single-eval enabled
@@ -2548,7 +2570,13 @@ def train(
                 del model_out
 
             gan_d_loss_val = 0.0
-            if gan_active and discriminator is not None and disc_optimizer is not None and gan_loss_fns is not None:
+            if (
+                gan_active
+                and not disc_frozen
+                and discriminator is not None
+                and disc_optimizer is not None
+                and gan_loss_fns is not None
+            ):
                 do_disc_update = did_optimizer_update and ((loop_state.global_step % gan_disc_update_freq) == 0)
                 if do_disc_update:
                     _, disc_loss_fn = gan_loss_fns

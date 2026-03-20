@@ -784,6 +784,11 @@ class GanConfig:
         help="Update discriminator every N steps",
         normalize=lambda v: _normalize_int(v, min_value=1),
     )
+    freeze_disc_after_epoch: int = cfg_field(
+        -1,
+        help="Freeze discriminator weights after this epoch (-1 = never). Only FM loss used after freezing.",
+        normalize=lambda v: _normalize_int(v, min_value=-1),
+    )
     disc_max_samples: int = cfg_field(
         48000,
         help="Max waveform samples fed to discriminator to limit memory",

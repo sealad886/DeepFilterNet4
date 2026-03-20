@@ -326,6 +326,11 @@ def _apply_cli_overrides(cfg: RunConfig, args: argparse.Namespace, argv: list[st
             "gan.disc_update_freq",
             getattr(args, "gan_disc_update_freq", None),
         ),
+        (
+            ["--gan-freeze-disc-after-epoch"],
+            "gan.freeze_disc_after_epoch",
+            getattr(args, "gan_freeze_disc_after_epoch", None),
+        ),
         (["--vad-loss-weight"], "vad.loss_weight", getattr(args, "vad_loss_weight", None)),
         (["--vad-threshold"], "vad.threshold", getattr(args, "vad_threshold", None)),
         (["--vad-margin"], "vad.margin", getattr(args, "vad_margin", None)),
