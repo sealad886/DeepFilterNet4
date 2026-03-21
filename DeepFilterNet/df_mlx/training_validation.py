@@ -208,8 +208,7 @@ def run_validation(
         )
 
     valid_tqdm_kwargs = dict(ctx.tqdm_kwargs)
-    if ctx.tqdm_panels:
-        valid_tqdm_kwargs["position"] = ctx.tqdm_valid_position
+    valid_tqdm_kwargs["position"] = ctx.tqdm_valid_position
 
     valid_pbar = tqdm(
         valid_loader,
