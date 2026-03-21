@@ -653,7 +653,7 @@ def main(argv: list[str] | None = None) -> int:
             progress.done("Applying rollback changes", apply_start)
 
             post_validate_start = progress.start("Validating post-rollback state")
-            latest = find_latest_checkpoint(checkpoint_dir)
+            latest = find_latest_checkpoint(checkpoint_dir, prefer_completed=False)
             if latest is None:
                 print("Error: no checkpoints remain after rollback", file=sys.stderr)
                 return 2

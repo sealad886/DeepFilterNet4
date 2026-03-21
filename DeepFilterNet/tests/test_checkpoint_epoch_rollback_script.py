@@ -138,7 +138,7 @@ def test_apply_rolls_back_newer_checkpoints_and_syncs_data_checkpoint(tmp_path: 
     assert rc == 0
     assert not newer.exists()
 
-    latest = find_latest_checkpoint(tmp_path)
+    latest = find_latest_checkpoint(tmp_path, prefer_completed=False)
     assert latest == target_step
 
     report = validate_checkpoint_dir(tmp_path, strict=True, validate_load=False)

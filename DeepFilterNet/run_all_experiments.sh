@@ -43,7 +43,9 @@ is_finished() {
 
 has_checkpoint() {
     local ckpt_dir="$1"
-    ls "${ckpt_dir}"/epoch_*.safetensors "${ckpt_dir}"/interrupted_epoch_*.safetensors "${ckpt_dir}"/best.safetensors 2>/dev/null | grep -q .
+    # Only check for completed checkpoints — Python's find_latest_checkpoint
+    # now prefers these over interrupted/step checkpoints by default.
+    ls "${ckpt_dir}"/epoch_*.safetensors "${ckpt_dir}"/best.safetensors 2>/dev/null | grep -q .
 }
 
 run_experiment() {
@@ -59,12 +61,10 @@ run_experiment() {
         return 0
     fi
 
-    # Clean stale interrupted/data artifacts that cause mismatch on re-resume
-    rm -f "${ckpt_dir}/interrupted_epoch_"*.safetensors \
-          "${ckpt_dir}/interrupted_epoch_"*.state.json \
-          "${ckpt_dir}/data_checkpoint.json" 2>/dev/null || true
-
-    # Build resume flags if partial checkpoint exists
+    # Build resume flags if a completed checkpoint exists.
+    # Python's find_latest_checkpoint(prefer_completed=True) will select the
+    # latest epoch-boundary checkpoint, ignoring interrupted/step checkpoints.
+    # reconcile_resume() handles any data_checkpoint.json mismatch gracefully.
     local resume_flags=""
     if has_checkpoint "$ckpt_dir"; then
         resume_flags="--resume"
