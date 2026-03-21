@@ -20,8 +20,31 @@ DEEPFILTERNET="${REPO_ROOT}/DeepFilterNet"
 CONFIGS="${DEEPFILTERNET}/df_mlx/configs/run_profiles"
 LOG_DIR="/tmp/dfn_experiment_logs"
 CKPT_BASE="/Users/andrew/DataDump/checkpoints"
+LOCKFILE="/tmp/dfn_experiments.lock"
 
 mkdir -p "$LOG_DIR"
+
+# Prevent duplicate launches
+if [ -f "$LOCKFILE" ]; then
+    old_pid=$(cat "$LOCKFILE" 2>/dev/null || echo "")
+    if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+        echo "ERROR: Another experiment runner is active (PID ${old_pid}). Exiting."
+        exit 1
+    fi
+    echo "Stale lockfile found (PID ${old_pid} not running). Removing."
+    rm -f "$LOCKFILE"
+fi
+
+# Also check for any running train_dynamic processes
+existing_pid=$(pgrep -f 'df_mlx.train_dynamic' 2>/dev/null || true)
+if [ -n "$existing_pid" ]; then
+    echo "WARNING: Existing training process detected (PID ${existing_pid})."
+    echo "  Kill it first or wait for it to finish before running this script."
+    exit 1
+fi
+
+echo $$ > "$LOCKFILE"
+trap 'rm -f "$LOCKFILE"' EXIT
 
 echo "========================================"
 echo " DeepFilterNet4 Experiment Runner"
