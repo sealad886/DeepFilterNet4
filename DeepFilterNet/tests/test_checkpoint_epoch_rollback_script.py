@@ -15,7 +15,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 
 from rollback_checkpoint_epoch import main  # type: ignore[import-not-found]  # noqa: E402
 
-from df_mlx.training_checkpoints import find_latest_checkpoint, save_checkpoint, validate_checkpoint_dir  # noqa: E402
+from df_mlx.training_checkpoints import (  # noqa: E402
+    find_latest_checkpoint,
+    save_checkpoint,
+    validate_checkpoint_dir,
+)
 
 
 class TinyModel(nn.Module):
