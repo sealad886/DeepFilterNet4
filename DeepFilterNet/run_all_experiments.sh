@@ -59,10 +59,15 @@ run_experiment() {
         return 0
     fi
 
+    # Clean stale interrupted/data artifacts that cause mismatch on re-resume
+    rm -f "${ckpt_dir}/interrupted_epoch_"*.safetensors \
+          "${ckpt_dir}/interrupted_epoch_"*.state.json \
+          "${ckpt_dir}/data_checkpoint.json" 2>/dev/null || true
+
     # Build resume flags if partial checkpoint exists
     local resume_flags=""
     if has_checkpoint "$ckpt_dir"; then
-        resume_flags="--resume --resume-data"
+        resume_flags="--resume"
         echo ""
         echo "════════════════════════════════════════"
         echo " RESUMING: ${name}"
