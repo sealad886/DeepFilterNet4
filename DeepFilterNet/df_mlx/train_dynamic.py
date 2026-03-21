@@ -676,8 +676,11 @@ def train(
     )
 
     tqdm_setup_panel = None
-    tqdm_train_position = 0
-    tqdm_valid_position = 0
+    # Position 0 (bottom-most line) is reserved for the epoch progress bar.
+    # Other bars stack above it.
+    tqdm_epoch_position = 0
+    tqdm_train_position = 1
+    tqdm_valid_position = 1
     if _tqdm_panels:
         setup_line = _build_setup_panel_line(
             epochs=epochs,
@@ -693,13 +696,13 @@ def train(
             total=1,
             desc=setup_line,
             bar_format="{desc}",
-            position=0,
+            position=1,
             leave=True,
             **_TQDM_KWARGS,
         )
         tqdm_setup_panel.update(1)
-        tqdm_train_position = 1
-        tqdm_valid_position = 2
+        tqdm_train_position = 2
+        tqdm_valid_position = 3
 
     train_config = build_train_config(
         config,
@@ -1870,6 +1873,19 @@ def train(
     )
     print(f"Starting training at epoch {start_display} | last_completed_epoch={lc_display}")
 
+    # Overarching epoch progress bar — pinned to the bottom of the terminal.
+    epoch_pbar = tqdm(
+        total=epochs,
+        initial=start_epoch,
+        desc="Overall",
+        unit="epoch",
+        position=tqdm_epoch_position,
+        leave=True,
+        bar_format=("{l_bar}{bar}| {n_fmt}/{total_fmt} epochs" " [{elapsed}<{remaining}, {postfix}]"),
+        **_TQDM_KWARGS,
+    )
+    epoch_pbar.set_postfix_str("starting…")
+
     disc_frozen = False
     for epoch in range(start_epoch, epochs):
         epoch_start = time.perf_counter()
@@ -2163,8 +2179,7 @@ def train(
                 print(f"  Resuming epoch {epoch + 1} from micro-batch {resume_batches_for_epoch}")
 
         train_tqdm_kwargs = dict(_TQDM_KWARGS)
-        if _tqdm_panels:
-            train_tqdm_kwargs["position"] = tqdm_train_position
+        train_tqdm_kwargs["position"] = tqdm_train_position
 
         train_pbar = tqdm(
             enumerate(islice(data_iterator, train_total)),
@@ -3102,6 +3117,16 @@ def train(
             else:
                 print("⚠️  End-of-epoch checkpoint failed; epoch not marked as complete.")
 
+        # ====== Update epoch progress bar ======
+        _epoch_postfix_parts = [
+            f"loss={loop_state.avg_train_loss:.4f}",
+            f"val={avg_valid_loss:.4f}" if avg_valid_loss != float("inf") else "val=…",
+            f"best={loop_state.best_valid_loss:.4f}",
+            f"stg={loop_state.active_stage_name}",
+        ]
+        epoch_pbar.set_postfix_str(" | ".join(_epoch_postfix_parts))
+        epoch_pbar.update(1)
+
         if should_stop:
             print(f"\nEarly stopping after {patience} epochs without improvement")
             break
@@ -3144,6 +3169,7 @@ def train(
         active_stage_index=loop_state.active_stage_index,
         active_stage_name=loop_state.active_stage_name,
         tqdm_setup_panel=tqdm_setup_panel,
+        epoch_pbar=epoch_pbar,
         run_validation_fn=_run_final_validation,
     )
 

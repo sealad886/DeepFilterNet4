@@ -901,6 +901,7 @@ def finalize_training(
     active_stage_index: int,
     active_stage_name: str,
     tqdm_setup_panel: Any | None,
+    epoch_pbar: Any | None,
     run_validation_fn: Any,  # Callable[[], float]
 ) -> None:
     """Run final validation, save final/best checkpoints, and print summary."""
@@ -982,6 +983,8 @@ def finalize_training(
 
     if tqdm_setup_panel is not None:
         tqdm_setup_panel.close()
+    if epoch_pbar is not None:
+        epoch_pbar.close()
 
 
 @dataclass
