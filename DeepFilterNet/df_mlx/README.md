@@ -150,6 +150,20 @@ python -m df_mlx.train_dynamic \
     --config ./file_lists/config.json
 ```
 
+Recommended starting point for the strongest general-purpose speech-clarity run:
+
+```bash
+python -m df_mlx.train_dynamic \
+    --run-config DeepFilterNet/df_mlx/configs/run_profiles/pipeline_awesome_gan_curriculum_clear_speech.toml \
+    --config ./file_lists/config.json
+```
+
+That profile keeps the speech-focused curriculum / GAN balance from the
+`speech_only` profile, but also enables explicit loud-background-music exposure
+via `dataset.p_background_music` and `dataset.background_music_gain_range`. For
+raw file-list training, make sure the run also has a dedicated
+`background_music.txt` wired through `dataset.music_list` or `--music-list`.
+
 Single-file mode (no separate `--train-config` INI): inline train.py-compatible
 INI sections inside the run-config TOML under `train_ini.*`.
 

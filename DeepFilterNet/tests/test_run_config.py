@@ -230,6 +230,22 @@ def test_contrastive_dfn3_full_vadlite_profile_loads() -> None:
     assert cfg.loss.mrstft.factor == 0.0
 
 
+def test_clear_speech_profile_loads() -> None:
+    profiles_dir = Path(__file__).resolve().parents[1] / "df_mlx" / "configs" / "run_profiles"
+    profile_path = profiles_dir / "pipeline_awesome_gan_curriculum_clear_speech.toml"
+    cfg = load_run_config(profile_path)
+
+    assert cfg.loss.dynamic_loss == "pipeline_awesome"
+    assert cfg.dataset.p_background_music == pytest.approx(0.30)
+    assert cfg.dataset.background_music_gain_range == (0.0, 16.0)
+    assert cfg.training.music_start_epoch == 30
+    assert cfg.training.music_ramp_epochs == 10
+    assert cfg.gan.start_epoch == 80
+    assert cfg.vad.speech_loss_weight == pytest.approx(0.30)
+    assert cfg.enhance.speech_boost_db == pytest.approx(4.0)
+    assert cfg.enhance.speech_boost_threshold == pytest.approx(0.4)
+
+
 def test_setup_dataset_falls_back_from_removed_cleaned_cache_dir(tmp_path: Path, capsys) -> None:
     actual_cache_dir = tmp_path / "mlx_datastore"
     actual_cache_dir.mkdir()
