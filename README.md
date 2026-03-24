@@ -195,24 +195,38 @@ deepFilter path/to/noisy_audio.wav
 
 ### Manual Installation
 
-Install cargo via [rustup](https://rustup.rs/). Usage of a `conda` or `virtualenv` recommended.
+Install cargo via [rustup](https://rustup.rs/). Use a local `virtualenv`/`venv`
+or conda environment; do not install repository dependencies into the global
+Python.
 Please read the comments and only execute the commands that you need.
+
+Recommended developer setup:
+```bash
+cd path/to/DeepFilterNet/
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install --upgrade pip setuptools wheel
+python3 -m pip install -e ./DeepFilterNet[train,eval]
+
+# Apple Silicon / df_mlx development:
+python3 -m pip install -r DeepFilterNet/requirements_mlx.txt
+```
 
 Installation of python dependencies and libDF:
 ```bash
 cd path/to/DeepFilterNet/  # cd into repository
 # Recommended: Install or activate a python env
 # Mandatory: Install cpu/cuda pytorch (>=1.8) dependency from pytorch.org, e.g.:
-pip install torch torchaudio -f https://download.pytorch.org/whl/cpu/torch_stable.html
+python3 -m pip install torch torchaudio -f https://download.pytorch.org/whl/cpu/torch_stable.html
 # Install build dependencies used to compile libdf and DeepFilterNet python wheels
-pip install maturin setuptools wheel
+python3 -m pip install maturin setuptools wheel
 
 #  Install remaining DeepFilterNet python dependencies
 # *Option A:* Install DeepFilterNet python wheel globally within your environment. Do this if you want use
 # this repos as is, and don't want to develop within this repository.
-pip install ./DeepFilterNet[train,eval]
+python3 -m pip install ./DeepFilterNet[train,eval]
 # *Option B:* If you want to develop within this repo, install only dependencies and work with the repository version
-pip install -e ./DeepFilterNet[train,eval]
+python3 -m pip install -e ./DeepFilterNet[train,eval]
 
 # If you are modifying the Rust bindings directly, rebuild them in-place:
 maturin develop --release -m pyDF/Cargo.toml
@@ -233,7 +247,7 @@ This repository uses [pre-commit](https://pre-commit.com) to run code quality ch
 
 ```bash
 # Install pre-commit
-pip install pre-commit
+python3 -m pip install pre-commit
 
 # Install git hooks
 pre-commit install
