@@ -421,7 +421,7 @@ The most relevant findings for `awesome` specifically are:
 
 ## 6.3 Fresh isolated sanity checks run for this report
 
-I could not use the repo’s pytest entrypoints directly because the currently selected Poetry environment in this clone does not have `pytest` installed. Instead, I ran direct MLX-based sanity scripts against the standalone loss implementation file.
+I could not use the repo’s pytest entrypoints directly because the currently selected local Python environment in this clone did not have `pytest` installed. Instead, I ran direct MLX-based sanity scripts against the standalone loss implementation file.
 
 ### Commands used
 

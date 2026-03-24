@@ -23,8 +23,8 @@ This repository's most active path is `DeepFilterNet/df_mlx/`.
 
 ## Validation anchors
 
-- Environment: `poetry -C DeepFilterNet install`
-- Tests: `python -m pytest` from `DeepFilterNet/`
+- Environment: `python3 -m pip install -e ./DeepFilterNet[train,eval]` plus `python3 -m pip install -r DeepFilterNet/requirements_mlx.txt`
+- Tests: `python3 -m pytest` from `DeepFilterNet/`
 - Targeted MLX path checks should stay close to changed modules and docs.
 
 ## Preferred references

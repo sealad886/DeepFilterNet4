@@ -32,10 +32,10 @@ For full workflow details: `bd prime`
 - `pyDF/` and `pyDF-data/` provide Python bindings and data loading utilities.
 
 ## Build, Test, and Development Commands
-- `poetry -C DeepFilterNet install` — install Python deps for the DeepFilterNet package.
-- `poetry -C DeepFilterNet lock --regenerate` — refresh `DeepFilterNet/poetry.lock`.
-- `python -m pytest` (run inside `DeepFilterNet/`) — execute Python tests in `DeepFilterNet/tests/`.
-- `python df/train.py --model-type dfnet4 ...` (run inside `DeepFilterNet/`) — train DFNet4 models.
+- `python3 -m pip install -e ./DeepFilterNet[train,eval]` — install the DeepFilterNet package plus training/eval deps in the active environment.
+- `python3 -m pip install -r DeepFilterNet/requirements_mlx.txt` — install MLX-specific extras for `df_mlx` work on Apple Silicon.
+- `python3 -m pytest` (run inside `DeepFilterNet/`) — execute Python tests in `DeepFilterNet/tests/`.
+- `python3 df/train.py --model-type dfnet4 ...` (run inside `DeepFilterNet/`) — train DFNet4 models.
 - `cargo build` / `cargo test` — build and test Rust crates from repo root.
 - `cargo +nightly run -p df-demo --features ui --bin df-demo --release` — run the UI demo (Linux).
 
