@@ -9,15 +9,16 @@
 #   - the dedicated background-music dataset convention in docs/CONVENTIONS.md
 #
 # Design notes:
-#   - Keeps the speech-only curriculum / GAN balance that already prioritizes
-#     suppression of non-target audio.
-#   - Adds explicit background-music exposure with a moderate probability (0.30)
-#     and loud gain range (0–16 dB), so music-obscured speech is covered
-#     without over-biasing the run toward music-heavy mixtures.
-#   - Delays music injection until epoch 30 and ramps over 10 epochs so the
-#     model learns core speech denoising before the hardest music cases.
-#   - Retains moderate VAD-driven speech boost for deployment-time recovery
-#     when speech is masked by music or dense ambience.
+#   - Keeps dynamic_loss on pipeline_awesome so the run uses the direct
+#     speech-preservation + music-suppression objective in training_losses.py.
+#   - Enables the improved proxy gates so low-energy and low-SNR speech frames
+#     get extra gradient weight instead of being treated uniformly.
+#   - Starts music exposure a bit earlier, but still ramps it in gradually, so
+#     the model sees partially masked speech before the late curriculum phases.
+#   - Pushes more weight into the speech-clarity stages and the speech-band VAD
+#     refinement term, while keeping the late GAN phase slightly restrained.
+#   - Retains dedicated background-music coverage without over-biasing the run
+#     toward music-heavy mixtures in the majority of batches.
 #
 # Usage:
 #   python -m df_mlx.train_dynamic \
@@ -46,8 +47,8 @@ grad_accumulation_steps = 2
 max_grad_norm = 1.0
 fp16 = true
 seed = 42
-music_start_epoch = 30
-music_ramp_epochs = 10
+music_start_epoch = 24
+music_ramp_epochs = 16
 
 [dataloader]
 num_workers = 8
@@ -74,36 +75,36 @@ dynamic_loss = "pipeline_awesome"
 [[loss.pipeline_stages]]
 start_epoch = 0
 name = "foundation"
-awesome_loss_weight = 0.15
+awesome_loss_weight = 0.20
 vad_loss_weight = 0.08
-vad_speech_loss_weight = 0.05
+vad_speech_loss_weight = 0.06
 
 [[loss.pipeline_stages]]
-start_epoch = 30
+start_epoch = 24
 name = "ramp"
-awesome_loss_weight = 0.45
-vad_loss_weight = 0.20
-vad_speech_loss_weight = 0.15
+awesome_loss_weight = 0.55
+vad_loss_weight = 0.22
+vad_speech_loss_weight = 0.18
 
 [[loss.pipeline_stages]]
-start_epoch = 55
-name = "full_multitask"
-awesome_loss_weight = 0.75
+start_epoch = 52
+name = "clarity_peak"
+awesome_loss_weight = 0.85
 vad_loss_weight = 0.30
-vad_speech_loss_weight = 0.35
+vad_speech_loss_weight = 0.40
 
 [[loss.pipeline_stages]]
 start_epoch = 80
-name = "gan_integration"
-awesome_loss_weight = 0.65
+name = "gan_refine"
+awesome_loss_weight = 0.72
 vad_loss_weight = 0.24
-vad_speech_loss_weight = 0.24
+vad_speech_loss_weight = 0.30
 
 [loss.awesome]
-loss_weight = 0.8
-mask_sharpness = 5.0
-warmup_steps = 2500
-proxy_enabled = false
+loss_weight = 0.85
+mask_sharpness = 5.5
+warmup_steps = 1800
+proxy_enabled = true
 
 [loss.mrstft]
 factor = 0.35
@@ -136,10 +137,10 @@ eval_frequency = 6
 [vad]
 loss_weight = 0.3
 threshold = 0.05
-margin = 0.05
-speech_loss_weight = 0.30
+margin = 0.04
+speech_loss_weight = 0.35
 warmup_epochs = 5
-snr_gate_db = -12.0
+snr_gate_db = -14.0
 snr_gate_width = 6.0
 band_low_hz = 300.0
 band_high_hz = 3400.0
@@ -172,11 +173,11 @@ debug_numerics_max_dumps = 5
 nan_skip_batch = false
 
 [enhance]
-speech_boost_db = 4.0
-speech_boost_threshold = 0.4
-speech_boost_min_speech_ms = 250
-speech_boost_min_silence_ms = 100
-speech_boost_pad_ms = 30
-speech_boost_ramp_ms = 8.0
+speech_boost_db = 4.5
+speech_boost_threshold = 0.35
+speech_boost_min_speech_ms = 220
+speech_boost_min_silence_ms = 90
+speech_boost_pad_ms = 40
+speech_boost_ramp_ms = 10.0
 speech_boost_peak_limit = 0.99
 speech_boost_silero_sample_rate = 16000

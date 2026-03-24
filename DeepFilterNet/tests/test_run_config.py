@@ -238,12 +238,15 @@ def test_clear_speech_profile_loads() -> None:
     assert cfg.loss.dynamic_loss == "pipeline_awesome"
     assert cfg.dataset.p_background_music == pytest.approx(0.30)
     assert cfg.dataset.background_music_gain_range == (0.0, 16.0)
-    assert cfg.training.music_start_epoch == 30
-    assert cfg.training.music_ramp_epochs == 10
+    assert cfg.training.music_start_epoch == 24
+    assert cfg.training.music_ramp_epochs == 16
     assert cfg.gan.start_epoch == 80
-    assert cfg.vad.speech_loss_weight == pytest.approx(0.30)
-    assert cfg.enhance.speech_boost_db == pytest.approx(4.0)
-    assert cfg.enhance.speech_boost_threshold == pytest.approx(0.4)
+    assert cfg.loss.awesome.proxy_enabled is True
+    assert cfg.loss.awesome.mask_sharpness == pytest.approx(5.5)
+    assert cfg.vad.speech_loss_weight == pytest.approx(0.35)
+    assert cfg.vad.snr_gate_db == pytest.approx(-14.0)
+    assert cfg.enhance.speech_boost_db == pytest.approx(4.5)
+    assert cfg.enhance.speech_boost_threshold == pytest.approx(0.35)
 
 
 def test_setup_dataset_falls_back_from_removed_cleaned_cache_dir(tmp_path: Path, capsys) -> None:
