@@ -249,6 +249,42 @@ def test_clear_speech_profile_loads() -> None:
     assert cfg.enhance.speech_boost_threshold == pytest.approx(0.35)
 
 
+def test_clear_speech_original_profile_loads() -> None:
+    profiles_dir = Path(__file__).resolve().parents[1] / "df_mlx" / "configs" / "run_profiles"
+    profile_path = profiles_dir / "pipeline_awesome_gan_curriculum_clear_speech_original.toml"
+    cfg = load_run_config(profile_path)
+
+    assert cfg.loss.dynamic_loss == "pipeline_awesome"
+    assert cfg.dataset.p_background_music == pytest.approx(0.30)
+    assert cfg.dataset.background_music_gain_range == (0.0, 16.0)
+    assert cfg.training.music_start_epoch == 30
+    assert cfg.training.music_ramp_epochs == 10
+    assert cfg.loss.awesome.proxy_enabled is False
+    assert cfg.loss.awesome.mask_sharpness == pytest.approx(5.0)
+    assert cfg.vad.speech_loss_weight == pytest.approx(0.30)
+    assert cfg.vad.snr_gate_db == pytest.approx(-12.0)
+    assert cfg.enhance.speech_boost_db == pytest.approx(4.0)
+    assert cfg.enhance.speech_boost_threshold == pytest.approx(0.4)
+
+
+def test_clear_speech_conservative_profile_loads() -> None:
+    profiles_dir = Path(__file__).resolve().parents[1] / "df_mlx" / "configs" / "run_profiles"
+    profile_path = profiles_dir / "pipeline_awesome_gan_curriculum_clear_speech_conservative.toml"
+    cfg = load_run_config(profile_path)
+
+    assert cfg.loss.dynamic_loss == "pipeline_awesome"
+    assert cfg.dataset.p_background_music == pytest.approx(0.30)
+    assert cfg.dataset.background_music_gain_range == (0.0, 16.0)
+    assert cfg.training.music_start_epoch == 28
+    assert cfg.training.music_ramp_epochs == 14
+    assert cfg.loss.awesome.proxy_enabled is True
+    assert cfg.loss.awesome.mask_sharpness == pytest.approx(5.25)
+    assert cfg.vad.speech_loss_weight == pytest.approx(0.32)
+    assert cfg.vad.snr_gate_db == pytest.approx(-13.0)
+    assert cfg.enhance.speech_boost_db == pytest.approx(4.25)
+    assert cfg.enhance.speech_boost_threshold == pytest.approx(0.38)
+
+
 def test_setup_dataset_falls_back_from_removed_cleaned_cache_dir(tmp_path: Path, capsys) -> None:
     actual_cache_dir = tmp_path / "mlx_datastore"
     actual_cache_dir.mkdir()
