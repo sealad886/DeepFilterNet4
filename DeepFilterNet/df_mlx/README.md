@@ -62,6 +62,13 @@ Pre-compute spectral features once, then train:
 # Optional: synthesize extra speaker-in-room/live-ish background-music variants
 ./scripts/datasets/build_mlx_datastore.sh --prepare-background-music
 
+# Optional: render a small audition pack to listen to original vs prepared
+# before committing to a full cache build
+python scripts/datasets/audition_background_music.py \
+    --file-list ./data/lists/background_music_expanded.txt \
+    --rir-list ./data/lists/rir_all.txt \
+    --output-dir ./data/audition/background_music
+
 # Train
 python -m df_mlx.train_with_data \
     --datastore ./mlx_datastore \
@@ -168,7 +175,9 @@ raw file-list training, make sure the run also has a dedicated
 `background_music_expanded.txt` wired through `dataset.music_list` or
 `--music-list`. When building the MLX cache, you can additionally pass
 `--prepare-background-music` to synthesize dirtier speaker-in-room/live-ish
-variants from that list before sharding.
+variants from that list before sharding. To tune the recipe by ear first, use
+`scripts/datasets/audition_background_music.py` to render a small before/after
+pack with `original.wav`, `prepared_vXX.wav`, and `compare_vXX.wav` clips.
 
 Single-file mode (no separate `--train-config` INI): inline train.py-compatible
 INI sections inside the run-config TOML under `train_ini.*`.
