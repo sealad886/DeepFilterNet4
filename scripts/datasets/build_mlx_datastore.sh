@@ -166,6 +166,22 @@ Optional clean-speech preprocessing:
                               currently 4 for MLX, 1 for torch)
   --preprocess-overwrite      Rebuild preprocessed files even if they already exist; otherwise resume is automatic
 
+Optional background-music preparation:
+  --prepare-background-music  Render synthetic room/speaker/live-ish variants
+                              from the music list before cache building
+  --music-prepare-output-root P
+                              Directory for prepared music mirror tree
+  --music-prepare-base-dir P  Base dir used to preserve relative paths
+  --music-prepare-output-list P
+                              File list written for prepared music outputs
+  --music-prepare-rir-list P  Optional RIR list used while dirtying music
+                              (default: reuse --rir-list when present)
+  --music-prepare-variants N  Variants to render per source music file
+                              (default: 2)
+  --music-prepare-seed N      Base seed for deterministic rendering
+                              (default: 1337)
+  --music-prepare-overwrite   Rebuild prepared music files even if they already exist; otherwise resume is automatic
+
 General:
   -h, --help                  Show this help message and exit
 
@@ -184,6 +200,12 @@ Examples:
     --profile apple \
     --merge-short \
     --preprocess-clean-speech
+
+  # Expand the music set with synthetic speaker-in-room/live-ish variants.
+  ./build_mlx_datastore.sh \
+    --profile apple \
+    --merge-short \
+    --prepare-background-music
 
   # Append CHAINS speaking-style speech and preprocess it in the same pass.
   ./build_mlx_datastore.sh \
@@ -222,9 +244,17 @@ CLI_PREPROCESS_WORKERS=""
 CLI_PREPROCESS_PROBE_WORKERS=""
 CLI_PREPROCESS_PROBE_CACHE=""
 CLI_PREPROCESS_ENHANCE_BATCH_SIZE=""
+CLI_MUSIC_PREPARE_OUTPUT_ROOT=""
+CLI_MUSIC_PREPARE_BASE_DIR=""
+CLI_MUSIC_PREPARE_OUTPUT_LIST=""
+CLI_MUSIC_PREPARE_RIR_LIST=""
+CLI_MUSIC_PREPARE_VARIANTS=""
+CLI_MUSIC_PREPARE_SEED=""
 CLI_MERGE_SHORT=""
 PREPROCESS_CLEAN_SPEECH=0
 PREPROCESS_OVERWRITE=0
+PREPARE_BACKGROUND_MUSIC=0
+MUSIC_PREPARE_OVERWRITE=0
 INCLUDE_CHAINS=0
 
 while [[ $# -gt 0 ]]; do
@@ -357,6 +387,38 @@ while [[ $# -gt 0 ]]; do
       PREPROCESS_OVERWRITE=1
       shift
       ;;
+    --prepare-background-music)
+      PREPARE_BACKGROUND_MUSIC=1
+      shift
+      ;;
+    --music-prepare-output-root)
+      CLI_MUSIC_PREPARE_OUTPUT_ROOT="$2"
+      shift 2
+      ;;
+    --music-prepare-base-dir)
+      CLI_MUSIC_PREPARE_BASE_DIR="$2"
+      shift 2
+      ;;
+    --music-prepare-output-list)
+      CLI_MUSIC_PREPARE_OUTPUT_LIST="$2"
+      shift 2
+      ;;
+    --music-prepare-rir-list)
+      CLI_MUSIC_PREPARE_RIR_LIST="$2"
+      shift 2
+      ;;
+    --music-prepare-variants)
+      CLI_MUSIC_PREPARE_VARIANTS="$2"
+      shift 2
+      ;;
+    --music-prepare-seed)
+      CLI_MUSIC_PREPARE_SEED="$2"
+      shift 2
+      ;;
+    --music-prepare-overwrite)
+      MUSIC_PREPARE_OVERWRITE=1
+      shift
+      ;;
     -h|--help)
       usage_helptext
       exit 0
@@ -410,6 +472,13 @@ PREPROCESS_DEVICE="${CLI_PREPROCESS_DEVICE:-${PREPROCESS_DEVICE:-}}"
 PREPROCESS_PROBE_WORKERS="${CLI_PREPROCESS_PROBE_WORKERS:-${PREPROCESS_PROBE_WORKERS:-}}"
 PREPROCESS_PROBE_CACHE="${CLI_PREPROCESS_PROBE_CACHE:-${PREPROCESS_PROBE_CACHE:-}}"
 PREPROCESS_ENHANCE_BATCH_SIZE="${CLI_PREPROCESS_ENHANCE_BATCH_SIZE:-${PREPROCESS_ENHANCE_BATCH_SIZE:-}}"
+MUSIC_PREPARE_OUTPUT_ROOT="${CLI_MUSIC_PREPARE_OUTPUT_ROOT:-${MUSIC_PREPARE_OUTPUT_ROOT:-${DATA_DIR}/prepared/background_music_roomy}}"
+MUSIC_PREPARE_BASE_DIR="${CLI_MUSIC_PREPARE_BASE_DIR:-${MUSIC_PREPARE_BASE_DIR:-${DATA_DIR}/raw}}"
+MUSIC_PREPARE_OUTPUT_LIST="${CLI_MUSIC_PREPARE_OUTPUT_LIST:-${MUSIC_PREPARE_OUTPUT_LIST:-${LIST_DIR}/background_music.prepared.txt}}"
+MUSIC_PREPARE_RIR_LIST="${CLI_MUSIC_PREPARE_RIR_LIST:-${MUSIC_PREPARE_RIR_LIST:-${RIR_LIST}}}"
+MUSIC_PREPARE_VARIANTS="${CLI_MUSIC_PREPARE_VARIANTS:-${MUSIC_PREPARE_VARIANTS:-2}}"
+MUSIC_PREPARE_SEED="${CLI_MUSIC_PREPARE_SEED:-${MUSIC_PREPARE_SEED:-1337}}"
+MUSIC_PREPARE_MERGED_LIST="${MUSIC_PREPARE_MERGED_LIST:-${LIST_DIR}/background_music.prepared_merged.txt}"
 
 case "${PROFILE}" in
   prototype)
@@ -486,6 +555,20 @@ if [[ -f "${MUSIC_LIST}" ]]; then
 else
   echo "Music list:         (none - dedicated background music disabled)"
 fi
+echo "Prepare music:      $([[ ${PREPARE_BACKGROUND_MUSIC} -eq 1 ]] && echo "enabled" || echo "disabled")"
+if [[ ${PREPARE_BACKGROUND_MUSIC} -eq 1 ]]; then
+  echo "Music prep root:    ${MUSIC_PREPARE_OUTPUT_ROOT}"
+  echo "Music prep base:    ${MUSIC_PREPARE_BASE_DIR}"
+  echo "Music prep list:    ${MUSIC_PREPARE_OUTPUT_LIST}"
+  echo "Music prep variants: ${MUSIC_PREPARE_VARIANTS}"
+  echo "Music prep seed:    ${MUSIC_PREPARE_SEED}"
+  if [[ -n "${MUSIC_PREPARE_RIR_LIST}" ]]; then
+    echo "Music prep RIRs:    ${MUSIC_PREPARE_RIR_LIST}"
+  else
+    echo "Music prep RIRs:    (none)"
+  fi
+  echo "Music prep mode:    $([[ ${MUSIC_PREPARE_OVERWRITE} -eq 1 ]] && echo "overwrite" || echo "resume")"
+fi
 if [[ -f "${RIR_LIST}" ]]; then
   echo "RIR list:           ${RIR_LIST}"
 else
@@ -550,6 +633,7 @@ if [[ ! -f "${NOISE_LIST}" ]]; then
 fi
 
 CLEAN_LIST_TO_USE="${CLEAN_LIST}"
+MUSIC_LIST_TO_USE="${MUSIC_LIST}"
 mkdir -p "${OUTPUT_DIR}"
 mkdir -p "${LIST_DIR}"
 
@@ -628,6 +712,43 @@ fi
 echo "[timing] Clean-speech preprocessing: $(phase_elapsed)"
 
 SECONDS=0
+if [[ ${PREPARE_BACKGROUND_MUSIC} -eq 1 ]]; then
+  if [[ ! -f "${MUSIC_LIST}" ]]; then
+    echo ""
+    echo "Background-music preparation requested, but no music list exists at ${MUSIC_LIST}."
+    echo "Continuing without prepared music variants."
+  else
+    echo ""
+    echo "Preparing degraded background-music variants before cache build..."
+    music_prepare_cmd=(
+      "${PYTHON_BIN}"
+      "${ROOT_DIR}/scripts/datasets/prepare_background_music.py"
+      --file-list "${MUSIC_LIST}"
+      --output-root "${MUSIC_PREPARE_OUTPUT_ROOT}"
+      --base-dir "${MUSIC_PREPARE_BASE_DIR}"
+      --output-list "${MUSIC_PREPARE_OUTPUT_LIST}"
+      --sample-rate "${SR}"
+      --variants-per-source "${MUSIC_PREPARE_VARIANTS}"
+      --seed "${MUSIC_PREPARE_SEED}"
+    )
+    if [[ -n "${MUSIC_PREPARE_RIR_LIST}" && -f "${MUSIC_PREPARE_RIR_LIST}" ]]; then
+      music_prepare_cmd+=(--rir-list "${MUSIC_PREPARE_RIR_LIST}")
+    fi
+    if [[ ${MUSIC_PREPARE_OVERWRITE} -eq 1 ]]; then
+      music_prepare_cmd+=(--overwrite)
+    fi
+    "${music_prepare_cmd[@]}"
+    if [[ ! -f "${MUSIC_PREPARE_OUTPUT_LIST}" ]]; then
+      echo "Error: music preparation did not produce list ${MUSIC_PREPARE_OUTPUT_LIST}" >&2
+      exit 1
+    fi
+    merge_unique_file_lists "${MUSIC_PREPARE_MERGED_LIST}" "${MUSIC_LIST}" "${MUSIC_PREPARE_OUTPUT_LIST}"
+    MUSIC_LIST_TO_USE="${MUSIC_PREPARE_MERGED_LIST}"
+  fi
+fi
+echo "[timing] Background-music preparation: $(phase_elapsed)"
+
+SECONDS=0
 echo ""
 echo "Starting audio cache build..."
 echo "Speech list used: ${CLEAN_LIST_TO_USE}"
@@ -653,8 +774,8 @@ build_cmd=(
   --max-pending-bytes "${MAX_PENDING_BYTES}"
 )
 
-if [[ -f "${MUSIC_LIST}" ]]; then
-  build_cmd+=(--music-list "${MUSIC_LIST}")
+if [[ -f "${MUSIC_LIST_TO_USE}" ]]; then
+  build_cmd+=(--music-list "${MUSIC_LIST_TO_USE}")
 fi
 
 if [[ -f "${RIR_LIST}" ]]; then
@@ -674,6 +795,9 @@ echo "=============================================="
 echo "Audio cache:       ${OUTPUT_DIR}"
 echo "Config:            ${OUTPUT_DIR}/config.json"
 echo "Speech list used:  ${CLEAN_LIST_TO_USE}"
+if [[ -f "${MUSIC_LIST_TO_USE}" ]]; then
+  echo "Music list used:   ${MUSIC_LIST_TO_USE}"
+fi
 echo ""
 echo "Validate cache:"
 echo "  ${PYTHON_BIN} -m df_mlx.validate_audio_cache \"${OUTPUT_DIR}\""

@@ -168,6 +168,32 @@ if args and args[0].endswith("preprocess_clean_speech.py"):
     output_list.write_text("".join(f"{{path}}\\n" for path in outputs), encoding="utf-8")
     raise SystemExit(0)
 
+if args and args[0].endswith("prepare_background_music.py"):
+    file_list = Path(arg_value("--file-list"))
+    output_root = Path(arg_value("--output-root"))
+    base_dir = Path(arg_value("--base-dir")).resolve()
+    output_list = Path(arg_value("--output-list"))
+    variants = int(arg_value("--variants-per-source"))
+    outputs: list[str] = []
+    for raw_line in file_list.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        source = Path(line).expanduser().resolve()
+        try:
+            relative = source.relative_to(base_dir)
+        except ValueError:
+            relative = Path("_external") / source.name
+        variant_dir = output_root / relative.parent / f"{{relative.stem}}__wav"
+        for variant_idx in range(variants):
+            target = variant_dir / f"{{relative.stem}}.speaker_room_v{{variant_idx:02d}}.wav"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"fake-roomy-music")
+            outputs.append(str(target))
+    output_list.parent.mkdir(parents=True, exist_ok=True)
+    output_list.write_text("".join(f"{{path}}\\n" for path in outputs), encoding="utf-8")
+    raise SystemExit(0)
+
 if len(args) >= 2 and args[0] == "-m" and args[1] == "df_mlx.build_audio_cache":
     output_dir = Path(arg_value("--output-dir"))
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -203,6 +229,9 @@ def test_build_mlx_datastore_help_mentions_preprocess_and_merge_short() -> None:
     assert "--include-chains" in result.stdout
     assert "--chains-dir PATH" in result.stdout
     assert "--music-list PATH" in result.stdout
+    assert "--prepare-background-music" in result.stdout
+    assert "--music-prepare-variants N" in result.stdout
+    assert "--music-prepare-rir-list P" in result.stdout
     assert "Examples:" in result.stdout
 
 
@@ -513,6 +542,105 @@ def test_build_mlx_datastore_prefers_expanded_background_music_list(tmp_path: Pa
     build_call = next(call for call in calls if call["args"][:2] == ["-m", "df_mlx.build_audio_cache"])
     build_args = build_call["args"]
     assert build_args[build_args.index("--music-list") + 1] == str(expanded_music_list)
+
+
+def test_build_mlx_datastore_prepares_background_music_and_merges_lists(tmp_path: Path) -> None:
+    sample_rate = 16_000
+    data_dir = tmp_path / "data"
+    lists_dir = data_dir / "lists"
+    cache_dir = tmp_path / "cache"
+
+    speech_file = tmp_path / "speech" / "speech.wav"
+    noise_file = tmp_path / "noise" / "noise.wav"
+    music_file = tmp_path / "music" / "music.wav"
+    rir_file = tmp_path / "rir" / "rir.wav"
+    _write_wav(speech_file, sample_rate=sample_rate, seconds=1.2)
+    _write_wav(noise_file, sample_rate=sample_rate, seconds=0.6, frequency_hz=220.0)
+    _write_wav(music_file, sample_rate=sample_rate, seconds=0.8, frequency_hz=330.0)
+    _write_wav(rir_file, sample_rate=sample_rate, seconds=0.1, frequency_hz=110.0)
+
+    lists_dir.mkdir(parents=True, exist_ok=True)
+    clean_list = lists_dir / "clean_all.txt"
+    noise_list = lists_dir / "noise_music.txt"
+    music_list = lists_dir / "background_music_expanded.txt"
+    rir_list = lists_dir / "rir_all.txt"
+    clean_list.write_text(f"{speech_file}\n", encoding="utf-8")
+    noise_list.write_text(f"{noise_file}\n", encoding="utf-8")
+    music_list.write_text(f"{music_file}\n", encoding="utf-8")
+    rir_list.write_text(f"{rir_file}\n", encoding="utf-8")
+
+    fake_python = tmp_path / "fake_python.py"
+    fake_log = tmp_path / "fake_python_calls.jsonl"
+    _write_fake_python_bin(fake_python)
+
+    env = os.environ.copy()
+    env["PYTHON_BIN"] = str(fake_python)
+    env["FAKE_PY_LOG"] = str(fake_log)
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(BUILD_SCRIPT),
+            "--data-dir",
+            str(data_dir),
+            "--list-dir",
+            str(lists_dir),
+            "--output-dir",
+            str(cache_dir),
+            "--clean-list",
+            str(clean_list),
+            "--noise-list",
+            str(noise_list),
+            "--rir-list",
+            str(rir_list),
+            "--profile",
+            "prototype",
+            "--prepare-background-music",
+            "--music-prepare-variants",
+            "2",
+            "--sample-rate",
+            str(sample_rate),
+            "--segment-length",
+            "1.0",
+            "--min-duration",
+            "0",
+            "--num-workers",
+            "1",
+            "--shard-size",
+            "1",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Prepare music:      enabled" in result.stdout
+
+    calls = [json.loads(line) for line in fake_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+    prepare_call = next(
+        call for call in calls if call["args"] and call["args"][0].endswith("prepare_background_music.py")
+    )
+    build_call = next(call for call in calls if call["args"][:2] == ["-m", "df_mlx.build_audio_cache"])
+
+    prepare_args = prepare_call["args"]
+    assert prepare_args[prepare_args.index("--file-list") + 1] == str(music_list)
+    assert prepare_args[prepare_args.index("--rir-list") + 1] == str(rir_list)
+    assert prepare_args[prepare_args.index("--variants-per-source") + 1] == "2"
+    prepared_list = lists_dir / "background_music.prepared.txt"
+    merged_list = lists_dir / "background_music.prepared_merged.txt"
+    assert prepare_args[prepare_args.index("--output-list") + 1] == str(prepared_list)
+
+    merged_entries = [line.strip() for line in merged_list.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert str(music_file) in merged_entries
+    assert len(merged_entries) == 3
+    assert sum("speaker_room_v" in entry for entry in merged_entries) == 2
+
+    build_args = build_call["args"]
+    assert build_args[build_args.index("--music-list") + 1] == str(merged_list)
 
 
 def test_build_mlx_datastore_smoke_prints_cache_dir_override(tmp_path: Path) -> None:

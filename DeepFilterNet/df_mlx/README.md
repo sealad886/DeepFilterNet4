@@ -59,6 +59,9 @@ Pre-compute spectral features once, then train:
 # Build datastore (one-time)
 ./scripts/datasets/build_mlx_datastore.sh
 
+# Optional: synthesize extra speaker-in-room/live-ish background-music variants
+./scripts/datasets/build_mlx_datastore.sh --prepare-background-music
+
 # Train
 python -m df_mlx.train_with_data \
     --datastore ./mlx_datastore \
@@ -162,7 +165,10 @@ That profile keeps the speech-focused curriculum / GAN balance from the
 `speech_only` profile, but also enables explicit loud-background-music exposure
 via `dataset.p_background_music` and `dataset.background_music_gain_range`. For
 raw file-list training, make sure the run also has a dedicated
-`background_music.txt` wired through `dataset.music_list` or `--music-list`.
+`background_music_expanded.txt` wired through `dataset.music_list` or
+`--music-list`. When building the MLX cache, you can additionally pass
+`--prepare-background-music` to synthesize dirtier speaker-in-room/live-ish
+variants from that list before sharding.
 
 Single-file mode (no separate `--train-config` INI): inline train.py-compatible
 INI sections inside the run-config TOML under `train_ini.*`.
