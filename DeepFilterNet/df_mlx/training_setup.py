@@ -27,6 +27,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from df_mlx.file_lists import resolve_dataset_file_lists
+
 
 def _sync_model_config_with_dataset(model_cfg: Any, dataset_cfg: Any) -> None:
     """Align MLX model config with dataset audio parameters."""
@@ -159,6 +161,20 @@ def setup_dataset(
     else:
         if not speech_list:
             raise ValueError("Either --cache-dir, --config, or --speech-list required")
+
+        resolved_lists = resolve_dataset_file_lists(
+            speech_list=speech_list,
+            noise_list=noise_list,
+            music_list=music_list,
+            rir_list=rir_list,
+        )
+        speech_list = resolved_lists.speech_list
+        noise_list = resolved_lists.noise_list
+        music_list = resolved_lists.music_list
+        rir_list = resolved_lists.rir_list
+        for key, path in resolved_lists.auto_selected.items():
+            label = key.removesuffix("_list").replace("_", " ")
+            print(f"Auto-selected {label} list: {path}")
 
         speech_files = read_file_list(speech_list)
         noise_files = read_file_list(noise_list) if noise_list else []

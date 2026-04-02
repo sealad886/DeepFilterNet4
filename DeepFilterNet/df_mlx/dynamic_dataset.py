@@ -58,6 +58,7 @@ from .feature_ops import (
     create_erb_filterbank,
 )
 from .file_lists import read_file_list as _read_file_list
+from .file_lists import resolve_dataset_file_lists
 from .hf_paths import hf_dataset_fsspec_path, normalize_hf_dataset_cache_dir
 
 # Optional mlx-data import (for MLXDataStream)
@@ -1390,10 +1391,16 @@ def create_dataset_from_lists(
     Returns:
         Configured DynamicDataset
     """
-    speech_files = read_file_list(speech_list)
-    noise_files = read_file_list(noise_list)
-    rir_files = read_file_list(rir_list) if rir_list else []
-    music_files = read_file_list(music_list) if music_list else []
+    resolved_lists = resolve_dataset_file_lists(
+        speech_list=speech_list,
+        noise_list=noise_list,
+        rir_list=rir_list,
+        music_list=music_list,
+    )
+    speech_files = read_file_list(resolved_lists.speech_list)
+    noise_files = read_file_list(resolved_lists.noise_list) if resolved_lists.noise_list else []
+    rir_files = read_file_list(resolved_lists.rir_list) if resolved_lists.rir_list else []
+    music_files = read_file_list(resolved_lists.music_list) if resolved_lists.music_list else []
 
     config = DatasetConfig(
         speech_files=speech_files,

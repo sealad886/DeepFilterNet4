@@ -189,6 +189,12 @@ variants from that list before sharding. The cache builder accepts
 before/after pack with `original.wav`, `prepared_vXX.wav`, and
 `compare_vXX.wav` clips.
 
+For raw file-list training without an explicit `dataset.music_list`, the MLX
+training setup now auto-resolves sibling list files in this order:
+`background_music.prepared_merged.txt` → `background_music_expanded.txt` →
+`background_music.txt`. That means the expanded/prepared music corpora flow
+through the same dedicated `music_list` path that legacy MUSAN-only music used.
+
 Single-file mode (no separate `--train-config` INI): inline train.py-compatible
 INI sections inside the run-config TOML under `train_ini.*`.
 

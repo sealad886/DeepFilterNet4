@@ -249,7 +249,11 @@ the exclusion list in `setup.sh` and add a `--with-<crate>` maturin flag.
 
 - Keep generic environmental noise and dedicated music in separate list artifacts.
 - `noise_all.txt` is the canonical generic-noise list for new MLX datastore builds.
-- `background_music.txt` is the canonical music-only list used with `--music-list` / `p_background_music`.
+- Dedicated music list preference for new MLX/raw-list training flows is:
+  `background_music.prepared_merged.txt` → `background_music_expanded.txt` →
+  `background_music.txt`.
+- `background_music.txt` remains the legacy MUSAN-only fallback used when the
+  richer derived lists are not present.
 - `noise_music.txt` remains a backward-compatible combined list for legacy HDF5 and older workflows, but new dedicated-music training flows must not use it as both the generic noise source and the dedicated music source.
 
 **Rationale:**
@@ -529,6 +533,7 @@ _None documented yet._
 - **2026-03-06**: Clarified that resumed `batch_idx` persists cumulative micro-batch progress, trailing accumulation windows flush at epoch end, and step checkpoints only fire on real optimizer-step transitions.
 - **2026-03-06**: Added Rust ndarray workspace-pin convention documenting the mandatory shared `ndarray = "=0.15.6"` dependency across tract/hdf5-related crates.
 - **2026-03-15**: Added dataset-list separation convention documenting `noise_all.txt` vs `background_music.txt` for dedicated loud-background-music training without double-counting music as generic noise.
+- **2026-04-03**: Raw-list MLX training now auto-resolves sibling dedicated-music lists in the order `background_music.prepared_merged.txt` → `background_music_expanded.txt` → `background_music.txt`, so expanded/prepared music corpora enter the same `music_list` path previously used for MUSAN-only music.
 - **2026-03-16**: Added split epsilon convention documenting `1e-10` for magnitude/log-magnitude paths, `1e-8` for band-energy/reduction guards, and the requirement that benchmark tooling expose `mag_eps` and `band_eps` separately.
 
 ---

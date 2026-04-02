@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from df_mlx.dynamic_dataset import create_dataset_from_lists
 from df_mlx.run_config import (
     RunConfig,
     apply_run_config_dict,
@@ -305,3 +306,58 @@ def test_setup_dataset_missing_cache_lists_checked_candidates(tmp_path: Path) ->
     message = str(exc_info.value)
     assert "mlx_datastore_cleaned/config.json" in message
     assert "mlx_datastore/config.json" in message
+
+
+def test_setup_dataset_auto_selects_prepared_or_expanded_background_music_list(tmp_path: Path, capsys) -> None:
+    lists_dir = tmp_path / "lists"
+    lists_dir.mkdir()
+
+    speech_list = lists_dir / "clean_all.txt"
+    noise_list = lists_dir / "noise_all.txt"
+    legacy_music_list = lists_dir / "background_music.txt"
+    expanded_music_list = lists_dir / "background_music_expanded.txt"
+    prepared_music_list = lists_dir / "background_music.prepared_merged.txt"
+    rir_list = lists_dir / "rir_all.txt"
+
+    speech_list.write_text("/tmp/speech_a.wav\n", encoding="utf-8")
+    noise_list.write_text("/tmp/noise_a.wav\n", encoding="utf-8")
+    legacy_music_list.write_text("/tmp/music_legacy.wav\n", encoding="utf-8")
+    expanded_music_list.write_text("/tmp/music_expanded.wav\n", encoding="utf-8")
+    prepared_music_list.write_text("/tmp/music_prepared.wav\n", encoding="utf-8")
+    rir_list.write_text("/tmp/rir_a.wav\n", encoding="utf-8")
+
+    result = setup_dataset(
+        speech_list=str(speech_list),
+        noise_list=str(noise_list),
+        use_mlx_data=False,
+    )
+
+    assert result.config.noise_files == ["/tmp/noise_a.wav"]
+    assert result.config.music_files == ["/tmp/music_prepared.wav"]
+    assert result.config.rir_files == ["/tmp/rir_a.wav"]
+    output = capsys.readouterr().out
+    assert f"Auto-selected music list: {prepared_music_list}" in output
+    assert f"Auto-selected rir list: {rir_list}" in output
+
+
+def test_create_dataset_from_lists_prefers_expanded_music_when_present(tmp_path: Path) -> None:
+    lists_dir = tmp_path / "lists"
+    lists_dir.mkdir()
+
+    speech_list = lists_dir / "clean_all.txt"
+    noise_list = lists_dir / "noise_all.txt"
+    legacy_music_list = lists_dir / "background_music.txt"
+    expanded_music_list = lists_dir / "background_music_expanded.txt"
+
+    speech_list.write_text("/tmp/speech_a.wav\n", encoding="utf-8")
+    noise_list.write_text("/tmp/noise_a.wav\n", encoding="utf-8")
+    legacy_music_list.write_text("/tmp/music_legacy.wav\n", encoding="utf-8")
+    expanded_music_list.write_text("/tmp/music_expanded.wav\n", encoding="utf-8")
+
+    dataset = create_dataset_from_lists(
+        speech_list=str(speech_list),
+        noise_list=str(noise_list),
+    )
+
+    assert dataset.config.noise_files == ["/tmp/noise_a.wav"]
+    assert dataset.config.music_files == ["/tmp/music_expanded.wav"]
