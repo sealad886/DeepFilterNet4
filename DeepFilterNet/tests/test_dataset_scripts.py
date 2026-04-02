@@ -173,6 +173,7 @@ if args and args[0].endswith("prepare_background_music.py"):
     output_root = Path(arg_value("--output-root"))
     base_dir = Path(arg_value("--base-dir")).resolve()
     output_list = Path(arg_value("--output-list"))
+    style = arg_value("--style") if "--style" in args else "speaker_room"
     variants = int(arg_value("--variants-per-source"))
     outputs: list[str] = []
     for raw_line in file_list.read_text(encoding="utf-8").splitlines():
@@ -186,7 +187,7 @@ if args and args[0].endswith("prepare_background_music.py"):
             relative = Path("_external") / source.name
         variant_dir = output_root / relative.parent / f"{{relative.stem}}__wav"
         for variant_idx in range(variants):
-            target = variant_dir / f"{{relative.stem}}.speaker_room_v{{variant_idx:02d}}.wav"
+            target = variant_dir / f"{{relative.stem}}.{{style}}_v{{variant_idx:02d}}.wav"
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(b"fake-roomy-music")
             outputs.append(str(target))
@@ -230,6 +231,7 @@ def test_build_mlx_datastore_help_mentions_preprocess_and_merge_short() -> None:
     assert "--chains-dir PATH" in result.stdout
     assert "--music-list PATH" in result.stdout
     assert "--prepare-background-music" in result.stdout
+    assert "--music-prepare-style STYLE" in result.stdout
     assert "--music-prepare-variants N" in result.stdout
     assert "--music-prepare-rir-list P" in result.stdout
     assert "Examples:" in result.stdout
@@ -596,6 +598,8 @@ def test_build_mlx_datastore_prepares_background_music_and_merges_lists(tmp_path
             "--profile",
             "prototype",
             "--prepare-background-music",
+            "--music-prepare-style",
+            "phone_room",
             "--music-prepare-variants",
             "2",
             "--sample-rate",
@@ -629,6 +633,7 @@ def test_build_mlx_datastore_prepares_background_music_and_merges_lists(tmp_path
     prepare_args = prepare_call["args"]
     assert prepare_args[prepare_args.index("--file-list") + 1] == str(music_list)
     assert prepare_args[prepare_args.index("--rir-list") + 1] == str(rir_list)
+    assert prepare_args[prepare_args.index("--style") + 1] == "phone_room"
     assert prepare_args[prepare_args.index("--variants-per-source") + 1] == "2"
     prepared_list = lists_dir / "background_music.prepared.txt"
     merged_list = lists_dir / "background_music.prepared_merged.txt"
@@ -637,10 +642,92 @@ def test_build_mlx_datastore_prepares_background_music_and_merges_lists(tmp_path
     merged_entries = [line.strip() for line in merged_list.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert str(music_file) in merged_entries
     assert len(merged_entries) == 3
-    assert sum("speaker_room_v" in entry for entry in merged_entries) == 2
+    assert sum("phone_room_v" in entry for entry in merged_entries) == 2
 
     build_args = build_call["args"]
     assert build_args[build_args.index("--music-list") + 1] == str(merged_list)
+
+
+def test_build_mlx_datastore_prefers_active_virtualenv_python(tmp_path: Path) -> None:
+    sample_rate = 16_000
+    data_dir = tmp_path / "data"
+    lists_dir = data_dir / "lists"
+    cache_dir = tmp_path / "cache"
+    fake_venv = tmp_path / "venvs" / "dfn"
+    fake_venv_bin = fake_venv / "bin"
+
+    speech_file = tmp_path / "speech" / "speech.wav"
+    noise_file = tmp_path / "noise" / "noise.wav"
+    rir_file = tmp_path / "rir" / "rir.wav"
+
+    _write_wav(speech_file, sample_rate=sample_rate, seconds=1.2)
+    _write_wav(noise_file, sample_rate=sample_rate, seconds=0.6, frequency_hz=220.0)
+    _write_wav(rir_file, sample_rate=sample_rate, seconds=0.1, frequency_hz=110.0)
+
+    lists_dir.mkdir(parents=True, exist_ok=True)
+    clean_list = lists_dir / "clean_all.txt"
+    noise_list = lists_dir / "noise_music.txt"
+    rir_list = lists_dir / "rir_all.txt"
+    clean_list.write_text(f"{speech_file}\n", encoding="utf-8")
+    noise_list.write_text(f"{noise_file}\n", encoding="utf-8")
+    rir_list.write_text(f"{rir_file}\n", encoding="utf-8")
+
+    fake_python = fake_venv_bin / "python3"
+    fake_python_alias = fake_venv_bin / "python"
+    fake_log = tmp_path / "fake_python_calls.jsonl"
+    fake_venv_bin.mkdir(parents=True, exist_ok=True)
+    _write_fake_python_bin(fake_python)
+    fake_python_text = fake_python.read_text(encoding="utf-8")
+    fake_python_text = fake_python_text.replace("#!/usr/bin/env python3", f"#!{sys.executable}", 1)
+    fake_python.write_text(fake_python_text, encoding="utf-8")
+    fake_python.chmod(0o755)
+    fake_python_alias.write_text(fake_python_text, encoding="utf-8")
+    fake_python_alias.chmod(0o755)
+
+    env = os.environ.copy()
+    env["FAKE_PY_LOG"] = str(fake_log)
+    env["VIRTUAL_ENV"] = str(fake_venv)
+    env["PATH"] = f"{fake_venv_bin}:{env['PATH']}"
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(BUILD_SCRIPT),
+            "--data-dir",
+            str(data_dir),
+            "--list-dir",
+            str(lists_dir),
+            "--output-dir",
+            str(cache_dir),
+            "--clean-list",
+            str(clean_list),
+            "--noise-list",
+            str(noise_list),
+            "--rir-list",
+            str(rir_list),
+            "--profile",
+            "prototype",
+            "--sample-rate",
+            str(sample_rate),
+            "--segment-length",
+            "1.0",
+            "--min-duration",
+            "0",
+            "--num-workers",
+            "1",
+            "--shard-size",
+            "1",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"Python:             {fake_python}" in result.stdout
 
 
 def test_build_mlx_datastore_smoke_prints_cache_dir_override(tmp_path: Path) -> None:

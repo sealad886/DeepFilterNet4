@@ -36,9 +36,26 @@ detect_apple_silicon_tier() {
 }
 
 APPLE_SILICON_TIER="$(detect_apple_silicon_tier)"
+
+detect_active_virtualenv_python() {
+  if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+    if [[ -x "${VIRTUAL_ENV}/bin/python3" ]]; then
+      echo "${VIRTUAL_ENV}/bin/python3"
+      return 0
+    fi
+    if [[ -x "${VIRTUAL_ENV}/bin/python" ]]; then
+      echo "${VIRTUAL_ENV}/bin/python"
+      return 0
+    fi
+  fi
+  return 1
+}
+
 PYTHON_BIN="${PYTHON_BIN:-}"
 if [[ -z "${PYTHON_BIN}" ]]; then
-  if [[ -x "${ROOT_DIR}/.venv/bin/python3" ]]; then
+  if ACTIVE_VENV_PYTHON="$(detect_active_virtualenv_python)"; then
+    PYTHON_BIN="${ACTIVE_VENV_PYTHON}"
+  elif [[ -x "${ROOT_DIR}/.venv/bin/python3" ]]; then
     PYTHON_BIN="${ROOT_DIR}/.venv/bin/python3"
   elif [[ -x "${ROOT_DIR}/.venv/bin/python" ]]; then
     PYTHON_BIN="${ROOT_DIR}/.venv/bin/python"
@@ -176,6 +193,10 @@ Optional background-music preparation:
                               File list written for prepared music outputs
   --music-prepare-rir-list P  Optional RIR list used while dirtying music
                               (default: reuse --rir-list when present)
+  --music-prepare-style STYLE
+                              Background-music playback preset passed to
+                              prepare_background_music.py
+                              (default: speaker_room)
   --music-prepare-variants N  Variants to render per source music file
                               (default: 2)
   --music-prepare-seed N      Base seed for deterministic rendering
@@ -206,6 +227,13 @@ Examples:
     --profile apple \
     --merge-short \
     --prepare-background-music
+
+  # Swap the preparation preset when you want a different playback texture.
+  ./build_mlx_datastore.sh \
+    --profile apple \
+    --merge-short \
+    --prepare-background-music \
+    --music-prepare-style club_live
 
   # Append CHAINS speaking-style speech and preprocess it in the same pass.
   ./build_mlx_datastore.sh \
@@ -248,6 +276,7 @@ CLI_MUSIC_PREPARE_OUTPUT_ROOT=""
 CLI_MUSIC_PREPARE_BASE_DIR=""
 CLI_MUSIC_PREPARE_OUTPUT_LIST=""
 CLI_MUSIC_PREPARE_RIR_LIST=""
+CLI_MUSIC_PREPARE_STYLE=""
 CLI_MUSIC_PREPARE_VARIANTS=""
 CLI_MUSIC_PREPARE_SEED=""
 CLI_MERGE_SHORT=""
@@ -407,6 +436,10 @@ while [[ $# -gt 0 ]]; do
       CLI_MUSIC_PREPARE_RIR_LIST="$2"
       shift 2
       ;;
+    --music-prepare-style)
+      CLI_MUSIC_PREPARE_STYLE="$2"
+      shift 2
+      ;;
     --music-prepare-variants)
       CLI_MUSIC_PREPARE_VARIANTS="$2"
       shift 2
@@ -476,6 +509,7 @@ MUSIC_PREPARE_OUTPUT_ROOT="${CLI_MUSIC_PREPARE_OUTPUT_ROOT:-${MUSIC_PREPARE_OUTP
 MUSIC_PREPARE_BASE_DIR="${CLI_MUSIC_PREPARE_BASE_DIR:-${MUSIC_PREPARE_BASE_DIR:-${DATA_DIR}/raw}}"
 MUSIC_PREPARE_OUTPUT_LIST="${CLI_MUSIC_PREPARE_OUTPUT_LIST:-${MUSIC_PREPARE_OUTPUT_LIST:-${LIST_DIR}/background_music.prepared.txt}}"
 MUSIC_PREPARE_RIR_LIST="${CLI_MUSIC_PREPARE_RIR_LIST:-${MUSIC_PREPARE_RIR_LIST:-${RIR_LIST}}}"
+MUSIC_PREPARE_STYLE="${CLI_MUSIC_PREPARE_STYLE:-${MUSIC_PREPARE_STYLE:-speaker_room}}"
 MUSIC_PREPARE_VARIANTS="${CLI_MUSIC_PREPARE_VARIANTS:-${MUSIC_PREPARE_VARIANTS:-2}}"
 MUSIC_PREPARE_SEED="${CLI_MUSIC_PREPARE_SEED:-${MUSIC_PREPARE_SEED:-1337}}"
 MUSIC_PREPARE_MERGED_LIST="${MUSIC_PREPARE_MERGED_LIST:-${LIST_DIR}/background_music.prepared_merged.txt}"
@@ -560,6 +594,7 @@ if [[ ${PREPARE_BACKGROUND_MUSIC} -eq 1 ]]; then
   echo "Music prep root:    ${MUSIC_PREPARE_OUTPUT_ROOT}"
   echo "Music prep base:    ${MUSIC_PREPARE_BASE_DIR}"
   echo "Music prep list:    ${MUSIC_PREPARE_OUTPUT_LIST}"
+  echo "Music prep style:   ${MUSIC_PREPARE_STYLE}"
   echo "Music prep variants: ${MUSIC_PREPARE_VARIANTS}"
   echo "Music prep seed:    ${MUSIC_PREPARE_SEED}"
   if [[ -n "${MUSIC_PREPARE_RIR_LIST}" ]]; then
@@ -728,6 +763,7 @@ if [[ ${PREPARE_BACKGROUND_MUSIC} -eq 1 ]]; then
       --base-dir "${MUSIC_PREPARE_BASE_DIR}"
       --output-list "${MUSIC_PREPARE_OUTPUT_LIST}"
       --sample-rate "${SR}"
+      --style "${MUSIC_PREPARE_STYLE}"
       --variants-per-source "${MUSIC_PREPARE_VARIANTS}"
       --seed "${MUSIC_PREPARE_SEED}"
     )

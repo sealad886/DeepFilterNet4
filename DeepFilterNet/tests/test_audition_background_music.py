@@ -82,6 +82,8 @@ def test_audition_background_music_writes_pack_with_compare_clips(tmp_path: Path
             str(output_dir),
             "--sample-rate",
             str(sample_rate),
+            "--style",
+            "club_live",
             "--rir-list",
             str(rir_list),
             "--num-sources",
@@ -102,9 +104,12 @@ def test_audition_background_music_writes_pack_with_compare_clips(tmp_path: Path
 
     assert result.returncode == 0, result.stderr
     manifest = json.loads((output_dir / "audition_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["style"] == "club_live"
+    assert "club playback" in manifest["style_description"]
     samples = manifest["samples"]
     assert len(samples) == 2
-    assert (output_dir / "README.md").exists()
+    readme_text = (output_dir / "README.md").read_text(encoding="utf-8")
+    assert "Style preset: `club_live`" in readme_text
 
     for sample in samples:
         sample_dir = output_dir / sample["sample_dir"]

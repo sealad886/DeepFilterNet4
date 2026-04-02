@@ -18,8 +18,11 @@ import numpy as np
 from prepare_background_music import (  # noqa: E402
     DEFAULT_PREPARE_SEED,
     DEFAULT_RIR_PROBABILITY,
+    DEFAULT_STYLE,
     DEFAULT_VARIANTS_PER_SOURCE,
+    STYLE_PRESETS,
     build_rng,
+    describe_style,
     load_audio_file,
     load_rir_cached,
     normalize_peak,
@@ -44,6 +47,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--file-list", required=True, help="Input music file list")
     parser.add_argument("--output-dir", required=True, help="Directory for audition outputs")
     parser.add_argument("--sample-rate", type=int, default=48_000, help="Target sample rate for rendered files")
+    parser.add_argument(
+        "--style",
+        choices=tuple(STYLE_PRESETS.keys()),
+        default=DEFAULT_STYLE,
+        help=f"Playback-style preset used for prepared variants (default: {DEFAULT_STYLE})",
+    )
     parser.add_argument("--rir-list", type=str, default=None, help="Optional RIR file list used while rendering")
     parser.add_argument(
         "--num-sources",
@@ -131,22 +140,47 @@ def build_audition_entry_dir(output_dir: Path, sample_index: int, source: Path) 
     return output_dir / f"{sample_index:02d}_{sanitize_label(source)}"
 
 
-def write_manifest(output_dir: Path, manifest: list[dict[str, object]]) -> None:
+def write_manifest(
+    output_dir: Path,
+    manifest: list[dict[str, object]],
+    *,
+    style: str,
+    style_description: str,
+) -> None:
     manifest_path = output_dir / "audition_manifest.json"
     temp_path = manifest_path.with_name(f"{manifest_path.name}.tmp.{os.getpid()}")
     with temp_path.open("w", encoding="utf-8") as handle:
-        json.dump({"version": 1, "samples": manifest}, handle, indent=2, sort_keys=True)
+        json.dump(
+            {
+                "version": 1,
+                "style": style,
+                "style_description": style_description,
+                "samples": manifest,
+            },
+            handle,
+            indent=2,
+            sort_keys=True,
+        )
         handle.write("\n")
     temp_path.replace(manifest_path)
 
 
-def write_readme(output_dir: Path, manifest: list[dict[str, object]], *, sample_rate: int, clip_seconds: float) -> None:
+def write_readme(
+    output_dir: Path,
+    manifest: list[dict[str, object]],
+    *,
+    sample_rate: int,
+    clip_seconds: float,
+    style: str,
+    style_description: str,
+) -> None:
     readme_path = output_dir / "README.md"
     lines = [
         "# Background Music Audition Pack",
         "",
         f"- Sample rate: {sample_rate} Hz",
         f"- Max clip seconds: {clip_seconds}",
+        f"- Style preset: `{style}` — {style_description}",
         "- Each sample directory contains:",
         "  - `original.wav`",
         "  - `prepared_vXX.wav`",
@@ -190,10 +224,12 @@ def main() -> int:
     if args.rir_list:
         rir_paths = [Path(path).expanduser().resolve() for path in read_file_list(args.rir_list, check_exists=True)]
 
+    style_description = describe_style(args.style)
     rir_cache: dict[Path, np.ndarray] = {}
     manifest: list[dict[str, object]] = []
 
     print(f"[info] Rendering audition pack from {len(chosen_sources):,} source track(s)")
+    print(f"[info] Style preset: {args.style} — {style_description}")
     for sample_index, source in enumerate(chosen_sources):
         sample_dir = build_audition_entry_dir(output_dir, sample_index, source)
         sample_dir.mkdir(parents=True, exist_ok=True)
@@ -227,6 +263,7 @@ def main() -> int:
                     excerpt_audio,
                     args.sample_rate,
                     rng,
+                    style=args.style,
                     rir_audio=rir_audio,
                 )
                 comparison_audio = build_comparison_clip(
@@ -256,8 +293,15 @@ def main() -> int:
             }
         )
 
-    write_manifest(output_dir, manifest)
-    write_readme(output_dir, manifest, sample_rate=args.sample_rate, clip_seconds=args.clip_seconds)
+    write_manifest(output_dir, manifest, style=args.style, style_description=style_description)
+    write_readme(
+        output_dir,
+        manifest,
+        sample_rate=args.sample_rate,
+        clip_seconds=args.clip_seconds,
+        style=args.style,
+        style_description=style_description,
+    )
     print(f"[ok] wrote audition pack -> {output_dir}")
     print(f"[info] manifest -> {output_dir / 'audition_manifest.json'}")
     return 0

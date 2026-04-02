@@ -20,6 +20,7 @@ import hashlib
 import math
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -43,7 +44,98 @@ except ImportError:  # pragma: no cover - fallback only used in minimal envs
 DEFAULT_PREPARE_SEED = 1337
 DEFAULT_VARIANTS_PER_SOURCE = 2
 DEFAULT_RIR_PROBABILITY = 0.8
-SPEAKER_RESAMPLE_TARGETS = (12_000, 16_000, 18_000, 22_050, 24_000, 32_000)
+DEFAULT_STYLE = "speaker_room"
+DEFAULT_RESAMPLE_TARGETS = (8_000, 12_000, 16_000, 18_000, 22_050, 24_000, 32_000)
+
+
+@dataclass(frozen=True)
+class StylePreset:
+    description: str
+    input_gain_db: tuple[float, float]
+    resample_probability: float
+    resample_targets: tuple[int, ...]
+    low_cut_hz: tuple[float, float]
+    high_cut_hz: tuple[float, float]
+    rir_wet_mix: tuple[float, float]
+    drive: tuple[float, float]
+    clip_probability: float
+    clip_level: tuple[float, float]
+    hiss_db: tuple[float, float]
+    hum_probability: float
+    hum_db: tuple[float, float]
+    dry_blend: tuple[float, float]
+
+
+STYLE_PRESETS: dict[str, StylePreset] = {
+    "speaker_room": StylePreset(
+        description="consumer speaker in a room with mild room tone and coloration",
+        input_gain_db=(-2.0, 2.0),
+        resample_probability=0.85,
+        resample_targets=DEFAULT_RESAMPLE_TARGETS,
+        low_cut_hz=(90.0, 220.0),
+        high_cut_hz=(2_800.0, 7_800.0),
+        rir_wet_mix=(0.55, 0.9),
+        drive=(1.1, 2.8),
+        clip_probability=0.7,
+        clip_level=(0.35, 0.8),
+        hiss_db=(-36.0, -24.0),
+        hum_probability=0.6,
+        hum_db=(-40.0, -28.0),
+        dry_blend=(0.08, 0.28),
+    ),
+    "phone_room": StylePreset(
+        description="small phone or tablet speaker heard in a room",
+        input_gain_db=(-3.5, 0.8),
+        resample_probability=0.95,
+        resample_targets=(8_000, 12_000, 16_000, 22_050),
+        low_cut_hz=(180.0, 320.0),
+        high_cut_hz=(1_800.0, 4_200.0),
+        rir_wet_mix=(0.35, 0.75),
+        drive=(1.2, 2.2),
+        clip_probability=0.45,
+        clip_level=(0.45, 0.9),
+        hiss_db=(-32.0, -20.0),
+        hum_probability=0.35,
+        hum_db=(-38.0, -30.0),
+        dry_blend=(0.02, 0.12),
+    ),
+    "club_live": StylePreset(
+        description="loud PA or club playback with stronger reverberant smear",
+        input_gain_db=(-1.5, 3.0),
+        resample_probability=0.6,
+        resample_targets=(12_000, 16_000, 18_000, 22_050, 24_000),
+        low_cut_hz=(50.0, 120.0),
+        high_cut_hz=(4_500.0, 12_000.0),
+        rir_wet_mix=(0.7, 0.95),
+        drive=(1.5, 3.2),
+        clip_probability=0.8,
+        clip_level=(0.25, 0.65),
+        hiss_db=(-42.0, -30.0),
+        hum_probability=0.75,
+        hum_db=(-38.0, -24.0),
+        dry_blend=(0.04, 0.18),
+    ),
+    "muffled_tv": StylePreset(
+        description="TV or distant living-room playback with softer top end",
+        input_gain_db=(-4.0, 0.5),
+        resample_probability=0.9,
+        resample_targets=(8_000, 12_000, 16_000, 22_050, 24_000),
+        low_cut_hz=(120.0, 260.0),
+        high_cut_hz=(2_200.0, 5_200.0),
+        rir_wet_mix=(0.25, 0.6),
+        drive=(1.05, 1.8),
+        clip_probability=0.3,
+        clip_level=(0.55, 0.95),
+        hiss_db=(-34.0, -22.0),
+        hum_probability=0.25,
+        hum_db=(-42.0, -32.0),
+        dry_blend=(0.12, 0.35),
+    ),
+}
+
+
+def describe_style(style: str) -> str:
+    return STYLE_PRESETS[style].description
 
 
 def parse_args() -> argparse.Namespace:
@@ -53,6 +145,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-dir", required=True, help="Base directory used to mirror relative source paths")
     parser.add_argument("--output-list", required=True, help="Output text file listing prepared variants")
     parser.add_argument("--sample-rate", type=int, default=48_000, help="Target sample rate for prepared outputs")
+    parser.add_argument(
+        "--style",
+        choices=tuple(STYLE_PRESETS.keys()),
+        default=DEFAULT_STYLE,
+        help=f"Playback-style preset to synthesize (default: {DEFAULT_STYLE})",
+    )
     parser.add_argument(
         "--rir-list", type=str, default=None, help="Optional RIR file list used for room-playback rendering"
     )
@@ -87,14 +185,14 @@ def write_output_list(paths: list[Path], output_list: Path) -> None:
     temp_path.replace(output_list)
 
 
-def build_output_path(source: Path, output_root: Path, base_dir: Path, variant_idx: int) -> Path:
+def build_output_path(source: Path, output_root: Path, base_dir: Path, variant_idx: int, style: str) -> Path:
     try:
         relative = source.relative_to(base_dir)
     except ValueError:
         relative = Path("_external") / source.name
     suffix_label = source.suffix.lower().lstrip(".") or "audio"
     variant_dir = output_root / relative.parent / f"{relative.stem}__{suffix_label}"
-    return variant_dir / f"{relative.stem}.speaker_room_v{variant_idx:02d}.wav"
+    return variant_dir / f"{relative.stem}.{style}_v{variant_idx:02d}.wav"
 
 
 def build_rng(source: Path, variant_idx: int, seed: int) -> np.random.Generator:
@@ -131,11 +229,38 @@ def apply_filter_safely(audio: np.ndarray, sos: np.ndarray) -> np.ndarray:
         return np.asarray(scipy_signal.sosfilt(sos, audio), dtype=np.float32)
 
 
-def apply_bandwidth_shape(audio: np.ndarray, sample_rate: int, rng: np.random.Generator) -> np.ndarray:
+def match_audio_length(audio: np.ndarray, target_length: int) -> np.ndarray:
+    clipped = np.asarray(audio, dtype=np.float32)
+    if clipped.shape[0] == target_length:
+        return clipped
+    if clipped.shape[0] > target_length:
+        return np.asarray(clipped[:target_length], dtype=np.float32)
+    if clipped.shape[0] == 0:
+        return np.zeros(target_length, dtype=np.float32)
+    return np.pad(clipped, (0, target_length - clipped.shape[0])).astype(np.float32)
+
+
+def sample_range(rng: np.random.Generator, bounds: tuple[float, float]) -> float:
+    low, high = bounds
+    if high <= low:
+        return float(low)
+    return float(rng.uniform(low, high))
+
+
+def apply_bandwidth_shape(
+    audio: np.ndarray,
+    sample_rate: int,
+    rng: np.random.Generator,
+    *,
+    low_cut_hz_range: tuple[float, float],
+    high_cut_hz_range: tuple[float, float],
+) -> np.ndarray:
     shaped = np.asarray(audio, dtype=np.float32)
     nyquist_margin = max(400.0, sample_rate / 2.0 - 500.0)
-    low_cut_hz = float(rng.uniform(90.0, min(220.0, sample_rate / 8.0)))
-    high_cut_hz = float(rng.uniform(2800.0, min(7800.0, nyquist_margin)))
+    low_cut_upper = max(low_cut_hz_range[0], min(low_cut_hz_range[1], sample_rate / 8.0))
+    high_cut_upper = max(high_cut_hz_range[0], min(high_cut_hz_range[1], nyquist_margin))
+    low_cut_hz = sample_range(rng, (low_cut_hz_range[0], low_cut_upper))
+    high_cut_hz = sample_range(rng, (high_cut_hz_range[0], high_cut_upper))
     if high_cut_hz <= low_cut_hz + 200.0:
         high_cut_hz = min(sample_rate / 2.0 - 200.0, low_cut_hz + 400.0)
 
@@ -146,16 +271,31 @@ def apply_bandwidth_shape(audio: np.ndarray, sample_rate: int, rng: np.random.Ge
     return np.asarray(shaped, dtype=np.float32)
 
 
-def apply_speaker_resample_roundtrip(audio: np.ndarray, sample_rate: int, rng: np.random.Generator) -> np.ndarray:
-    lower_rates = [rate for rate in SPEAKER_RESAMPLE_TARGETS if rate < sample_rate]
+def apply_speaker_resample_roundtrip(
+    audio: np.ndarray,
+    sample_rate: int,
+    rng: np.random.Generator,
+    *,
+    targets: tuple[int, ...],
+) -> np.ndarray:
+    lower_rates = [rate for rate in targets if rate < sample_rate]
     if not lower_rates:
         return np.asarray(audio, dtype=np.float32)
     intermediate_sr = int(lower_rates[int(rng.integers(0, len(lower_rates)))])
     degraded = resample_audio(audio, sample_rate, intermediate_sr)
-    return np.asarray(resample_audio(degraded, intermediate_sr, sample_rate), dtype=np.float32)
+    round_tripped = resample_audio(degraded, intermediate_sr, sample_rate)
+    return match_audio_length(round_tripped, len(audio))
 
 
-def add_playback_noise(audio: np.ndarray, sample_rate: int, rng: np.random.Generator) -> np.ndarray:
+def add_playback_noise(
+    audio: np.ndarray,
+    sample_rate: int,
+    rng: np.random.Generator,
+    *,
+    hiss_db_range: tuple[float, float],
+    hum_probability: float,
+    hum_db_range: tuple[float, float],
+) -> np.ndarray:
     noisy = np.asarray(audio, dtype=np.float32)
     rms = float(np.sqrt(np.mean(noisy**2) + 1e-8))
     if rms <= 1e-7:
@@ -163,11 +303,11 @@ def add_playback_noise(audio: np.ndarray, sample_rate: int, rng: np.random.Gener
 
     hiss = rng.standard_normal(noisy.shape[0]).astype(np.float32)
     hiss_std = float(np.std(hiss) + 1e-8)
-    hiss_db = float(rng.uniform(-36.0, -24.0))
+    hiss_db = sample_range(rng, hiss_db_range)
     hiss_scale = rms * (10.0 ** (hiss_db / 20.0)) / hiss_std
     noisy = noisy + hiss * hiss_scale
 
-    if rng.random() < 0.6:
+    if rng.random() < hum_probability:
         hum_freq = 50.0 if rng.random() < 0.5 else 60.0
         phase = float(rng.uniform(0.0, 2.0 * math.pi))
         timeline = np.arange(noisy.shape[0], dtype=np.float32) / float(max(1, sample_rate))
@@ -175,7 +315,7 @@ def add_playback_noise(audio: np.ndarray, sample_rate: int, rng: np.random.Gener
         hum += 0.35 * np.sin((2.0 * math.pi * hum_freq * 2.0 * timeline) + phase)
         hum = hum.astype(np.float32)
         hum_std = float(np.std(hum) + 1e-8)
-        hum_db = float(rng.uniform(-40.0, -28.0))
+        hum_db = sample_range(rng, hum_db_range)
         hum_scale = rms * (10.0 ** (hum_db / 20.0)) / hum_std
         noisy = noisy + hum * hum_scale
 
@@ -194,36 +334,59 @@ def render_room_playback_variant(
     sample_rate: int,
     rng: np.random.Generator,
     *,
+    style: str = DEFAULT_STYLE,
     rir_audio: np.ndarray | None = None,
 ) -> np.ndarray:
-    original = normalize_peak(np.asarray(audio, dtype=np.float32))
+    preset = STYLE_PRESETS[style]
+    original = match_audio_length(normalize_peak(np.asarray(audio, dtype=np.float32)), len(audio))
     processed = original.copy()
 
-    input_gain_db = float(rng.uniform(-2.0, 2.0))
+    input_gain_db = sample_range(rng, preset.input_gain_db)
     processed = processed * (10.0 ** (input_gain_db / 20.0))
 
-    if rng.random() < 0.85:
-        processed = apply_speaker_resample_roundtrip(processed, sample_rate, rng)
+    if rng.random() < preset.resample_probability:
+        processed = apply_speaker_resample_roundtrip(
+            processed,
+            sample_rate,
+            rng,
+            targets=preset.resample_targets,
+        )
 
-    processed = apply_bandwidth_shape(processed, sample_rate, rng)
+    processed = match_audio_length(processed, len(original))
+    processed = apply_bandwidth_shape(
+        processed,
+        sample_rate,
+        rng,
+        low_cut_hz_range=preset.low_cut_hz,
+        high_cut_hz_range=preset.high_cut_hz,
+    )
+    processed = match_audio_length(processed, len(original))
 
     if rir_audio is not None:
-        reverbed = apply_rir(processed, rir_audio)
-        wet_mix = float(rng.uniform(0.55, 0.9))
+        reverbed = match_audio_length(apply_rir(processed, rir_audio), len(processed))
+        wet_mix = sample_range(rng, preset.rir_wet_mix)
         processed = ((wet_mix * reverbed) + ((1.0 - wet_mix) * processed)).astype(np.float32)
 
-    drive = float(rng.uniform(1.1, 2.8))
+    drive = sample_range(rng, preset.drive)
     processed = np.tanh(processed * drive) / np.tanh(drive)
 
-    if rng.random() < 0.7:
-        clip_level = float(rng.uniform(0.35, 0.8))
+    if rng.random() < preset.clip_probability:
+        clip_level = sample_range(rng, preset.clip_level)
         processed = np.clip(processed, -clip_level, clip_level) / clip_level
 
-    processed = add_playback_noise(processed, sample_rate, rng)
+    processed = add_playback_noise(
+        processed,
+        sample_rate,
+        rng,
+        hiss_db_range=preset.hiss_db,
+        hum_probability=preset.hum_probability,
+        hum_db_range=preset.hum_db,
+    )
+    processed = match_audio_length(processed, len(original))
 
-    dry_blend = float(rng.uniform(0.08, 0.28))
+    dry_blend = sample_range(rng, preset.dry_blend)
     processed = ((1.0 - dry_blend) * processed) + (dry_blend * original)
-    return normalize_peak(np.asarray(processed, dtype=np.float32))
+    return normalize_peak(match_audio_length(processed, len(original)))
 
 
 def save_audio_file(path: Path, audio: np.ndarray, sample_rate: int) -> None:
@@ -268,8 +431,9 @@ def main() -> int:
 
     print(
         f"[info] Preparing {len(source_paths):,} music sources into "
-        f"{args.variants_per_source} room-playback variant(s) each"
+        f"{args.variants_per_source} {args.style} variant(s) each"
     )
+    print(f"[info] Style preset: {args.style} — {describe_style(args.style)}")
     if rir_paths:
         print(f"[info] Loaded RIR candidate list: {len(rir_paths):,} entries (p={args.rir_probability:.2f})")
     else:
@@ -280,7 +444,7 @@ def main() -> int:
     for source in source_paths:
         audio = None
         for variant_idx in range(args.variants_per_source):
-            output_path = build_output_path(source, output_root, base_dir, variant_idx)
+            output_path = build_output_path(source, output_root, base_dir, variant_idx, args.style)
             prepared_paths.append(output_path)
             if not args.overwrite and is_complete_output(output_path):
                 reused_count += 1
@@ -296,7 +460,13 @@ def main() -> int:
                 if selected_rir is not None:
                     rir_audio = load_rir_cached(selected_rir, args.sample_rate, rir_cache)
 
-            rendered = render_room_playback_variant(audio, args.sample_rate, rng, rir_audio=rir_audio)
+            rendered = render_room_playback_variant(
+                audio,
+                args.sample_rate,
+                rng,
+                style=args.style,
+                rir_audio=rir_audio,
+            )
             save_audio_file(output_path, rendered, args.sample_rate)
             processed_count += 1
 

@@ -55,7 +55,7 @@ def _read_pcm16_wav(path: Path) -> tuple[np.ndarray, int]:
     return audio, sample_rate
 
 
-def test_prepare_background_music_renders_variants_and_resumes(tmp_path: Path) -> None:
+def test_prepare_background_music_renders_style_variants_with_consistent_length_and_resumes(tmp_path: Path) -> None:
     sample_rate = 16_000
     base_dir = tmp_path / "raw"
     music_file = base_dir / "music" / "artist" / "track.wav"
@@ -65,7 +65,7 @@ def test_prepare_background_music_renders_variants_and_resumes(tmp_path: Path) -
     output_root = tmp_path / "prepared"
     output_list = tmp_path / "lists" / "background_music.prepared.txt"
 
-    _write_wav(music_file, sample_rate=sample_rate, seconds=1.0, frequency_hz=330.0)
+    _write_wav(music_file, sample_rate=sample_rate, seconds=15001 / sample_rate, frequency_hz=330.0)
     _write_rir(rir_file, sample_rate=sample_rate)
     input_list.parent.mkdir(parents=True, exist_ok=True)
     input_list.write_text(f"{music_file}\n", encoding="utf-8")
@@ -84,6 +84,8 @@ def test_prepare_background_music_renders_variants_and_resumes(tmp_path: Path) -
         str(output_list),
         "--sample-rate",
         str(sample_rate),
+        "--style",
+        "phone_room",
         "--rir-list",
         str(rir_list),
         "--variants-per-source",
@@ -107,6 +109,7 @@ def test_prepare_background_music_renders_variants_and_resumes(tmp_path: Path) -
     ]
     assert len(prepared_entries) == 2
     assert all(path.exists() for path in prepared_entries)
+    assert all("phone_room_v" in str(path) for path in prepared_entries)
 
     source_audio, source_sr = _read_pcm16_wav(music_file)
     assert source_sr == sample_rate
