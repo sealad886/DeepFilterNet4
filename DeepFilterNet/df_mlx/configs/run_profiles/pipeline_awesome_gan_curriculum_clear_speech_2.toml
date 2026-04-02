@@ -31,32 +31,32 @@
 #     with background_music.txt from your dataset prep step.
 
 [dataset]
-cache_dir = "~/DataDump/datasets/mlx_datastore"
-p_background_music = 0.30
+cache_dir = "~/DataDump/datasets/new_mlx_datastore"
+p_background_music = 0.45
 background_music_gain_range = [0, 16]
 
 [training]
-epochs = 120
-batch_size = 24
+epochs = 220
+batch_size = 20
 learning_rate = 1e-4
 learning_rate_min = 1e-7
 weight_decay = 0.0
-warmup_epochs = 5
+warmup_epochs = 10
 patience = 0
 grad_accumulation_steps = 2
 max_grad_norm = 1.0
 fp16 = true
 seed = 42
-music_start_epoch = 24
+music_start_epoch = 40
 music_ramp_epochs = 16
 
 [dataloader]
-num_workers = 12
-prefetch_size = 24
+num_workers = 18
+prefetch_size = 25
 use_mlx_data = true
 
 [checkpoint]
-checkpoint_dir = "./checkpoints/gan_curriculum_clear_speech"
+checkpoint_dir = "/Users/andrew/DataDump/checkpoints/clear_speech_2"
 save_strategy = "epoch"
 save_total_limit = 3
 validate_every = 1
@@ -80,21 +80,21 @@ vad_loss_weight = 0.08
 vad_speech_loss_weight = 0.06
 
 [[loss.pipeline_stages]]
-start_epoch = 24
+start_epoch = 50
 name = "ramp"
 awesome_loss_weight = 0.55
 vad_loss_weight = 0.22
 vad_speech_loss_weight = 0.18
 
 [[loss.pipeline_stages]]
-start_epoch = 52
+start_epoch = 100
 name = "clarity_peak"
 awesome_loss_weight = 0.85
 vad_loss_weight = 0.30
 vad_speech_loss_weight = 0.40
 
 [[loss.pipeline_stages]]
-start_epoch = 80
+start_epoch = 170
 name = "gan_refine"
 awesome_loss_weight = 0.72
 vad_loss_weight = 0.24
@@ -115,7 +115,7 @@ hop_sizes = [128, 256, 512]
 
 [gan]
 enabled = true
-start_epoch = 80
+start_epoch = 170
 ramp_epochs = 24
 adv_weight = 0.08
 fm_weight = 0.6
@@ -151,7 +151,7 @@ z_slope = 1.0
 mode = "silero"
 every = 2
 batches = 24
-max_seconds = 0.0
+max_seconds = 10.0
 silero_sample_rate = 16000
 
 [vad.train]
