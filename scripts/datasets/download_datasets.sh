@@ -1560,8 +1560,9 @@ echo "[ok] wrote $(wc -l < "${LIST_DIR}/clean_all.txt") entries -> ${LIST_DIR}/c
 } | write_atomic_file "${LIST_DIR}/noise_all.txt"
 echo "[ok] wrote $(wc -l < "${LIST_DIR}/noise_all.txt") entries -> ${LIST_DIR}/noise_all.txt"
 
-# Dedicated background music: MUSAN music (kept separate so cache builders can
-# avoid double-counting music as generic noise when --music-list is used).
+# Legacy dedicated background music seed: MUSAN music only. We keep this file
+# for backwards compatibility and build an expanded list below when targeted
+# FSD50K room/live/speaker music clips are available.
 {
   if [[ -f "${LIST_DIR}/musan_music.txt" ]]; then
     cat "${LIST_DIR}/musan_music.txt"
@@ -1569,12 +1570,27 @@ echo "[ok] wrote $(wc -l < "${LIST_DIR}/noise_all.txt") entries -> ${LIST_DIR}/n
 } | write_atomic_file "${LIST_DIR}/background_music.txt"
 echo "[ok] wrote $(wc -l < "${LIST_DIR}/background_music.txt") entries -> ${LIST_DIR}/background_music.txt"
 
+# Expanded dedicated background music: legacy MUSAN music + targeted FSD50K
+# clips that bias toward room/live/speaker playback plus pop/rock/EDM/country
+# style and vocal/song cues.
+{
+  if [[ -f "${LIST_DIR}/background_music.txt" ]]; then
+    cat "${LIST_DIR}/background_music.txt"
+  fi
+  if [[ -f "${LIST_DIR}/fsd50k_music_targeted.txt" ]]; then
+    cat "${LIST_DIR}/fsd50k_music_targeted.txt"
+  fi
+} | write_atomic_file "${LIST_DIR}/background_music_expanded.txt"
+echo "[ok] wrote $(wc -l < "${LIST_DIR}/background_music_expanded.txt") entries -> ${LIST_DIR}/background_music_expanded.txt"
+
 # Backward-compatible combined noise+music list.
 {
   if [[ -f "${LIST_DIR}/noise_all.txt" ]]; then
     cat "${LIST_DIR}/noise_all.txt"
   fi
-  if [[ -f "${LIST_DIR}/background_music.txt" ]]; then
+  if [[ -f "${LIST_DIR}/background_music_expanded.txt" ]]; then
+    cat "${LIST_DIR}/background_music_expanded.txt"
+  elif [[ -f "${LIST_DIR}/background_music.txt" ]]; then
     cat "${LIST_DIR}/background_music.txt"
   fi
 } | write_atomic_file "${LIST_DIR}/noise_music.txt"
@@ -1618,7 +1634,8 @@ Done.
 Combined lists ready for downstream builders:
   - clean_all.txt (speech)
   - noise_all.txt (generic noise, excludes dedicated music)
-  - background_music.txt (dedicated music)
+  - background_music.txt (legacy MUSAN-only dedicated music seed)
+  - background_music_expanded.txt (legacy seed + targeted FSD50K room/live/speaker music)
   - noise_music.txt (noise + music)
   - rir_all.txt (room impulse responses)
 

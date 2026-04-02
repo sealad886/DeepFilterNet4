@@ -9,6 +9,7 @@ import sys
 import threading
 import wave
 import zipfile
+from csv import writer as csv_writer
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -62,6 +63,42 @@ def _write_stereo_wav(
 def _touch(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"")
+
+
+def _build_fake_fsd50k_corpus(root: Path, entries: list[dict[str, object]], *, sample_rate: int) -> Path:
+    metadata_dir = root / "FSD50K.metadata"
+    ground_truth_dir = root / "FSD50K.ground_truth"
+    audio_dir = root / "FSD50K.dev_audio"
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+    ground_truth_dir.mkdir(parents=True, exist_ok=True)
+
+    metadata_payload: dict[str, dict[str, object]] = {}
+    rows: list[list[str]] = [["fname", "labels", "mids", "split"]]
+    for index, entry in enumerate(entries):
+        clip_id = str(entry["clip_id"])
+        metadata_payload[clip_id] = {
+            "license": entry.get("license", "https://creativecommons.org/licenses/by/4.0/"),
+            "title": entry.get("title", ""),
+            "description": entry.get("description", ""),
+            "tags": entry.get("tags", []),
+        }
+        labels = [str(label) for label in entry.get("labels", [])]
+        rows.append([clip_id, ",".join(labels), f"/m/fake_{index}", "dev"])
+        _write_wav(
+            audio_dir / f"{clip_id}.wav", sample_rate=sample_rate, seconds=0.6, frequency_hz=220.0 + index * 30.0
+        )
+
+    (metadata_dir / "dev_clips_info_FSD50K.json").write_text(json.dumps(metadata_payload), encoding="utf-8")
+    (metadata_dir / "eval_clips_info_FSD50K.json").write_text("{}", encoding="utf-8")
+
+    with (ground_truth_dir / "dev.csv").open("w", encoding="utf-8", newline="") as handle:
+        csv = csv_writer(handle)
+        csv.writerows(rows)
+    with (ground_truth_dir / "eval.csv").open("w", encoding="utf-8", newline="") as handle:
+        csv = csv_writer(handle)
+        csv.writerow(["fname", "labels", "mids", "split"])
+
+    return root
 
 
 def _build_fake_chains_corpus(root: Path, *, sample_rate: int) -> Path:
@@ -395,6 +432,89 @@ def test_build_mlx_datastore_include_chains_preprocess_uses_combined_list_and_co
     assert build_args[build_args.index("--music-list") + 1] == str(music_list)
 
 
+def test_build_mlx_datastore_prefers_expanded_background_music_list(tmp_path: Path) -> None:
+    sample_rate = 16_000
+    data_dir = tmp_path / "data"
+    lists_dir = data_dir / "lists"
+    cache_dir = tmp_path / "cache"
+
+    speech_file = tmp_path / "speech" / "speech.wav"
+    noise_file = tmp_path / "noise" / "noise.wav"
+    legacy_music_file = tmp_path / "music" / "legacy_music.wav"
+    expanded_music_file = tmp_path / "music" / "expanded_music.wav"
+    rir_file = tmp_path / "rir" / "rir.wav"
+    _write_wav(speech_file, sample_rate=sample_rate, seconds=1.2)
+    _write_wav(noise_file, sample_rate=sample_rate, seconds=0.6, frequency_hz=220.0)
+    _write_wav(legacy_music_file, sample_rate=sample_rate, seconds=0.7, frequency_hz=330.0)
+    _write_wav(expanded_music_file, sample_rate=sample_rate, seconds=0.8, frequency_hz=440.0)
+    _write_wav(rir_file, sample_rate=sample_rate, seconds=0.1, frequency_hz=110.0)
+
+    lists_dir.mkdir(parents=True, exist_ok=True)
+    clean_list = lists_dir / "clean_all.txt"
+    noise_list = lists_dir / "noise_music.txt"
+    legacy_music_list = lists_dir / "background_music.txt"
+    expanded_music_list = lists_dir / "background_music_expanded.txt"
+    rir_list = lists_dir / "rir_all.txt"
+    clean_list.write_text(f"{speech_file}\n", encoding="utf-8")
+    noise_list.write_text(f"{noise_file}\n", encoding="utf-8")
+    legacy_music_list.write_text(f"{legacy_music_file}\n", encoding="utf-8")
+    expanded_music_list.write_text(f"{expanded_music_file}\n", encoding="utf-8")
+    rir_list.write_text(f"{rir_file}\n", encoding="utf-8")
+
+    fake_python = tmp_path / "fake_python.py"
+    fake_log = tmp_path / "fake_python_calls.jsonl"
+    _write_fake_python_bin(fake_python)
+
+    env = os.environ.copy()
+    env["PYTHON_BIN"] = str(fake_python)
+    env["FAKE_PY_LOG"] = str(fake_log)
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(BUILD_SCRIPT),
+            "--data-dir",
+            str(data_dir),
+            "--list-dir",
+            str(lists_dir),
+            "--output-dir",
+            str(cache_dir),
+            "--clean-list",
+            str(clean_list),
+            "--noise-list",
+            str(noise_list),
+            "--rir-list",
+            str(rir_list),
+            "--profile",
+            "prototype",
+            "--sample-rate",
+            str(sample_rate),
+            "--segment-length",
+            "1.0",
+            "--min-duration",
+            "0",
+            "--num-workers",
+            "1",
+            "--shard-size",
+            "1",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Music flavor:       expanded" in result.stdout
+
+    calls = [json.loads(line) for line in fake_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+    build_call = next(call for call in calls if call["args"][:2] == ["-m", "df_mlx.build_audio_cache"])
+    build_args = build_call["args"]
+    assert build_args[build_args.index("--music-list") + 1] == str(expanded_music_list)
+
+
 def test_build_mlx_datastore_smoke_prints_cache_dir_override(tmp_path: Path) -> None:
     sample_rate = 16_000
     data_dir = tmp_path / "data"
@@ -599,16 +719,133 @@ def test_download_datasets_no_download_accepts_cli_overrides(tmp_path: Path) -> 
     assert (lists_dir / "clean_all.txt").exists(), result.stdout
     assert (lists_dir / "noise_all.txt").exists(), result.stdout
     assert (lists_dir / "background_music.txt").exists(), result.stdout
+    assert (lists_dir / "background_music_expanded.txt").exists(), result.stdout
     assert (lists_dir / "noise_music.txt").exists(), result.stdout
     assert (lists_dir / "rir_all.txt").exists(), result.stdout
     assert str(vctk_dir / "wav48_silence_trimmed" / "p001" / "sample.flac") in (lists_dir / "clean_all.txt").read_text()
     assert str(musan_dir / "noise" / "noise.wav") in (lists_dir / "noise_all.txt").read_text()
     assert str(musan_dir / "music" / "music.wav") not in (lists_dir / "noise_all.txt").read_text()
     assert str(musan_dir / "music" / "music.wav") in (lists_dir / "background_music.txt").read_text()
+    assert str(musan_dir / "music" / "music.wav") in (lists_dir / "background_music_expanded.txt").read_text()
     combined_noise = (lists_dir / "noise_music.txt").read_text()
     assert str(musan_dir / "noise" / "noise.wav") in combined_noise
     assert str(musan_dir / "music" / "music.wav") in combined_noise
     assert str(air_rir_dir / "room.wav") in (lists_dir / "rir_all.txt").read_text()
+
+
+def test_download_datasets_expands_background_music_with_targeted_fsd50k(tmp_path: Path) -> None:
+    sample_rate = 16_000
+    data_dir = tmp_path / "data"
+    lists_dir = tmp_path / "lists"
+    downloads_dir = tmp_path / "downloads"
+    extract_dir = tmp_path / "raw"
+
+    vctk_dir = tmp_path / "existing" / "VCTK-Corpus-0.92"
+    musan_dir = tmp_path / "existing" / "musan"
+    air_rir_dir = tmp_path / "existing" / "air"
+    fsd50k_dir = _build_fake_fsd50k_corpus(
+        tmp_path / "existing" / "FSD50K",
+        [
+            {
+                "clip_id": "pop_live_song",
+                "title": "Pop concert recording",
+                "description": "phone capture of a live pop song in a reverberant hall",
+                "tags": ["pop", "live", "song", "crowd"],
+                "labels": ["Pop_music", "Song"],
+            },
+            {
+                "clip_id": "rock_speaker_room",
+                "title": "Rock song through speaker",
+                "description": "vocals and band heard from another room speaker",
+                "tags": ["rock", "speaker", "vocals", "room"],
+                "labels": ["Rock_music", "Song"],
+            },
+            {
+                "clip_id": "vacuum_noise",
+                "title": "Vacuum cleaner in apartment",
+                "description": "domestic noise only",
+                "tags": ["vacuum", "appliance"],
+                "labels": ["Vacuum_cleaner"],
+            },
+            {
+                "clip_id": "studio_pop_master",
+                "title": "Studio pop master",
+                "description": "clean studio pop vocals and mastered mixdown",
+                "tags": ["pop", "studio", "vocals"],
+                "labels": ["Pop_music", "Song"],
+            },
+        ],
+        sample_rate=sample_rate,
+    )
+
+    _touch(vctk_dir / "wav48_silence_trimmed" / "p001" / "sample.flac")
+    _touch(musan_dir / "noise" / "noise.wav")
+    _touch(musan_dir / "music" / "music.wav")
+    _touch(air_rir_dir / "room.wav")
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(DOWNLOAD_SCRIPT),
+            "--no-download",
+            "--data-dir",
+            str(data_dir),
+            "--list-dir",
+            str(lists_dir),
+            "--download-dir",
+            str(downloads_dir),
+            "--extract-dir",
+            str(extract_dir),
+            "--profile",
+            "production",
+            "--vctk-dir",
+            str(vctk_dir),
+            "--musan-dir",
+            str(musan_dir),
+            "--fsd50k-dir",
+            str(fsd50k_dir),
+            "--air-rir-dir",
+            str(air_rir_dir),
+            "--no-download-librispeech",
+            "--no-download-openair",
+            "--no-download-acousticrooms",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+    legacy_music = (lists_dir / "background_music.txt").read_text(encoding="utf-8")
+    expanded_music = (lists_dir / "background_music_expanded.txt").read_text(encoding="utf-8")
+    noise_only = (lists_dir / "noise_all.txt").read_text(encoding="utf-8")
+    combined_noise = (lists_dir / "noise_music.txt").read_text(encoding="utf-8")
+
+    legacy_seed_path = str(musan_dir / "music" / "music.wav")
+    targeted_pop_path = str((fsd50k_dir / "FSD50K.dev_audio" / "pop_live_song.wav").resolve())
+    targeted_rock_path = str((fsd50k_dir / "FSD50K.dev_audio" / "rock_speaker_room.wav").resolve())
+    vacuum_noise_path = str((fsd50k_dir / "FSD50K.dev_audio" / "vacuum_noise.wav").resolve())
+    studio_pop_path = str((fsd50k_dir / "FSD50K.dev_audio" / "studio_pop_master.wav").resolve())
+
+    assert legacy_seed_path in legacy_music
+    assert targeted_pop_path not in legacy_music
+    assert targeted_rock_path not in legacy_music
+
+    assert legacy_seed_path in expanded_music
+    assert targeted_pop_path in expanded_music
+    assert targeted_rock_path in expanded_music
+    assert studio_pop_path not in expanded_music
+
+    assert vacuum_noise_path in noise_only
+    assert targeted_pop_path not in noise_only
+    assert targeted_rock_path not in noise_only
+    assert studio_pop_path not in noise_only
+
+    assert targeted_pop_path in combined_noise
+    assert targeted_rock_path in combined_noise
 
 
 def test_download_datasets_skips_completed_processing_for_existing_archive_outputs(tmp_path: Path) -> None:
