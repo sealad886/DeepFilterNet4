@@ -15,7 +15,7 @@ Usage:
     python -m df_mlx.build_audio_cache \
         --speech-list /path/to/speech_files.txt \
         --noise-list /path/to/noise_files.txt \
-        --music-list /path/to/background_music_files.txt \
+        --music-list /path/to/background_music.txt \
         --rir-list /path/to/rir_files.txt \
         --output-dir /path/to/audio_cache \
         --sample-rate 48000 \
@@ -845,7 +845,10 @@ def main():
     parser.add_argument(
         "--music-list",
         type=str,
-        help="Text file with dedicated background-music audio paths (optional)",
+        help=(
+            "Text file with dedicated background-music audio paths (optional; "
+            "typically lists/background_music.txt or background_music.prepared_merged.txt)"
+        ),
     )
     parser.add_argument(
         "--rir-list",

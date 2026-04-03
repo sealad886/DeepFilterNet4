@@ -7,6 +7,38 @@ if [[ ! -d "${DEFAULT_DATA_DIR}" ]]; then
   DEFAULT_DATA_DIR="${ROOT_DIR}/data"
 fi
 
+detect_active_virtualenv_python() {
+  if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+    if [[ -x "${VIRTUAL_ENV}/bin/python3" ]]; then
+      echo "${VIRTUAL_ENV}/bin/python3"
+      return 0
+    fi
+    if [[ -x "${VIRTUAL_ENV}/bin/python" ]]; then
+      echo "${VIRTUAL_ENV}/bin/python"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+PYTHON_BIN="${PYTHON_BIN:-}"
+if [[ -z "${PYTHON_BIN}" ]]; then
+  if ACTIVE_VENV_PYTHON="$(detect_active_virtualenv_python)"; then
+    PYTHON_BIN="${ACTIVE_VENV_PYTHON}"
+  elif [[ -x "${ROOT_DIR}/.venv/bin/python3" ]]; then
+    PYTHON_BIN="${ROOT_DIR}/.venv/bin/python3"
+  elif [[ -x "${ROOT_DIR}/.venv/bin/python" ]]; then
+    PYTHON_BIN="${ROOT_DIR}/.venv/bin/python"
+  elif command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v python3)"
+  elif command -v python >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v python)"
+  else
+    echo "Error: could not find python3 or python on PATH" >&2
+    exit 1
+  fi
+fi
+
 INTERRUPTED=0
 on_interrupt() {
   INTERRUPTED=1
@@ -72,6 +104,8 @@ Dataset selection:
   --download-vctk / --no-download-vctk                       Override VCTK download toggle (default: enabled)
   --download-librispeech / --no-download-librispeech         Override LibriSpeech toggle (default: production=1, apple/prototype=0)
   --download-musan / --no-download-musan                     Override MUSAN toggle (default: enabled)
+  --download-fma / --no-download-fma                         Override FMA download toggle (default: enabled)
+  --download-mtg-jamendo / --no-download-mtg-jamendo         Override MTG-Jamendo download toggle (default: disabled)
   --download-fsd50k / --no-download-fsd50k                   Override FSD50K toggle (default: enabled)
   --download-air / --no-download-air                         Override AIR toggle (default: enabled)
   --download-openair / --no-download-openair                 Override OpenAIR toggle (default: enabled)
@@ -81,6 +115,8 @@ Dataset path overrides:
   --vctk-dir PATH                 Existing VCTK root (default: EXTRACT_DIR/VCTK-Corpus-0.92)
   --librispeech-dir PATH          Existing LibriSpeech root (default: EXTRACT_DIR/LibriSpeech)
   --musan-dir PATH                Existing MUSAN root (default: EXTRACT_DIR/musan)
+  --fma-dir PATH                  Existing FMA root (default: EXTRACT_DIR/FMA)
+  --mtg-jamendo-dir PATH          Existing MTG-Jamendo root (default: EXTRACT_DIR/mtg-jamendo)
   --fsd50k-dir PATH               Existing FSD50K root (default: EXTRACT_DIR/FSD50K)
   --air-rir-dir PATH              Existing AIR RIR root (default: AUDB_DIR/data)
   --openair-dir PATH              Existing OpenAIR root (default: AUDB_DIR/wav)
@@ -89,6 +125,10 @@ Dataset path overrides:
 Source overrides:
   --vctk-url URL                  VCTK archive URL (default: Zenodo mirror of VCTK 0.92 zip; matches official MD5)
   --librispeech-parts STRING      Space-separated LibriSpeech parts (default: profile-specific)
+  --fma-subset NAME               FMA audio subset: medium | large | full (default: profile-specific)
+  --background-music-target-count N
+                                  Curated chart-style song target count (default: 2000)
+  --background-music-min-count N  Minimum acceptable curated song count (default: 500)
   --fsd50k-base-url URL           FSD50K base URL (default: https://zenodo.org/records/4060432/files)
 
 General:
@@ -135,6 +175,8 @@ CLI_OPENAIR_VERSION=""
 CLI_DOWNLOAD_VCTK=""
 CLI_DOWNLOAD_LIBRISPEECH=""
 CLI_DOWNLOAD_MUSAN=""
+CLI_DOWNLOAD_FMA=""
+CLI_DOWNLOAD_MTG_JAMENDO=""
 CLI_DOWNLOAD_FSD50K=""
 CLI_DOWNLOAD_AIR=""
 CLI_DOWNLOAD_OPENAIR=""
@@ -142,12 +184,17 @@ CLI_DOWNLOAD_ACOUSTICROOMS=""
 CLI_VCTK_DIR=""
 CLI_LIBRISPEECH_DIR=""
 CLI_MUSAN_DIR=""
+CLI_FMA_DIR=""
+CLI_MTG_JAMENDO_DIR=""
 CLI_FSD50K_DIR=""
 CLI_AIR_RIR_DIR=""
 CLI_OPENAIR_DIR=""
 CLI_ACOUSTICROOMS_DIR=""
 CLI_VCTK_URL=""
 CLI_LIBRISPEECH_PARTS=""
+CLI_FMA_SUBSET=""
+CLI_BACKGROUND_MUSIC_TARGET_COUNT=""
+CLI_BACKGROUND_MUSIC_MIN_COUNT=""
 CLI_FSD50K_BASE_URL=""
 
 while [[ $# -gt 0 ]]; do
@@ -320,6 +367,22 @@ while [[ $# -gt 0 ]]; do
       CLI_DOWNLOAD_MUSAN="0"
       shift
       ;;
+    --download-fma)
+      CLI_DOWNLOAD_FMA="1"
+      shift
+      ;;
+    --no-download-fma)
+      CLI_DOWNLOAD_FMA="0"
+      shift
+      ;;
+    --download-mtg-jamendo)
+      CLI_DOWNLOAD_MTG_JAMENDO="1"
+      shift
+      ;;
+    --no-download-mtg-jamendo)
+      CLI_DOWNLOAD_MTG_JAMENDO="0"
+      shift
+      ;;
     --download-fsd50k)
       CLI_DOWNLOAD_FSD50K="1"
       shift
@@ -364,6 +427,14 @@ while [[ $# -gt 0 ]]; do
       CLI_MUSAN_DIR="$2"
       shift 2
       ;;
+    --fma-dir)
+      CLI_FMA_DIR="$2"
+      shift 2
+      ;;
+    --mtg-jamendo-dir)
+      CLI_MTG_JAMENDO_DIR="$2"
+      shift 2
+      ;;
     --fsd50k-dir)
       CLI_FSD50K_DIR="$2"
       shift 2
@@ -386,6 +457,18 @@ while [[ $# -gt 0 ]]; do
       ;;
     --librispeech-parts)
       CLI_LIBRISPEECH_PARTS="$2"
+      shift 2
+      ;;
+    --fma-subset)
+      CLI_FMA_SUBSET="$2"
+      shift 2
+      ;;
+    --background-music-target-count)
+      CLI_BACKGROUND_MUSIC_TARGET_COUNT="$2"
+      shift 2
+      ;;
+    --background-music-min-count)
+      CLI_BACKGROUND_MUSIC_MIN_COUNT="$2"
       shift 2
       ;;
     --fsd50k-base-url)
@@ -442,10 +525,15 @@ OPENAIR_VERSION="${CLI_OPENAIR_VERSION:-${OPENAIR_VERSION:-1.0.0}}"
 DOWNLOAD_VCTK="${CLI_DOWNLOAD_VCTK:-${DOWNLOAD_VCTK:-}}"
 DOWNLOAD_LIBRISPEECH="${CLI_DOWNLOAD_LIBRISPEECH:-${DOWNLOAD_LIBRISPEECH:-}}"
 DOWNLOAD_MUSAN="${CLI_DOWNLOAD_MUSAN:-${DOWNLOAD_MUSAN:-}}"
+DOWNLOAD_FMA="${CLI_DOWNLOAD_FMA:-${DOWNLOAD_FMA:-}}"
+DOWNLOAD_MTG_JAMENDO="${CLI_DOWNLOAD_MTG_JAMENDO:-${DOWNLOAD_MTG_JAMENDO:-}}"
 DOWNLOAD_FSD50K="${CLI_DOWNLOAD_FSD50K:-${DOWNLOAD_FSD50K:-}}"
 DOWNLOAD_AIR="${CLI_DOWNLOAD_AIR:-${DOWNLOAD_AIR:-}}"
 DOWNLOAD_OPENAIR="${CLI_DOWNLOAD_OPENAIR:-${DOWNLOAD_OPENAIR:-}}"
 DOWNLOAD_ACOUSTICROOMS="${CLI_DOWNLOAD_ACOUSTICROOMS:-${DOWNLOAD_ACOUSTICROOMS:-}}"
+
+BACKGROUND_MUSIC_TARGET_COUNT="${CLI_BACKGROUND_MUSIC_TARGET_COUNT:-${BACKGROUND_MUSIC_TARGET_COUNT:-2000}}"
+BACKGROUND_MUSIC_MIN_COUNT="${CLI_BACKGROUND_MUSIC_MIN_COUNT:-${BACKGROUND_MUSIC_MIN_COUNT:-500}}"
 
 mkdir -p "${LIST_DIR}"
 
@@ -456,6 +544,8 @@ echo "[config] download_dir=${DOWNLOAD_DIR} extract_dir=${EXTRACT_DIR} list_dir=
 VCTK_DIR="${CLI_VCTK_DIR:-${VCTK_DIR:-${EXTRACT_DIR}/VCTK-Corpus-0.92}}"
 LIBRISPEECH_DIR="${CLI_LIBRISPEECH_DIR:-${LIBRISPEECH_DIR:-${EXTRACT_DIR}/LibriSpeech}}"
 MUSAN_DIR="${CLI_MUSAN_DIR:-${MUSAN_DIR:-${EXTRACT_DIR}/musan}}"
+FMA_DIR="${CLI_FMA_DIR:-${FMA_DIR:-${EXTRACT_DIR}/FMA}}"
+MTG_JAMENDO_DIR="${CLI_MTG_JAMENDO_DIR:-${MTG_JAMENDO_DIR:-${EXTRACT_DIR}/mtg-jamendo}}"
 FSD50K_DIR="${CLI_FSD50K_DIR:-${FSD50K_DIR:-${EXTRACT_DIR}/FSD50K}}"
 # AIR/OpenAIR via audb: AIR goes to data/, OpenAIR goes to wav/
 AIR_RIR_DIR="${CLI_AIR_RIR_DIR:-${AIR_RIR_DIR:-${AUDB_DIR}/data}}"
@@ -465,7 +555,11 @@ ACOUSTICROOMS_DIR="${CLI_ACOUSTICROOMS_DIR:-${ACOUSTICROOMS_DIR:-${EXTRACT_DIR}/
 # Source overrides
 VCTK_URL="${CLI_VCTK_URL:-${VCTK_URL:-https://zenodo.org/records/10691876/files/VCTK-Corpus-0.92.zip?download=1}}"
 LIBRISPEECH_PARTS="${CLI_LIBRISPEECH_PARTS:-${LIBRISPEECH_PARTS:-}}"
+FMA_SUBSET="${CLI_FMA_SUBSET:-${FMA_SUBSET:-}}"
 FSD50K_BASE_URL="${CLI_FSD50K_BASE_URL:-${FSD50K_BASE_URL:-https://zenodo.org/records/4060432/files}}"
+
+MTG_JAMENDO_DATASET="${MTG_JAMENDO_DATASET:-raw_30s}"
+MTG_JAMENDO_TYPE="${MTG_JAMENDO_TYPE:-audio-low}"
 
 ARIA2_PARALLEL_ACTIVE=0
 ARIA2_INPUT_FILE="${DOWNLOAD_DIR}/aria2-input.txt"
@@ -1344,6 +1438,12 @@ if [[ "${DOWNLOAD}" == "1" ]]; then
   if [[ -z "${DOWNLOAD_MUSAN}" ]]; then
     DOWNLOAD_MUSAN=1
   fi
+  if [[ -z "${DOWNLOAD_FMA}" ]]; then
+    DOWNLOAD_FMA=1
+  fi
+  if [[ -z "${DOWNLOAD_MTG_JAMENDO}" ]]; then
+    DOWNLOAD_MTG_JAMENDO=0
+  fi
   if [[ -z "${DOWNLOAD_FSD50K}" ]]; then
     DOWNLOAD_FSD50K=1
   fi
@@ -1363,6 +1463,12 @@ if [[ "${DOWNLOAD}" == "1" ]]; then
     case "${PROFILE}" in
       production) DOWNLOAD_ACOUSTICROOMS=1 ;;
       apple|prototype|*) DOWNLOAD_ACOUSTICROOMS=0 ;;
+    esac
+  fi
+  if [[ -z "${FMA_SUBSET}" ]]; then
+    case "${PROFILE}" in
+      production) FMA_SUBSET="large" ;;
+      apple|prototype|*) FMA_SUBSET="medium" ;;
     esac
   fi
 
@@ -1389,6 +1495,48 @@ if [[ "${DOWNLOAD}" == "1" ]]; then
   # MUSAN
   if should_download "${DOWNLOAD_MUSAN}"; then
     download_and_extract "https://www.openslr.org/resources/17/musan.tar.gz" "${EXTRACT_DIR}"
+  fi
+
+  # FMA (Creative Commons music corpus; canonical automated background-music base)
+  if should_download "${DOWNLOAD_FMA}"; then
+    mkdir -p "${FMA_DIR}"
+    download_and_extract "https://os.unil.cloud.switch.ch/fma/fma_metadata.zip" "${FMA_DIR}"
+    case "${FMA_SUBSET}" in
+      medium|large|full)
+        download_and_extract "https://os.unil.cloud.switch.ch/fma/fma_${FMA_SUBSET}.zip" "${FMA_DIR}"
+        ;;
+      *)
+        echo "Error: unsupported FMA_SUBSET '${FMA_SUBSET}' (expected medium, large, or full)" >&2
+        exit 1
+        ;;
+    esac
+  fi
+
+  # MTG-Jamendo (optional due size/license profile; downloads the official raw_30s audio-low tar set)
+  if should_download "${DOWNLOAD_MTG_JAMENDO}"; then
+    if [[ "${MTG_JAMENDO_DATASET}" != "raw_30s" || "${MTG_JAMENDO_TYPE}" != "audio-low" ]]; then
+      echo "Error: only MTG-Jamendo raw_30s audio-low is currently supported" >&2
+      exit 1
+    fi
+    mkdir -p "${MTG_JAMENDO_DIR}/data" "${DOWNLOAD_DIR}/mtg-jamendo"
+    download_file \
+      "https://raw.githubusercontent.com/MTG/mtg-jamendo-dataset/master/data/raw.meta.tsv" \
+      "${MTG_JAMENDO_DIR}/data/raw.meta.tsv"
+    download_file \
+      "https://raw.githubusercontent.com/MTG/mtg-jamendo-dataset/master/data/raw_30s_cleantags_50artists.tsv" \
+      "${MTG_JAMENDO_DIR}/data/raw_30s_cleantags_50artists.tsv"
+    download_file \
+      "https://raw.githubusercontent.com/MTG/mtg-jamendo-dataset/master/data/download/raw_30s_audio-low_sha256_tars.txt" \
+      "${DOWNLOAD_DIR}/mtg-jamendo/raw_30s_audio-low_sha256_tars.txt"
+
+    while read -r _sha256 tar_name; do
+      if [[ -z "${tar_name:-}" ]]; then
+        continue
+      fi
+      download_and_extract \
+        "https://cdn.freesound.org/mtg-jamendo/raw_30s/audio-low/${tar_name}" \
+        "${MTG_JAMENDO_DIR}"
+    done < "${DOWNLOAD_DIR}/mtg-jamendo/raw_30s_audio-low_sha256_tars.txt"
   fi
 
   # FSD50K
@@ -1499,10 +1647,9 @@ if require_dir "LibriSpeech" "${LIBRISPEECH_DIR}"; then
   write_list "${LIBRISPEECH_DIR}" "${LIST_DIR}/librispeech_clean.txt" "*.flac"
 fi
 
-# Noise + music lists
+# Noise source lists
 if require_dir "MUSAN" "${MUSAN_DIR}"; then
   write_list "${MUSAN_DIR}/noise" "${LIST_DIR}/musan_noise.txt" "*.wav"
-  write_list "${MUSAN_DIR}/music" "${LIST_DIR}/musan_music.txt" "*.wav"
 fi
 
 # FSD50K filtered list (CC0/CC-BY only)
@@ -1513,7 +1660,17 @@ fi
 if require_dir "FSD50K" "${FSD50K_DIR}"; then
   export FSD50K_DIR
   export LIST_DIR
-  python3 "${ROOT_DIR}/scripts/datasets/fsd50k_filter.py"
+  "${PYTHON_BIN}" "${ROOT_DIR}/scripts/datasets/fsd50k_filter.py"
+fi
+
+FMA_PRESENT=0
+if require_dir "FMA" "${FMA_DIR}"; then
+  FMA_PRESENT=1
+fi
+
+MTG_JAMENDO_PRESENT=0
+if require_dir "MTG-Jamendo" "${MTG_JAMENDO_DIR}"; then
+  MTG_JAMENDO_PRESENT=1
 fi
 
 # RIR lists
@@ -1560,38 +1717,39 @@ echo "[ok] wrote $(wc -l < "${LIST_DIR}/clean_all.txt") entries -> ${LIST_DIR}/c
 } | write_atomic_file "${LIST_DIR}/noise_all.txt"
 echo "[ok] wrote $(wc -l < "${LIST_DIR}/noise_all.txt") entries -> ${LIST_DIR}/noise_all.txt"
 
-# Legacy dedicated background music seed: MUSAN music only. We keep this file
-# for backwards compatibility and build an expanded list below when targeted
-# FSD50K room/live/speaker music clips are available.
-{
-  if [[ -f "${LIST_DIR}/musan_music.txt" ]]; then
-    cat "${LIST_DIR}/musan_music.txt"
+# Dedicated background music: chart-style open music curated from FMA plus
+# optional MTG-Jamendo inputs. `background_music.txt` is the canonical capped
+# curated list; `background_music_expanded.txt` contains the full eligible pool.
+if [[ "${FMA_PRESENT}" == "1" || "${MTG_JAMENDO_PRESENT}" == "1" ]]; then
+  music_curator_args=(
+    "${ROOT_DIR}/scripts/datasets/curate_background_music.py"
+    --list-dir "${LIST_DIR}"
+    --target-count "${BACKGROUND_MUSIC_TARGET_COUNT}"
+    --min-count "${BACKGROUND_MUSIC_MIN_COUNT}"
+  )
+  if [[ "${FMA_PRESENT}" == "1" ]]; then
+    music_curator_args+=(--fma-dir "${FMA_DIR}")
   fi
-} | write_atomic_file "${LIST_DIR}/background_music.txt"
-echo "[ok] wrote $(wc -l < "${LIST_DIR}/background_music.txt") entries -> ${LIST_DIR}/background_music.txt"
+  if [[ "${MTG_JAMENDO_PRESENT}" == "1" ]]; then
+    music_curator_args+=(--mtg-jamendo-dir "${MTG_JAMENDO_DIR}")
+  fi
+  "${PYTHON_BIN}" "${music_curator_args[@]}"
+else
+  echo "[warn] no FMA or MTG-Jamendo music corpus present; dedicated background-music lists will be empty" >&2
+  : > "${LIST_DIR}/background_music.txt"
+  : > "${LIST_DIR}/background_music_expanded.txt"
+fi
 
-# Expanded dedicated background music: legacy MUSAN music + targeted FSD50K
-# clips that bias toward room/live/speaker playback plus pop/rock/EDM/country
-# style and vocal/song cues.
-{
-  if [[ -f "${LIST_DIR}/background_music.txt" ]]; then
-    cat "${LIST_DIR}/background_music.txt"
-  fi
-  if [[ -f "${LIST_DIR}/fsd50k_music_targeted.txt" ]]; then
-    cat "${LIST_DIR}/fsd50k_music_targeted.txt"
-  fi
-} | write_atomic_file "${LIST_DIR}/background_music_expanded.txt"
-echo "[ok] wrote $(wc -l < "${LIST_DIR}/background_music_expanded.txt") entries -> ${LIST_DIR}/background_music_expanded.txt"
-
-# Backward-compatible combined noise+music list.
+# Backward-compatible combined noise+music list (deprecated; raw-list and cache
+# builders now prefer noise_all.txt + dedicated background_music.txt).
 {
   if [[ -f "${LIST_DIR}/noise_all.txt" ]]; then
     cat "${LIST_DIR}/noise_all.txt"
   fi
-  if [[ -f "${LIST_DIR}/background_music_expanded.txt" ]]; then
-    cat "${LIST_DIR}/background_music_expanded.txt"
-  elif [[ -f "${LIST_DIR}/background_music.txt" ]]; then
+  if [[ -f "${LIST_DIR}/background_music.txt" ]]; then
     cat "${LIST_DIR}/background_music.txt"
+  elif [[ -f "${LIST_DIR}/background_music_expanded.txt" ]]; then
+    cat "${LIST_DIR}/background_music_expanded.txt"
   fi
 } | write_atomic_file "${LIST_DIR}/noise_music.txt"
 echo "[ok] wrote $(wc -l < "${LIST_DIR}/noise_music.txt") entries -> ${LIST_DIR}/noise_music.txt"
@@ -1617,7 +1775,11 @@ if [[ ! -s "${LIST_DIR}/clean_all.txt" ]]; then
   errors=1
 fi
 if [[ ! -s "${LIST_DIR}/noise_music.txt" ]]; then
-  echo "[error] noise_music.txt is empty - need MUSAN and/or FSD50K" >&2
+  echo "[error] noise_music.txt is empty - need generic noise and/or curated background music" >&2
+  errors=1
+fi
+if [[ ! -s "${LIST_DIR}/background_music.txt" ]]; then
+  echo "[error] background_music.txt is empty - need FMA and/or MTG-Jamendo chart-style music sources" >&2
   errors=1
 fi
 if [[ ! -s "${LIST_DIR}/rir_all.txt" ]]; then
@@ -1634,9 +1796,11 @@ Done.
 Combined lists ready for downstream builders:
   - clean_all.txt (speech)
   - noise_all.txt (generic noise, excludes dedicated music)
-  - background_music.txt (legacy MUSAN-only dedicated music seed)
-  - background_music_expanded.txt (legacy seed + targeted FSD50K room/live/speaker music)
-  - noise_music.txt (noise + music)
+  - background_music.txt (canonical curated chart-style background music; target-count capped)
+  - background_music_expanded.txt (full eligible chart-style pool from FMA + optional MTG-Jamendo)
+  - background_music_fma.txt / background_music_mtg_jamendo.txt (source-specific music subsets)
+  - background_music_catalog.tsv (curation audit table with bucket/source scores)
+  - noise_music.txt (deprecated compatibility mix of generic noise + curated music)
   - rir_all.txt (room impulse responses)
 
 Next steps:

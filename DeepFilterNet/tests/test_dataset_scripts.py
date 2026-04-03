@@ -16,6 +16,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BUILD_SCRIPT = REPO_ROOT / "scripts" / "datasets" / "build_mlx_datastore.sh"
 DOWNLOAD_SCRIPT = REPO_ROOT / "scripts" / "datasets" / "download_datasets.sh"
+CURATE_BACKGROUND_MUSIC_SCRIPT = REPO_ROOT / "scripts" / "datasets" / "curate_background_music.py"
 CHAINS_PREPARE_SCRIPT = REPO_ROOT / "scripts" / "datasets" / "prepare_chains_speech.py"
 
 
@@ -97,6 +98,122 @@ def _build_fake_fsd50k_corpus(root: Path, entries: list[dict[str, object]], *, s
     with (ground_truth_dir / "eval.csv").open("w", encoding="utf-8", newline="") as handle:
         csv = csv_writer(handle)
         csv.writerow(["fname", "labels", "mids", "split"])
+
+    return root
+
+
+def _build_fake_fma_corpus(root: Path, entries: list[dict[str, object]]) -> Path:
+    metadata_dir = root / "fma_metadata"
+    audio_dir = root / "fma_medium"
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+    audio_dir.mkdir(parents=True, exist_ok=True)
+
+    genres_path = metadata_dir / "genres.csv"
+    with genres_path.open("w", encoding="utf-8", newline="") as handle:
+        csv = csv_writer(handle)
+        csv.writerow(["genre_id", "title", "parent", "#tracks"])
+        csv.writerow([1, "Pop", 0, 1])
+        csv.writerow([2, "Rock", 0, 1])
+        csv.writerow([3, "Electronic", 0, 1])
+        csv.writerow([4, "Country", 0, 1])
+        csv.writerow([5, "Classical", 0, 1])
+
+    tracks_path = metadata_dir / "tracks.csv"
+    with tracks_path.open("w", encoding="utf-8", newline="") as handle:
+        csv = csv_writer(handle)
+        csv.writerow(
+            [
+                "",
+                "track",
+                "artist",
+                "album",
+                "track",
+                "track",
+                "track",
+                "album",
+                "artist",
+                "track",
+                "track",
+            ]
+        )
+        csv.writerow(
+            [
+                "track_id",
+                "title",
+                "name",
+                "title",
+                "duration",
+                "genre_top",
+                "tags",
+                "tags",
+                "tags",
+                "genres_all",
+                "license",
+            ]
+        )
+        for entry in entries:
+            track_id = int(entry["track_id"])
+            tid = f"{track_id:06d}"
+            (audio_dir / tid[:3]).mkdir(parents=True, exist_ok=True)
+            _touch(audio_dir / tid[:3] / f"{tid}.mp3")
+            csv.writerow(
+                [
+                    track_id,
+                    entry.get("title", ""),
+                    entry.get("artist", ""),
+                    entry.get("album", ""),
+                    entry.get("duration", "30.0"),
+                    entry.get("genre_top", ""),
+                    json.dumps(entry.get("track_tags", [])),
+                    json.dumps(entry.get("album_tags", [])),
+                    json.dumps(entry.get("artist_tags", [])),
+                    json.dumps(entry.get("genres_all", [])),
+                    entry.get("license", "CC BY 4.0"),
+                ]
+            )
+
+    return root
+
+
+def _build_fake_mtg_jamendo_corpus(root: Path, entries: list[dict[str, object]]) -> Path:
+    data_dir = root / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    with (data_dir / "raw.meta.tsv").open("w", encoding="utf-8", newline="") as handle:
+        csv = csv_writer(handle, delimiter="\t")
+        csv.writerow(
+            ["TRACK_ID", "ARTIST_ID", "ALBUM_ID", "TRACK_NAME", "ARTIST_NAME", "ALBUM_NAME", "RELEASEDATE", "URL"]
+        )
+        for entry in entries:
+            csv.writerow(
+                [
+                    entry["track_id"],
+                    entry.get("artist_id", "artist_001"),
+                    entry.get("album_id", "album_001"),
+                    entry.get("title", ""),
+                    entry.get("artist", ""),
+                    entry.get("album", ""),
+                    "2020-01-01",
+                    "https://example.com/track",
+                ]
+            )
+
+    with (data_dir / "raw_30s_cleantags_50artists.tsv").open("w", encoding="utf-8", newline="") as handle:
+        csv = csv_writer(handle, delimiter="\t")
+        csv.writerow(["TRACK_ID", "ARTIST_ID", "ALBUM_ID", "PATH", "DURATION", "TAGS"])
+        for entry in entries:
+            relative_path = str(entry["path"])
+            _touch(root / Path(relative_path).with_suffix(".low.mp3"))
+            csv.writerow(
+                [
+                    entry["track_id"],
+                    entry.get("artist_id", "artist_001"),
+                    entry.get("album_id", "album_001"),
+                    relative_path,
+                    entry.get("duration", "180.0"),
+                    *entry.get("tags", []),
+                ]
+            )
 
     return root
 
@@ -463,7 +580,7 @@ def test_build_mlx_datastore_include_chains_preprocess_uses_combined_list_and_co
     assert build_args[build_args.index("--music-list") + 1] == str(music_list)
 
 
-def test_build_mlx_datastore_prefers_expanded_background_music_list(tmp_path: Path) -> None:
+def test_build_mlx_datastore_prefers_curated_background_music_list(tmp_path: Path) -> None:
     sample_rate = 16_000
     data_dir = tmp_path / "data"
     lists_dir = data_dir / "lists"
@@ -538,12 +655,12 @@ def test_build_mlx_datastore_prefers_expanded_background_music_list(tmp_path: Pa
     )
 
     assert result.returncode == 0, result.stderr
-    assert "Music flavor:       expanded" in result.stdout
+    assert "Music flavor:       curated chart-style set" in result.stdout
 
     calls = [json.loads(line) for line in fake_log.read_text(encoding="utf-8").splitlines() if line.strip()]
     build_call = next(call for call in calls if call["args"][:2] == ["-m", "df_mlx.build_audio_cache"])
     build_args = build_call["args"]
-    assert build_args[build_args.index("--music-list") + 1] == str(expanded_music_list)
+    assert build_args[build_args.index("--music-list") + 1] == str(legacy_music_list)
 
 
 def test_build_mlx_datastore_prepares_background_music_and_merges_lists(tmp_path: Path) -> None:
@@ -840,11 +957,33 @@ def test_download_datasets_no_download_accepts_cli_overrides(tmp_path: Path) -> 
 
     vctk_dir = tmp_path / "existing" / "VCTK-Corpus-0.92"
     musan_dir = tmp_path / "existing" / "musan"
+    fma_dir = _build_fake_fma_corpus(
+        tmp_path / "existing" / "FMA",
+        [
+            {
+                "track_id": 1,
+                "title": "Chart Pop Song",
+                "artist": "Open Pop",
+                "album": "Hits",
+                "genre_top": "Pop",
+                "track_tags": ["vocals", "radio"],
+                "genres_all": [1],
+            },
+            {
+                "track_id": 2,
+                "title": "Modern Rock Song",
+                "artist": "Open Rock",
+                "album": "Riffs",
+                "genre_top": "Rock",
+                "track_tags": ["vocals"],
+                "genres_all": [2],
+            },
+        ],
+    )
     air_rir_dir = tmp_path / "existing" / "air"
 
     _touch(vctk_dir / "wav48_silence_trimmed" / "p001" / "sample.flac")
     _touch(musan_dir / "noise" / "noise.wav")
-    _touch(musan_dir / "music" / "music.wav")
     _touch(air_rir_dir / "room.wav")
 
     result = subprocess.run(
@@ -892,7 +1031,13 @@ def test_download_datasets_no_download_accepts_cli_overrides(tmp_path: Path) -> 
             "--download-vctk",
             "--no-download-librispeech",
             "--download-musan",
+            "--download-fma",
+            "--no-download-mtg-jamendo",
             "--no-download-fsd50k",
+            "--background-music-target-count",
+            "2",
+            "--background-music-min-count",
+            "2",
             "--download-air",
             "--no-download-openair",
             "--no-download-acousticrooms",
@@ -902,6 +1047,8 @@ def test_download_datasets_no_download_accepts_cli_overrides(tmp_path: Path) -> 
             str(tmp_path / "missing-librispeech"),
             "--musan-dir",
             str(musan_dir),
+            "--fma-dir",
+            str(fma_dir),
             "--fsd50k-dir",
             str(tmp_path / "missing-fsd50k"),
             "--air-rir-dir",
@@ -939,16 +1086,120 @@ def test_download_datasets_no_download_accepts_cli_overrides(tmp_path: Path) -> 
     assert (lists_dir / "rir_all.txt").exists(), result.stdout
     assert str(vctk_dir / "wav48_silence_trimmed" / "p001" / "sample.flac") in (lists_dir / "clean_all.txt").read_text()
     assert str(musan_dir / "noise" / "noise.wav") in (lists_dir / "noise_all.txt").read_text()
-    assert str(musan_dir / "music" / "music.wav") not in (lists_dir / "noise_all.txt").read_text()
-    assert str(musan_dir / "music" / "music.wav") in (lists_dir / "background_music.txt").read_text()
-    assert str(musan_dir / "music" / "music.wav") in (lists_dir / "background_music_expanded.txt").read_text()
+    background_music = (lists_dir / "background_music.txt").read_text()
+    assert "000001.mp3" in background_music
+    assert "000002.mp3" in background_music
+    assert background_music == (lists_dir / "background_music_expanded.txt").read_text()
     combined_noise = (lists_dir / "noise_music.txt").read_text()
     assert str(musan_dir / "noise" / "noise.wav") in combined_noise
-    assert str(musan_dir / "music" / "music.wav") in combined_noise
+    assert "000001.mp3" in combined_noise
     assert str(air_rir_dir / "room.wav") in (lists_dir / "rir_all.txt").read_text()
 
 
-def test_download_datasets_expands_background_music_with_targeted_fsd50k(tmp_path: Path) -> None:
+def test_curate_background_music_combines_fma_and_mtg_sources(tmp_path: Path) -> None:
+    lists_dir = tmp_path / "lists"
+    fma_dir = _build_fake_fma_corpus(
+        tmp_path / "FMA",
+        [
+            {
+                "track_id": 1,
+                "title": "Chart Pop Song",
+                "artist": "Open Pop",
+                "album": "Hits",
+                "genre_top": "Pop",
+                "track_tags": ["vocals", "radio"],
+                "genres_all": [1],
+            },
+            {
+                "track_id": 2,
+                "title": "Nightclub Runner",
+                "artist": "Open EDM",
+                "album": "Dance Floor",
+                "genre_top": "Electronic",
+                "track_tags": ["edm", "dance", "vocals"],
+                "genres_all": [3],
+            },
+            {
+                "track_id": 3,
+                "title": "String Quartet in C",
+                "artist": "Open Classical",
+                "album": "Chamber Works",
+                "genre_top": "Classical",
+                "track_tags": ["instrumental", "orchestral"],
+                "genres_all": [5],
+            },
+        ],
+    )
+    mtg_dir = _build_fake_mtg_jamendo_corpus(
+        tmp_path / "mtg-jamendo",
+        [
+            {
+                "track_id": "track_0000101",
+                "title": "Country Radio Lights",
+                "artist": "Open Country",
+                "album": "Country Nights",
+                "path": Path("07/101.mp3"),
+                "tags": ["genre---country", "genre---pop", "vocals", "song"],
+            },
+            {
+                "track_id": "track_0000102",
+                "title": "Dream Ambient Pad",
+                "artist": "Open Ambient",
+                "album": "Textures",
+                "path": Path("08/102.mp3"),
+                "tags": ["genre---ambient", "instrumental", "drone"],
+            },
+        ],
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(CURATE_BACKGROUND_MUSIC_SCRIPT),
+            "--list-dir",
+            str(lists_dir),
+            "--fma-dir",
+            str(fma_dir),
+            "--mtg-jamendo-dir",
+            str(mtg_dir),
+            "--target-count",
+            "10",
+            "--min-count",
+            "3",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    curated_entries = [
+        line.strip()
+        for line in (lists_dir / "background_music.txt").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    expanded_entries = [
+        line.strip()
+        for line in (lists_dir / "background_music_expanded.txt").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    catalog_text = (lists_dir / "background_music_catalog.tsv").read_text(encoding="utf-8")
+
+    assert len(curated_entries) == 3
+    assert set(curated_entries) == set(expanded_entries)
+    assert any(entry.endswith("000001.mp3") for entry in curated_entries)
+    assert any(entry.endswith("000002.mp3") for entry in curated_entries)
+    assert any(entry.endswith("101.low.mp3") for entry in curated_entries)
+    assert all("000003.mp3" not in entry for entry in curated_entries)
+    assert all("102.low.mp3" not in entry for entry in curated_entries)
+    assert "source\tpath\tbucket\tscore" in catalog_text
+    assert "mtg_jamendo" in catalog_text
+    assert "fma" in catalog_text
+
+
+def test_download_datasets_curates_background_music_from_fma_and_mtg(tmp_path: Path) -> None:
     sample_rate = 16_000
     data_dir = tmp_path / "data"
     lists_dir = tmp_path / "lists"
@@ -957,24 +1208,54 @@ def test_download_datasets_expands_background_music_with_targeted_fsd50k(tmp_pat
 
     vctk_dir = tmp_path / "existing" / "VCTK-Corpus-0.92"
     musan_dir = tmp_path / "existing" / "musan"
+    fma_dir = _build_fake_fma_corpus(
+        tmp_path / "existing" / "FMA",
+        [
+            {
+                "track_id": 1,
+                "title": "Chart Pop Song",
+                "artist": "Open Pop",
+                "album": "Hits",
+                "genre_top": "Pop",
+                "track_tags": ["vocals", "radio"],
+                "genres_all": [1],
+            },
+            {
+                "track_id": 2,
+                "title": "Modern Rock Song",
+                "artist": "Open Rock",
+                "album": "Riffs",
+                "genre_top": "Rock",
+                "track_tags": ["vocals", "anthemic"],
+                "genres_all": [2],
+            },
+        ],
+    )
+    mtg_dir = _build_fake_mtg_jamendo_corpus(
+        tmp_path / "existing" / "mtg-jamendo",
+        [
+            {
+                "track_id": "track_0000101",
+                "title": "Country Radio Lights",
+                "artist": "Open Country",
+                "album": "Country Nights",
+                "path": Path("07/101.mp3"),
+                "tags": ["genre---country", "genre---pop", "vocals", "song"],
+            },
+            {
+                "track_id": "track_0000102",
+                "title": "Ambient Texture Study",
+                "artist": "Open Ambient",
+                "album": "Textures",
+                "path": Path("08/102.mp3"),
+                "tags": ["genre---ambient", "instrumental", "drone"],
+            },
+        ],
+    )
     air_rir_dir = tmp_path / "existing" / "air"
     fsd50k_dir = _build_fake_fsd50k_corpus(
         tmp_path / "existing" / "FSD50K",
         [
-            {
-                "clip_id": "pop_live_song",
-                "title": "Pop concert recording",
-                "description": "phone capture of a live pop song in a reverberant hall",
-                "tags": ["pop", "live", "song", "crowd"],
-                "labels": ["Pop_music", "Song"],
-            },
-            {
-                "clip_id": "rock_speaker_room",
-                "title": "Rock song through speaker",
-                "description": "vocals and band heard from another room speaker",
-                "tags": ["rock", "speaker", "vocals", "room"],
-                "labels": ["Rock_music", "Song"],
-            },
             {
                 "clip_id": "vacuum_noise",
                 "title": "Vacuum cleaner in apartment",
@@ -983,10 +1264,10 @@ def test_download_datasets_expands_background_music_with_targeted_fsd50k(tmp_pat
                 "labels": ["Vacuum_cleaner"],
             },
             {
-                "clip_id": "studio_pop_master",
-                "title": "Studio pop master",
-                "description": "clean studio pop vocals and mastered mixdown",
-                "tags": ["pop", "studio", "vocals"],
+                "clip_id": "festival_song_clip",
+                "title": "Festival song recording",
+                "description": "crowd recording of a pop song",
+                "tags": ["pop", "live", "song"],
                 "labels": ["Pop_music", "Song"],
             },
         ],
@@ -995,7 +1276,6 @@ def test_download_datasets_expands_background_music_with_targeted_fsd50k(tmp_pat
 
     _touch(vctk_dir / "wav48_silence_trimmed" / "p001" / "sample.flac")
     _touch(musan_dir / "noise" / "noise.wav")
-    _touch(musan_dir / "music" / "music.wav")
     _touch(air_rir_dir / "room.wav")
 
     result = subprocess.run(
@@ -1017,13 +1297,23 @@ def test_download_datasets_expands_background_music_with_targeted_fsd50k(tmp_pat
             str(vctk_dir),
             "--musan-dir",
             str(musan_dir),
+            "--fma-dir",
+            str(fma_dir),
+            "--mtg-jamendo-dir",
+            str(mtg_dir),
             "--fsd50k-dir",
             str(fsd50k_dir),
             "--air-rir-dir",
             str(air_rir_dir),
             "--no-download-librispeech",
+            "--no-download-fma",
+            "--no-download-mtg-jamendo",
             "--no-download-openair",
             "--no-download-acousticrooms",
+            "--background-music-target-count",
+            "3",
+            "--background-music-min-count",
+            "3",
         ],
         cwd=REPO_ROOT,
         capture_output=True,
@@ -1039,28 +1329,32 @@ def test_download_datasets_expands_background_music_with_targeted_fsd50k(tmp_pat
     noise_only = (lists_dir / "noise_all.txt").read_text(encoding="utf-8")
     combined_noise = (lists_dir / "noise_music.txt").read_text(encoding="utf-8")
 
-    legacy_seed_path = str(musan_dir / "music" / "music.wav")
-    targeted_pop_path = str((fsd50k_dir / "FSD50K.dev_audio" / "pop_live_song.wav").resolve())
-    targeted_rock_path = str((fsd50k_dir / "FSD50K.dev_audio" / "rock_speaker_room.wav").resolve())
+    fma_pop_path = str((fma_dir / "fma_medium" / "000" / "000001.mp3").resolve())
+    fma_rock_path = str((fma_dir / "fma_medium" / "000" / "000002.mp3").resolve())
+    mtg_country_path = str((mtg_dir / "07" / "101.low.mp3").resolve())
+    mtg_ambient_path = str((mtg_dir / "08" / "102.low.mp3").resolve())
     vacuum_noise_path = str((fsd50k_dir / "FSD50K.dev_audio" / "vacuum_noise.wav").resolve())
-    studio_pop_path = str((fsd50k_dir / "FSD50K.dev_audio" / "studio_pop_master.wav").resolve())
+    fsd_song_path = str((fsd50k_dir / "FSD50K.dev_audio" / "festival_song_clip.wav").resolve())
 
-    assert legacy_seed_path in legacy_music
-    assert targeted_pop_path not in legacy_music
-    assert targeted_rock_path not in legacy_music
+    assert fma_pop_path in legacy_music
+    assert fma_rock_path in legacy_music
+    assert mtg_country_path in legacy_music
+    assert mtg_ambient_path not in legacy_music
+    assert fsd_song_path not in legacy_music
 
-    assert legacy_seed_path in expanded_music
-    assert targeted_pop_path in expanded_music
-    assert targeted_rock_path in expanded_music
-    assert studio_pop_path not in expanded_music
+    assert fma_pop_path in expanded_music
+    assert fma_rock_path in expanded_music
+    assert mtg_country_path in expanded_music
+    assert mtg_ambient_path not in expanded_music
+    assert fsd_song_path not in expanded_music
 
     assert vacuum_noise_path in noise_only
-    assert targeted_pop_path not in noise_only
-    assert targeted_rock_path not in noise_only
-    assert studio_pop_path not in noise_only
+    assert fsd_song_path not in noise_only
 
-    assert targeted_pop_path in combined_noise
-    assert targeted_rock_path in combined_noise
+    assert fma_pop_path in combined_noise
+    assert fma_rock_path in combined_noise
+    assert mtg_country_path in combined_noise
+    assert fsd_song_path not in combined_noise
 
 
 def test_download_datasets_skips_completed_processing_for_existing_archive_outputs(tmp_path: Path) -> None:
@@ -1071,12 +1365,25 @@ def test_download_datasets_skips_completed_processing_for_existing_archive_outpu
 
     vctk_extract_dir = extract_dir / "VCTK-Corpus-0.92"
     musan_dir = tmp_path / "existing" / "musan"
+    fma_dir = _build_fake_fma_corpus(
+        tmp_path / "existing" / "FMA",
+        [
+            {
+                "track_id": 1,
+                "title": "Chart Pop Song",
+                "artist": "Open Pop",
+                "album": "Hits",
+                "genre_top": "Pop",
+                "track_tags": ["vocals", "radio"],
+                "genres_all": [1],
+            }
+        ],
+    )
     air_rir_dir = tmp_path / "existing" / "air"
 
     _touch(vctk_extract_dir / "wav48_silence_trimmed" / "p001" / "sample.flac")
     _touch(vctk_extract_dir / "speaker-info.txt")
     _touch(musan_dir / "noise" / "noise.wav")
-    _touch(musan_dir / "music" / "music.wav")
     _touch(air_rir_dir / "room.wav")
 
     downloads_dir.mkdir(parents=True, exist_ok=True)
@@ -1099,9 +1406,14 @@ def test_download_datasets_skips_completed_processing_for_existing_archive_outpu
             str(vctk_extract_dir),
             "--musan-dir",
             str(musan_dir),
+            "--fma-dir",
+            str(fma_dir),
             "--air-rir-dir",
             str(air_rir_dir),
             "--no-download-librispeech",
+            "--no-download-fma",
+            "--background-music-min-count",
+            "1",
             "--no-download-fsd50k",
             "--no-download-openair",
             "--no-download-acousticrooms",
@@ -1128,13 +1440,26 @@ def test_download_datasets_zenodo_range_download_bypasses_aria2_and_extracts_vct
     downloads_dir = data_dir / "downloads"
     extract_dir = data_dir / "raw"
     musan_dir = tmp_path / "existing" / "musan"
+    fma_dir = _build_fake_fma_corpus(
+        tmp_path / "existing" / "FMA",
+        [
+            {
+                "track_id": 1,
+                "title": "Chart Pop Song",
+                "artist": "Open Pop",
+                "album": "Hits",
+                "genre_top": "Pop",
+                "track_tags": ["vocals", "radio"],
+                "genres_all": [1],
+            }
+        ],
+    )
     air_rir_dir = tmp_path / "existing" / "air"
     fake_bin_dir = tmp_path / "bin"
     fake_aria2 = fake_bin_dir / "aria2c"
     fake_aria2_log = tmp_path / "fake-aria2.log"
 
     _touch(musan_dir / "noise" / "noise.wav")
-    _touch(musan_dir / "music" / "music.wav")
     _touch(air_rir_dir / "room.wav")
     fake_bin_dir.mkdir(parents=True, exist_ok=True)
     fake_aria2.write_text('#!/bin/sh\necho invoked >> "$FAKE_ARIA2_LOG"\nexit 99\n', encoding="utf-8")
@@ -1218,14 +1543,19 @@ def test_download_datasets_zenodo_range_download_bypasses_aria2_and_extracts_vct
                 str(zenodo_like_url),
                 "--musan-dir",
                 str(musan_dir),
+                "--fma-dir",
+                str(fma_dir),
                 "--air-rir-dir",
                 str(air_rir_dir),
                 "--no-download-librispeech",
                 "--no-download-musan",
+                "--no-download-fma",
                 "--no-download-fsd50k",
                 "--no-download-air",
                 "--no-download-openair",
                 "--no-download-acousticrooms",
+                "--background-music-min-count",
+                "1",
                 "--no-keep-archives",
                 "--zenodo-referer",
                 "https://example.com/zenodo-test",
@@ -1257,13 +1587,26 @@ def test_download_datasets_zenodo_parallel_range_failure_propagates(tmp_path: Pa
     downloads_dir = data_dir / "downloads"
     extract_dir = data_dir / "raw"
     musan_dir = tmp_path / "existing" / "musan"
+    fma_dir = _build_fake_fma_corpus(
+        tmp_path / "existing" / "FMA",
+        [
+            {
+                "track_id": 1,
+                "title": "Chart Pop Song",
+                "artist": "Open Pop",
+                "album": "Hits",
+                "genre_top": "Pop",
+                "track_tags": ["vocals", "radio"],
+                "genres_all": [1],
+            }
+        ],
+    )
     air_rir_dir = tmp_path / "existing" / "air"
     fake_bin_dir = tmp_path / "bin"
     fake_aria2 = fake_bin_dir / "aria2c"
     fake_aria2_log = tmp_path / "fake-aria2.log"
 
     _touch(musan_dir / "noise" / "noise.wav")
-    _touch(musan_dir / "music" / "music.wav")
     _touch(air_rir_dir / "room.wav")
     fake_bin_dir.mkdir(parents=True, exist_ok=True)
     fake_aria2.write_text('#!/bin/sh\necho invoked >> "$FAKE_ARIA2_LOG"\nexit 99\n', encoding="utf-8")
@@ -1336,14 +1679,19 @@ def test_download_datasets_zenodo_parallel_range_failure_propagates(tmp_path: Pa
                 str(zenodo_like_url),
                 "--musan-dir",
                 str(musan_dir),
+                "--fma-dir",
+                str(fma_dir),
                 "--air-rir-dir",
                 str(air_rir_dir),
                 "--no-download-librispeech",
                 "--no-download-musan",
+                "--no-download-fma",
                 "--no-download-fsd50k",
                 "--no-download-air",
                 "--no-download-openair",
                 "--no-download-acousticrooms",
+                "--background-music-min-count",
+                "1",
                 "--zenodo-referer",
                 "https://example.com/zenodo-test",
             ],

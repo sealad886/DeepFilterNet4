@@ -247,7 +247,10 @@ class DatasetRunConfig:
     )
     music_list: str | None = cfg_field(
         None,
-        help="Path to file containing background-music file paths (one per line)",
+        help=(
+            "Path to file containing dedicated background-music file paths (one per line), "
+            "for example lists/background_music.txt or background_music.prepared_merged.txt"
+        ),
         normalize=_normalize_optional_str,
         none_sentinel="",
     )

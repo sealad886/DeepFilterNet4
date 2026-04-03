@@ -69,7 +69,10 @@ def main():
     parser.add_argument(
         "--music-list",
         type=str,
-        help="Path to file containing background-music file paths (one per line)",
+        help=(
+            "Path to file containing dedicated background-music file paths (one per line), "
+            "for example lists/background_music.txt or background_music.prepared_merged.txt"
+        ),
     )
     parser.add_argument(
         "--rir-list",

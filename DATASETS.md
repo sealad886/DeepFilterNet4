@@ -8,7 +8,12 @@ local training datasets for DeepFilterNet4 while keeping licensing permissive.
 - Prototype: `datasets/prototype/manifest.yaml`
 - Production: `datasets/production/manifest.yaml`
 
-Both manifests explicitly **exclude CC-BY-NC and CC Sampling+** sources.
+Both manifests explicitly **exclude CC-BY-NC and CC Sampling+** sources. The
+default automated background-music path therefore uses FMA as its canonical
+open-music source. MTG-Jamendo is supported only as an **optional local
+supplement** because its official dataset terms are more restrictive than the
+default permissive path; enable it only when that matches your local research
+use.
 
 ## Recommended local layout
 
@@ -18,10 +23,13 @@ Both manifests explicitly **exclude CC-BY-NC and CC Sampling+** sources.
     vctk_clean.txt
     librispeech_clean.txt
     musan_noise.txt
-    musan_music.txt
     fsd50k_filtered.txt
-    noise_all.txt
     background_music.txt
+    background_music_expanded.txt
+    background_music_fma.txt
+    background_music_mtg_jamendo.txt
+    background_music_catalog.tsv
+    noise_all.txt
     noise_music.txt
     air_rir.txt
     openair_rir.txt
@@ -41,7 +49,10 @@ location (one folder per dataset). This repo intentionally does not redistribute
 ### Optional: automated downloads (opt-in)
 
 `scripts/datasets/download_datasets.sh` now supports direct downloads for:
-VCTK, LibriSpeech, MUSAN, FSD50K, and AcousticRooms, plus AIR/OpenAIR via `audb`.
+VCTK, LibriSpeech, MUSAN noise, FMA, FSD50K, and AcousticRooms, plus
+AIR/OpenAIR via `audb`. MTG-Jamendo is supported as an explicit opt-in
+download/source when you want additional chart-adjacent music coverage and the
+dataset terms are acceptable for your local workflow.
 
 ```
 PROFILE=prototype \
@@ -55,6 +66,10 @@ DATA_DIR=/path/to/data \
 Notes:
 - Set `PROFILE=production` to include LibriSpeech + AcousticRooms by default.
 - `AGREE_LICENSES=1` is required to proceed.
+- FMA is enabled by default because it is the canonical automated
+  background-music base. MTG-Jamendo stays opt-in (`DOWNLOAD_MTG_JAMENDO=1`)
+  because its official release is aimed at non-commercial research/academic
+  use.
 - If you do not want `audb` auto-install, set `INSTALL_AUDB=0` and install it yourself.
 - FSD50K downloads are split zip files; this requires the `zip` and `unzip` tools.
 - For faster downloads, install `aria2` and keep `USE_ARIA2=1` (default). You can tweak
@@ -80,6 +95,8 @@ DATA_DIR=/path/to/data \
 VCTK_DIR=/path/to/VCTK-Corpus-0.92 \
 LIBRISPEECH_DIR=/path/to/LibriSpeech \
 MUSAN_DIR=/path/to/musan \
+FMA_DIR=/path/to/FMA \
+MTG_JAMENDO_DIR=/path/to/mtg-jamendo \
 FSD50K_DIR=/path/to/FSD50K \
 AIR_RIR_DIR=/path/to/AIR \
 OPENAIR_DIR=/path/to/OpenAIR \
@@ -89,44 +106,44 @@ ACOUSTICROOMS_DIR=/path/to/AcousticRooms \
 
 Notes:
 - For the **prototype**, you can omit LibriSpeech and AcousticRooms.
-- FSD50K filtering is **required**: keep only CC0/CC-BY clips.
-  The script expects a metadata CSV and filters by the license column.
+- FSD50K filtering is still **required** for the generic-noise pool: keep only
+  CC0/CC-BY clips.
+- `download_datasets.sh` now curates dedicated background music from FMA plus
+  optional MTG-Jamendo metadata/audio. Use `BACKGROUND_MUSIC_TARGET_COUNT`
+  (default `2000`) and `BACKGROUND_MUSIC_MIN_COUNT` (default `500`) to control
+  the curated chart-style pool size.
 
 ## Step 3: Combine lists for each dataset type
 
-For current `df_mlx` training, keep **generic noise** and **dedicated background music**
-as separate lists:
+For current `df_mlx` training, keep **generic noise** and **dedicated background
+music** as separate lists. `download_datasets.sh` now writes the combined files
+for you; there is no longer a MUSAN-music concatenation step in the canonical
+background-music path.
 
 - `noise_all.txt` = environmental/other non-music noise
-- `background_music.txt` = music-only clips used when `--music-list` / `p_background_music` is enabled
+- `background_music.txt` = canonical curated chart-style music list used when
+  `--music-list` / `p_background_music` is enabled
+- `background_music_expanded.txt` = full eligible chart-style pool from FMA +
+  optional MTG-Jamendo
 - `noise_music.txt` = backward-compatible combined list for legacy HDF5 / older workflows
 
-Prototype example:
+The generated music outputs now follow this contract:
+
+- `background_music.txt` aims at roughly 500–2000 songs matching the genre mix
+  of mainstream compilation CDs such as “Now That’s What I Call Music”:
+  pop, pop-rock / alternative rock, dance / EDM, country-pop / americana,
+  and adjacent R&B / hip-hop crossover material.
+- `background_music_expanded.txt` is the uncapped eligible pool behind the
+  curated set.
+- `background_music_fma.txt` and `background_music_mtg_jamendo.txt` expose the
+  source-specific subsets.
+- `background_music_catalog.tsv` records source, bucket, score, and matched
+  tokens for audit/debugging.
+
+When you run `download_datasets.sh`, the combined artifacts are produced as:
 
 ```
-cat "$DATA_DIR/lists/vctk_clean.txt" > "$DATA_DIR/lists/clean_all.txt"
-cat "$DATA_DIR/lists/musan_noise.txt" \
-  "$DATA_DIR/lists/fsd50k_filtered.txt" > "$DATA_DIR/lists/noise_all.txt"
-cat "$DATA_DIR/lists/musan_music.txt" > "$DATA_DIR/lists/background_music.txt"
-cat "$DATA_DIR/lists/noise_all.txt" \
-  "$DATA_DIR/lists/background_music.txt" > "$DATA_DIR/lists/noise_music.txt"
-cat "$DATA_DIR/lists/air_rir.txt" \
-    "$DATA_DIR/lists/openair_rir.txt" > "$DATA_DIR/lists/rir_all.txt"
-```
-
-Production example (adds LibriSpeech + AcousticRooms):
-
-```
-cat "$DATA_DIR/lists/vctk_clean.txt" \
-    "$DATA_DIR/lists/librispeech_clean.txt" > "$DATA_DIR/lists/clean_all.txt"
-cat "$DATA_DIR/lists/musan_noise.txt" \
-  "$DATA_DIR/lists/fsd50k_filtered.txt" > "$DATA_DIR/lists/noise_all.txt"
-cat "$DATA_DIR/lists/musan_music.txt" > "$DATA_DIR/lists/background_music.txt"
-cat "$DATA_DIR/lists/noise_all.txt" \
-  "$DATA_DIR/lists/background_music.txt" > "$DATA_DIR/lists/noise_music.txt"
-cat "$DATA_DIR/lists/air_rir.txt" \
-    "$DATA_DIR/lists/openair_rir.txt" \
-    "$DATA_DIR/lists/acousticrooms_rir.txt" > "$DATA_DIR/lists/rir_all.txt"
+bash scripts/datasets/download_datasets.sh --profile production
 ```
 
 ## Step 4: Build the MLX datastore (recommended for `df_mlx` training)
@@ -182,9 +199,14 @@ OUTPUT_DIR=/path/to/cache \
 Notes:
 - `--merge-short` is recommended when you want to preserve more short utterances
   instead of skipping speech clips shorter than `--min-duration`.
-- When `lists/background_music.txt` exists, `build_mlx_datastore.sh` forwards it as a
-  dedicated `--music-list` so music can be sampled intentionally via `p_background_music`
-  instead of only appearing inside the generic noise pool.
+- `build_mlx_datastore.sh` prefers `lists/background_music.txt` as the
+  dedicated `--music-list`, falling back to
+  `lists/background_music_expanded.txt` only when the curated list is absent.
+- If you pass `--prepare-background-music`, the builder synthesizes additional
+  dirty speaker/room/live-ish variants from that music list before sharding and
+  merges them into `background_music.prepared_merged.txt`.
+- `--music-prepare-style speaker_room` is the default preset and is the
+  recommended starting point for consumer-speaker-in-room exposure.
 - If you already ran standalone clean-speech preprocessing, you can point
   `--clean-list` at the resulting list instead of enabling
   `--preprocess-clean-speech` again.

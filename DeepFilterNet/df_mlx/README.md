@@ -70,7 +70,7 @@ Pre-compute spectral features once, then train:
 # Optional: render a small audition pack to listen to original vs prepared
 # before committing to a full cache build
 python scripts/datasets/audition_background_music.py \
-    --file-list ./data/lists/background_music_expanded.txt \
+    --file-list ./data/lists/background_music.txt \
     --style speaker_room \
     --rir-list ./data/lists/rir_all.txt \
     --output-dir ./data/audition/background_music
@@ -177,9 +177,13 @@ python -m df_mlx.train_dynamic \
 That profile keeps the speech-focused curriculum / GAN balance from the
 `speech_only` profile, but also enables explicit loud-background-music exposure
 via `dataset.p_background_music` and `dataset.background_music_gain_range`. For
-raw file-list training, make sure the run also has a dedicated
-`background_music_expanded.txt` wired through `dataset.music_list` or
-`--music-list`. When building the MLX cache, you can additionally pass
+raw file-list training, the canonical dedicated music list is now
+`background_music.txt`, which `scripts/datasets/download_datasets.sh` curates
+from FMA plus optional MTG-Jamendo inputs to approximate modern pop / rock /
+dance / country compilation-CD material. MTG-Jamendo remains optional because
+its official dataset terms are more restrictive than the default FMA path; use
+it only when that license profile fits your local research workflow. When
+building the MLX cache, you can additionally pass
 `--prepare-background-music` to synthesize dirtier speaker-in-room/live-ish
 variants from that list before sharding. The cache builder accepts
 `--music-prepare-style` (default: `speaker_room`; also `phone_room`,
@@ -191,9 +195,11 @@ before/after pack with `original.wav`, `prepared_vXX.wav`, and
 
 For raw file-list training without an explicit `dataset.music_list`, the MLX
 training setup now auto-resolves sibling list files in this order:
-`background_music.prepared_merged.txt` → `background_music_expanded.txt` →
-`background_music.txt`. That means the expanded/prepared music corpora flow
-through the same dedicated `music_list` path that legacy MUSAN-only music used.
+`background_music.prepared_merged.txt` → `background_music.txt` →
+`background_music_expanded.txt`. That means prepared/curated chart-style music
+corpora flow through the same dedicated `music_list` path used by the dynamic
+training stack, with the uncapped expanded pool only used as a fallback when
+the canonical curated list is absent.
 
 Single-file mode (no separate `--train-config` INI): inline train.py-compatible
 INI sections inside the run-config TOML under `train_ini.*`.

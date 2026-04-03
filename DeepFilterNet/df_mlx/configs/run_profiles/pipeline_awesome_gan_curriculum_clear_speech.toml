@@ -28,7 +28,8 @@
 #   - For cache-backed runs, build the cache with a dedicated background-music
 #     corpus.
 #   - For raw file-list runs, override dataset.music_list (or pass --music-list)
-#     with background_music.txt from your dataset prep step.
+#     with background_music.txt from your dataset prep step. That file is now
+#     the curated chart-style FMA/optional-MTG background-music list.
 
 [dataset]
 cache_dir = "~/DataDump/datasets/mlx_datastore"

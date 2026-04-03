@@ -308,7 +308,7 @@ def test_setup_dataset_missing_cache_lists_checked_candidates(tmp_path: Path) ->
     assert "mlx_datastore/config.json" in message
 
 
-def test_setup_dataset_auto_selects_prepared_or_expanded_background_music_list(tmp_path: Path, capsys) -> None:
+def test_setup_dataset_auto_selects_prepared_or_curated_background_music_list(tmp_path: Path, capsys) -> None:
     lists_dir = tmp_path / "lists"
     lists_dir.mkdir()
 
@@ -340,7 +340,7 @@ def test_setup_dataset_auto_selects_prepared_or_expanded_background_music_list(t
     assert f"Auto-selected rir list: {rir_list}" in output
 
 
-def test_create_dataset_from_lists_prefers_expanded_music_when_present(tmp_path: Path) -> None:
+def test_create_dataset_from_lists_prefers_curated_music_when_present(tmp_path: Path) -> None:
     lists_dir = tmp_path / "lists"
     lists_dir.mkdir()
 
@@ -360,4 +360,4 @@ def test_create_dataset_from_lists_prefers_expanded_music_when_present(tmp_path:
     )
 
     assert dataset.config.noise_files == ["/tmp/noise_a.wav"]
-    assert dataset.config.music_files == ["/tmp/music_expanded.wav"]
+    assert dataset.config.music_files == ["/tmp/music_legacy.wav"]

@@ -104,7 +104,7 @@ def resolve_dataset_file_lists(
     Preference order matches the newer dataset-prep outputs:
     - noise: ``noise_all.txt`` → ``noise_music.txt``
     - music: ``background_music.prepared_merged.txt`` →
-      ``background_music_expanded.txt`` → ``background_music.txt``
+      ``background_music.txt`` → ``background_music_expanded.txt``
     - RIR: ``rir_all.txt``
     """
 
@@ -126,8 +126,8 @@ def resolve_dataset_file_lists(
             candidate_dirs,
             (
                 "background_music.prepared_merged.txt",
-                "background_music_expanded.txt",
                 "background_music.txt",
+                "background_music_expanded.txt",
             ),
         )
         if resolved_music is not None:

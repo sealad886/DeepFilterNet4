@@ -22,9 +22,15 @@ Usage:
     python -m df_mlx.train_dynamic \\
         --speech-list /path/to/speech_files.txt \\
         --noise-list /path/to/noise_files.txt \\
-        --music-list /path/to/background_music_files.txt \
+        --music-list /path/to/background_music.txt \\
         --rir-list /path/to/rir_files.txt \\
         --epochs 100 --batch-size 8 --checkpoint-dir ./checkpoints
+
+If ``--music-list`` is omitted for raw-list training, the sibling-list resolver
+now prefers ``background_music.prepared_merged.txt`` →
+``background_music.txt`` → ``background_music_expanded.txt`` so the canonical
+curated chart-style background-music corpus flows through the same dedicated
+music path used by the dynamic loader.
 """
 
 from __future__ import annotations
