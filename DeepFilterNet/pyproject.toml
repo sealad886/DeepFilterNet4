@@ -79,7 +79,7 @@ asr-mlx = [
   "mlx-data>=0.2.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 dev = [
-  "poethepoet>=0.26,<0.27",
+  "poethepoet>=0.26,<0.44",
   "pytest>=9,<10",
   "matplotlib>=3.8,<4",
 ]
