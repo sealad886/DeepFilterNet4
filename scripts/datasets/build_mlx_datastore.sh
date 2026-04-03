@@ -119,6 +119,61 @@ print(os.path.commonpath(parent_dirs))
 PY
 }
 
+temp_cleanup_paths=()
+cleanup_temp_files() {
+  local path
+  for path in "${temp_cleanup_paths[@]:-}"; do
+    if [[ -n "${path}" && -f "${path}" ]]; then
+      rm -f "${path}"
+    fi
+  done
+}
+trap cleanup_temp_files EXIT
+
+file_list_entry_stats() {
+  local list_file="$1"
+  "${PYTHON_BIN}" - "${list_file}" <<'PY'
+from pathlib import Path
+import os
+import sys
+
+path = Path(sys.argv[1])
+total = 0
+existing = 0
+if path.is_file():
+    with path.open(encoding="utf-8") as handle:
+        for raw_line in handle:
+            entry = raw_line.strip()
+            if not entry or entry.startswith("#"):
+                continue
+            total += 1
+            if os.path.exists(entry):
+                existing += 1
+print(f"{total} {existing}")
+PY
+}
+
+sanitize_existing_file_list() {
+  local input_list="$1"
+  local output_list="$2"
+  "${PYTHON_BIN}" - "${input_list}" "${output_list}" <<'PY'
+from pathlib import Path
+import os
+import sys
+
+input_path = Path(sys.argv[1])
+output_path = Path(sys.argv[2])
+output_path.parent.mkdir(parents=True, exist_ok=True)
+with input_path.open(encoding="utf-8") as src, output_path.open("w", encoding="utf-8") as dst:
+    for raw_line in src:
+        entry = raw_line.strip()
+        if not entry or entry.startswith("#"):
+            continue
+        if os.path.exists(entry):
+            dst.write(f"{entry}\n")
+PY
+}
+
 phase_elapsed() {
   local s=$SECONDS
   printf '%dm%02ds' $((s / 60)) $((s % 60))
@@ -562,6 +617,24 @@ MIN_DURATION="${CLI_MIN_DURATION:-${MIN_DURATION:-${SEGMENT_LENGTH}}}"
 MERGE_SHORT="${CLI_MERGE_SHORT:-${MERGE_SHORT:-false}}"
 PREPROCESS_WORKERS="${CLI_PREPROCESS_WORKERS:-${PREPROCESS_WORKERS:-${PREPROCESS_WORKERS_DEFAULT}}}"
 
+MUSIC_LIST_SELECTION_NOTE=""
+MUSIC_LIST_TOTAL_ENTRIES=0
+MUSIC_LIST_EXISTING_ENTRIES=0
+if [[ -f "${MUSIC_LIST}" ]]; then
+  read -r MUSIC_LIST_TOTAL_ENTRIES MUSIC_LIST_EXISTING_ENTRIES < <(file_list_entry_stats "${MUSIC_LIST}")
+fi
+if [[ "${MUSIC_LIST}" == "${LIST_DIR}/background_music.txt" && "${MUSIC_LIST_EXISTING_ENTRIES}" -eq 0 && -f "${LIST_DIR}/background_music_expanded.txt" ]]; then
+  expanded_total=0
+  expanded_existing=0
+  read -r expanded_total expanded_existing < <(file_list_entry_stats "${LIST_DIR}/background_music_expanded.txt")
+  if [[ "${expanded_existing}" -gt 0 ]]; then
+    MUSIC_LIST_SELECTION_NOTE="background_music.txt has 0 existing entries; using background_music_expanded.txt instead"
+    MUSIC_LIST="${LIST_DIR}/background_music_expanded.txt"
+    MUSIC_LIST_TOTAL_ENTRIES="${expanded_total}"
+    MUSIC_LIST_EXISTING_ENTRIES="${expanded_existing}"
+  fi
+fi
+
 echo "=============================================="
 echo "DeepFilterNet MLX Audio Cache Builder"
 echo "=============================================="
@@ -584,10 +657,14 @@ echo "Clean list:         ${CLEAN_LIST}"
 echo "Noise list:         ${NOISE_LIST}"
 if [[ -f "${MUSIC_LIST}" ]]; then
   echo "Music list:         ${MUSIC_LIST}"
+  echo "Music entries:      ${MUSIC_LIST_EXISTING_ENTRIES}/${MUSIC_LIST_TOTAL_ENTRIES} existing"
   if [[ "${MUSIC_LIST}" == "${LIST_DIR}/background_music.txt" ]]; then
     echo "Music flavor:       curated chart-style set (FMA + optional MTG-Jamendo)"
   elif [[ "${MUSIC_LIST}" == "${LIST_DIR}/background_music_expanded.txt" ]]; then
     echo "Music flavor:       expanded chart-style eligible pool (FMA + optional MTG-Jamendo)"
+  fi
+  if [[ -n "${MUSIC_LIST_SELECTION_NOTE}" ]]; then
+    echo "Music selection:    ${MUSIC_LIST_SELECTION_NOTE}"
   fi
 else
   echo "Music list:         (none - dedicated background music disabled)"
@@ -671,6 +748,7 @@ if [[ ! -f "${NOISE_LIST}" ]]; then
 fi
 
 CLEAN_LIST_TO_USE="${CLEAN_LIST}"
+MUSIC_LIST_INPUT="${MUSIC_LIST}"
 MUSIC_LIST_TO_USE="${MUSIC_LIST}"
 mkdir -p "${OUTPUT_DIR}"
 mkdir -p "${LIST_DIR}"
@@ -749,11 +827,25 @@ if [[ ${PREPROCESS_CLEAN_SPEECH} -eq 1 ]]; then
 fi
 echo "[timing] Clean-speech preprocessing: $(phase_elapsed)"
 
+if [[ -f "${MUSIC_LIST}" ]]; then
+  if [[ "${MUSIC_LIST_EXISTING_ENTRIES}" -le 0 ]]; then
+    echo "[warn] music list has no existing files: ${MUSIC_LIST}" >&2
+    MUSIC_LIST_INPUT=""
+    MUSIC_LIST_TO_USE=""
+  elif [[ "${MUSIC_LIST_EXISTING_ENTRIES}" -lt "${MUSIC_LIST_TOTAL_ENTRIES}" ]]; then
+    MUSIC_LIST_INPUT="$(mktemp "${TMPDIR:-/tmp}/dfn-music-list.XXXXXX.txt")"
+    temp_cleanup_paths+=("${MUSIC_LIST_INPUT}")
+    sanitize_existing_file_list "${MUSIC_LIST}" "${MUSIC_LIST_INPUT}"
+    echo "[warn] filtered $((MUSIC_LIST_TOTAL_ENTRIES - MUSIC_LIST_EXISTING_ENTRIES)) missing music paths from ${MUSIC_LIST}" >&2
+    MUSIC_LIST_TO_USE="${MUSIC_LIST_INPUT}"
+  fi
+fi
+
 SECONDS=0
 if [[ ${PREPARE_BACKGROUND_MUSIC} -eq 1 ]]; then
-  if [[ ! -f "${MUSIC_LIST}" ]]; then
+  if [[ -z "${MUSIC_LIST_INPUT}" || ! -f "${MUSIC_LIST_INPUT}" ]]; then
     echo ""
-    echo "Background-music preparation requested, but no music list exists at ${MUSIC_LIST}."
+    echo "Background-music preparation requested, but no usable music list is available."
     echo "Continuing without prepared music variants."
   else
     echo ""
@@ -761,7 +853,7 @@ if [[ ${PREPARE_BACKGROUND_MUSIC} -eq 1 ]]; then
     music_prepare_cmd=(
       "${PYTHON_BIN}"
       "${ROOT_DIR}/scripts/datasets/prepare_background_music.py"
-      --file-list "${MUSIC_LIST}"
+      --file-list "${MUSIC_LIST_INPUT}"
       --output-root "${MUSIC_PREPARE_OUTPUT_ROOT}"
       --base-dir "${MUSIC_PREPARE_BASE_DIR}"
       --output-list "${MUSIC_PREPARE_OUTPUT_LIST}"
@@ -781,7 +873,7 @@ if [[ ${PREPARE_BACKGROUND_MUSIC} -eq 1 ]]; then
       echo "Error: music preparation did not produce list ${MUSIC_PREPARE_OUTPUT_LIST}" >&2
       exit 1
     fi
-    merge_unique_file_lists "${MUSIC_PREPARE_MERGED_LIST}" "${MUSIC_LIST}" "${MUSIC_PREPARE_OUTPUT_LIST}"
+    merge_unique_file_lists "${MUSIC_PREPARE_MERGED_LIST}" "${MUSIC_LIST_INPUT}" "${MUSIC_PREPARE_OUTPUT_LIST}"
     MUSIC_LIST_TO_USE="${MUSIC_PREPARE_MERGED_LIST}"
   fi
 fi

@@ -671,6 +671,105 @@ def test_build_mlx_datastore_prefers_curated_background_music_list(tmp_path: Pat
     assert build_args[build_args.index("--music-list") + 1] == str(legacy_music_list)
 
 
+def test_build_mlx_datastore_falls_back_from_stale_curated_music_list(tmp_path: Path) -> None:
+    sample_rate = 16_000
+    data_dir = tmp_path / "data"
+    lists_dir = data_dir / "lists"
+    cache_dir = tmp_path / "cache"
+
+    speech_file = tmp_path / "speech" / "speech.wav"
+    noise_file = tmp_path / "noise" / "noise.wav"
+    expanded_music_file = tmp_path / "music" / "expanded_music.wav"
+    missing_music_file = tmp_path / "music" / "missing_music.wav"
+    rir_file = tmp_path / "rir" / "rir.wav"
+    _write_wav(speech_file, sample_rate=sample_rate, seconds=1.2)
+    _write_wav(noise_file, sample_rate=sample_rate, seconds=0.6, frequency_hz=220.0)
+    _write_wav(expanded_music_file, sample_rate=sample_rate, seconds=0.8, frequency_hz=440.0)
+    _write_wav(rir_file, sample_rate=sample_rate, seconds=0.1, frequency_hz=110.0)
+
+    lists_dir.mkdir(parents=True, exist_ok=True)
+    clean_list = lists_dir / "clean_all.txt"
+    noise_list = lists_dir / "noise_music.txt"
+    stale_music_list = lists_dir / "background_music.txt"
+    expanded_music_list = lists_dir / "background_music_expanded.txt"
+    rir_list = lists_dir / "rir_all.txt"
+    clean_list.write_text(f"{speech_file}\n", encoding="utf-8")
+    noise_list.write_text(f"{noise_file}\n", encoding="utf-8")
+    stale_music_list.write_text(f"{missing_music_file}\n", encoding="utf-8")
+    expanded_music_list.write_text(f"{missing_music_file}\n{expanded_music_file}\n", encoding="utf-8")
+    rir_list.write_text(f"{rir_file}\n", encoding="utf-8")
+
+    fake_python = tmp_path / "fake_python.py"
+    fake_log = tmp_path / "fake_python_calls.jsonl"
+    _write_fake_python_bin(fake_python)
+
+    env = os.environ.copy()
+    env["PYTHON_BIN"] = str(fake_python)
+    env["FAKE_PY_LOG"] = str(fake_log)
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(BUILD_SCRIPT),
+            "--data-dir",
+            str(data_dir),
+            "--list-dir",
+            str(lists_dir),
+            "--output-dir",
+            str(cache_dir),
+            "--clean-list",
+            str(clean_list),
+            "--noise-list",
+            str(noise_list),
+            "--rir-list",
+            str(rir_list),
+            "--profile",
+            "prototype",
+            "--prepare-background-music",
+            "--sample-rate",
+            str(sample_rate),
+            "--segment-length",
+            "1.0",
+            "--min-duration",
+            "0",
+            "--num-workers",
+            "1",
+            "--shard-size",
+            "1",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (
+        "Music selection:    background_music.txt has 0 existing entries; using background_music_expanded.txt instead"
+        in result.stdout
+    )
+    assert "Music entries:      1/2 existing" in result.stdout
+
+    calls = [json.loads(line) for line in fake_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+    prepare_call = next(
+        call for call in calls if call["args"] and call["args"][0].endswith("prepare_background_music.py")
+    )
+    build_call = next(call for call in calls if call["args"][:2] == ["-m", "df_mlx.build_audio_cache"])
+
+    prepare_args = prepare_call["args"]
+    prepare_input_list = Path(prepare_args[prepare_args.index("--file-list") + 1])
+    assert prepare_input_list != expanded_music_list
+    assert prepare_input_list != stale_music_list
+
+    build_args = build_call["args"]
+    merged_list = Path(build_args[build_args.index("--music-list") + 1])
+    merged_entries = [line.strip() for line in merged_list.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert str(missing_music_file) not in merged_entries
+    assert str(expanded_music_file) in merged_entries
+
+
 def test_build_mlx_datastore_prepares_background_music_and_merges_lists(tmp_path: Path) -> None:
     sample_rate = 16_000
     data_dir = tmp_path / "data"
