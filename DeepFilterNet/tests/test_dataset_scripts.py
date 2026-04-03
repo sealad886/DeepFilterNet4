@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import gzip
 import io
 import json
 import math
 import os
+import shutil
 import subprocess
 import sys
+import tarfile
 import threading
 import wave
 import zipfile
@@ -13,11 +16,15 @@ from csv import writer as csv_writer
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BUILD_SCRIPT = REPO_ROOT / "scripts" / "datasets" / "build_mlx_datastore.sh"
 DOWNLOAD_SCRIPT = REPO_ROOT / "scripts" / "datasets" / "download_datasets.sh"
 CURATE_BACKGROUND_MUSIC_SCRIPT = REPO_ROOT / "scripts" / "datasets" / "curate_background_music.py"
 CHAINS_PREPARE_SCRIPT = REPO_ROOT / "scripts" / "datasets" / "prepare_chains_speech.py"
+BSDTAR_HEADER_SCRIPT = REPO_ROOT / "scripts" / "datasets" / "bsdtar_header.py"
+SEVEN_ZIP_EXTRACTOR = shutil.which("7zz") or shutil.which("7z")
 
 
 def _write_wav(path: Path, *, sample_rate: int, seconds: float, frequency_hz: float = 440.0) -> None:
@@ -2068,3 +2075,77 @@ def test_download_datasets_zenodo_parallel_range_failure_propagates(tmp_path: Pa
     assert "bytes=0-0" in range_headers
     assert any(header != "bytes=0-0" for header in range_headers)
     assert "[error] parallel curl range download failed" in result.stderr
+
+
+@pytest.mark.skipif(SEVEN_ZIP_EXTRACTOR is None, reason="7zz or 7z is required for bsdtar_header script tests")
+def test_bsdtar_header_forwards_unknown_args_before_archive(tmp_path: Path) -> None:
+    source_root = tmp_path / "archive-root" / "top" / "inner"
+    source_root.mkdir(parents=True)
+    payload = source_root / "payload.txt"
+    payload.write_text("hello from archive", encoding="utf-8")
+
+    archive = tmp_path / "sample.tar"
+    with tarfile.open(archive, "w") as handle:
+        handle.add(source_root.parent.parent / "top", arcname="top")
+
+    outdir = tmp_path / "extracted"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(BSDTAR_HEADER_SCRIPT),
+            "--strip-components",
+            "1",
+            str(archive),
+            "-C",
+            str(outdir),
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    extracted_payload = outdir / "inner" / "payload.txt"
+    assert extracted_payload.exists(), result.stdout
+    assert extracted_payload.read_text(encoding="utf-8") == "hello from archive"
+
+
+@pytest.mark.skipif(SEVEN_ZIP_EXTRACTOR is None, reason="7zz or 7z is required for bsdtar_header script tests")
+def test_bsdtar_header_extracts_tar_gz_with_progress_wrapper(tmp_path: Path) -> None:
+    source_root = tmp_path / "archive-root" / "top" / "inner"
+    source_root.mkdir(parents=True)
+    payload = source_root / "payload.txt"
+    payload.write_text("hello from gzip archive", encoding="utf-8")
+
+    tar_archive = tmp_path / "sample.tar"
+    with tarfile.open(tar_archive, "w") as handle:
+        handle.add(source_root.parent.parent / "top", arcname="top")
+
+    archive = tmp_path / "sample.tar.gz"
+    with tar_archive.open("rb") as src, gzip.open(archive, "wb") as dst:
+        shutil.copyfileobj(src, dst)
+
+    outdir = tmp_path / "extracted"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(BSDTAR_HEADER_SCRIPT),
+            "--strip-components",
+            "1",
+            str(archive),
+            "-C",
+            str(outdir),
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    extracted_payload = outdir / "inner" / "payload.txt"
+    assert extracted_payload.exists(), result.stdout
+    assert extracted_payload.read_text(encoding="utf-8") == "hello from gzip archive"
