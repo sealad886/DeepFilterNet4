@@ -104,8 +104,8 @@ def test_prepare_background_music_renders_style_variants_with_consistent_length_
     )
 
     assert first.returncode == 0, first.stderr
-    assert "[progress] starting source 1/1:" in first.stderr
-    assert "[progress] 2/2 variants" in first.stderr
+    assert "prepare music (phone_room)" in first.stderr
+    assert "2/2" in first.stderr
     prepared_entries = [
         Path(line.strip()) for line in output_list.read_text(encoding="utf-8").splitlines() if line.strip()
     ]

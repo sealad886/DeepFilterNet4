@@ -20,12 +20,12 @@ import hashlib
 import math
 import os
 import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 from scipy import signal as scipy_signal
+from tqdm.auto import tqdm
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[2] / "DeepFilterNet"
 if str(PACKAGE_ROOT) not in sys.path:
@@ -184,93 +184,6 @@ def write_output_list(paths: list[Path], output_list: Path) -> None:
         for path in paths:
             handle.write(f"{path}\n")
     temp_path.replace(output_list)
-
-
-def format_elapsed(seconds: float) -> str:
-    total_seconds = max(0, int(round(seconds)))
-    minutes, secs = divmod(total_seconds, 60)
-    hours, minutes = divmod(minutes, 60)
-    if hours:
-        return f"{hours:d}h{minutes:02d}m{secs:02d}s"
-    return f"{minutes:d}m{secs:02d}s"
-
-
-class ProgressReporter:
-    """Emit lightweight progress updates for long-running music preparation."""
-
-    def __init__(
-        self,
-        *,
-        total_sources: int,
-        variants_per_source: int,
-        stream: object = sys.stderr,
-        report_interval_seconds: float = 15.0,
-    ) -> None:
-        self.total_sources = total_sources
-        self.total_variants = max(1, total_sources * variants_per_source)
-        self.stream = stream
-        self.report_interval_seconds = report_interval_seconds
-        self.is_tty = bool(getattr(stream, "isatty", lambda: False)())
-        self.start_time = time.monotonic()
-        self.last_emit = self.start_time
-        self.done_variants = 0
-        self.prepared_variants = 0
-        self.reused_variants = 0
-        self._printed_final_newline = False
-
-    def announce_start(self, source_idx: int, source: Path) -> None:
-        if source_idx == 1:
-            self._write_line(
-                f"[progress] starting source {source_idx}/{self.total_sources}: {source.name}",
-            )
-
-    def update(self, *, source_idx: int, source: Path, prepared: bool) -> None:
-        self.done_variants += 1
-        if prepared:
-            self.prepared_variants += 1
-        else:
-            self.reused_variants += 1
-
-        now = time.monotonic()
-        should_emit = self.done_variants == self.total_variants
-        if self.is_tty:
-            should_emit = True
-        elif now - self.last_emit >= self.report_interval_seconds:
-            should_emit = True
-
-        if should_emit:
-            self._emit(source_idx=source_idx, source=source, now=now)
-
-    def finish(self) -> None:
-        if self.is_tty and not self._printed_final_newline:
-            print(file=self.stream, flush=True)
-            self._printed_final_newline = True
-
-    def _emit(self, *, source_idx: int, source: Path, now: float) -> None:
-        elapsed = now - self.start_time
-        progress = self.done_variants / float(self.total_variants)
-        rate = self.done_variants / elapsed if elapsed > 0.0 else 0.0
-        remaining = self.total_variants - self.done_variants
-        eta_seconds = remaining / rate if rate > 1e-9 else float("inf")
-        eta_text = format_elapsed(eta_seconds) if math.isfinite(eta_seconds) else "unknown"
-        message = (
-            f"[progress] {self.done_variants:,}/{self.total_variants:,} variants "
-            f"({progress * 100.0:5.1f}%) | prepared={self.prepared_variants:,} "
-            f"reused={self.reused_variants:,} | source {source_idx:,}/{self.total_sources:,} "
-            f"({source.name}) | elapsed={format_elapsed(elapsed)} | "
-            f"rate={rate:0.2f}/s | eta={eta_text}"
-        )
-        if self.is_tty:
-            print(f"\r{message}", end="", file=self.stream, flush=True)
-            if self.done_variants == self.total_variants:
-                print(file=self.stream, flush=True)
-                self._printed_final_newline = True
-        else:
-            self._write_line(message)
-        self.last_emit = now
-
-    def _write_line(self, message: str) -> None:
-        print(message, file=self.stream, flush=True)
 
 
 def build_output_path(source: Path, output_root: Path, base_dir: Path, variant_idx: int, style: str) -> Path:
@@ -516,10 +429,7 @@ def main() -> int:
 
     prepared_paths: list[Path] = []
     rir_cache: dict[Path, np.ndarray] = {}
-    progress = ProgressReporter(
-        total_sources=len(source_paths),
-        variants_per_source=args.variants_per_source,
-    )
+    total_variants = max(1, len(source_paths) * args.variants_per_source)
 
     print(
         f"[info] Preparing {len(source_paths):,} music sources into "
@@ -536,39 +446,60 @@ def main() -> int:
 
     processed_count = 0
     reused_count = 0
-    for source_idx, source in enumerate(source_paths, start=1):
-        progress.announce_start(source_idx, source)
-        audio = None
-        for variant_idx in range(args.variants_per_source):
-            output_path = build_output_path(source, output_root, base_dir, variant_idx, args.style)
-            prepared_paths.append(output_path)
-            if not args.overwrite and is_complete_output(output_path):
-                reused_count += 1
-                progress.update(source_idx=source_idx, source=source, prepared=False)
-                continue
-
-            if audio is None:
-                audio = load_audio_file(str(source), args.sample_rate)
-
-            rng = build_rng(source, variant_idx, args.seed)
-            rir_audio = None
-            if rir_paths and rng.random() < args.rir_probability:
-                selected_rir = select_rir_path(rir_paths, rng)
-                if selected_rir is not None:
-                    rir_audio = load_rir_cached(selected_rir, args.sample_rate, rir_cache)
-
-            rendered = render_room_playback_variant(
-                audio,
-                args.sample_rate,
-                rng,
-                style=args.style,
-                rir_audio=rir_audio,
+    with tqdm(
+        total=total_variants,
+        desc=f"prepare music ({args.style})",
+        unit="variant",
+        dynamic_ncols=True,
+        file=sys.stderr,
+        mininterval=1.0,
+        leave=True,
+    ) as progress:
+        progress.set_postfix_str("initializing")
+        progress.refresh()
+        for source_idx, source in enumerate(source_paths, start=1):
+            progress.set_postfix_str(
+                f"src={source_idx}/{len(source_paths)} {source.name} prep={processed_count} reuse={reused_count}",
+                refresh=False,
             )
-            save_audio_file(output_path, rendered, args.sample_rate)
-            processed_count += 1
-            progress.update(source_idx=source_idx, source=source, prepared=True)
+            audio = None
+            for variant_idx in range(args.variants_per_source):
+                output_path = build_output_path(source, output_root, base_dir, variant_idx, args.style)
+                prepared_paths.append(output_path)
+                if not args.overwrite and is_complete_output(output_path):
+                    reused_count += 1
+                    progress.set_postfix_str(
+                        f"src={source_idx}/{len(source_paths)} {source.name} prep={processed_count} reuse={reused_count}",
+                        refresh=False,
+                    )
+                    progress.update(1)
+                    continue
 
-    progress.finish()
+                if audio is None:
+                    audio = load_audio_file(str(source), args.sample_rate)
+
+                rng = build_rng(source, variant_idx, args.seed)
+                rir_audio = None
+                if rir_paths and rng.random() < args.rir_probability:
+                    selected_rir = select_rir_path(rir_paths, rng)
+                    if selected_rir is not None:
+                        rir_audio = load_rir_cached(selected_rir, args.sample_rate, rir_cache)
+
+                rendered = render_room_playback_variant(
+                    audio,
+                    args.sample_rate,
+                    rng,
+                    style=args.style,
+                    rir_audio=rir_audio,
+                )
+                save_audio_file(output_path, rendered, args.sample_rate)
+                processed_count += 1
+                progress.set_postfix_str(
+                    f"src={source_idx}/{len(source_paths)} {source.name} prep={processed_count} reuse={reused_count}",
+                    refresh=False,
+                )
+                progress.update(1)
+
     write_output_list(prepared_paths, output_list)
     print(f"[ok] wrote {len(prepared_paths):,} prepared music entries -> {output_list}", flush=True)
     print(f"[info] prepared={processed_count:,} reused={reused_count:,}", flush=True)
