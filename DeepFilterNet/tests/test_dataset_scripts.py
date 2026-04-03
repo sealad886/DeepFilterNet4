@@ -218,6 +218,14 @@ def _build_fake_mtg_jamendo_corpus(root: Path, entries: list[dict[str, object]])
     return root
 
 
+def _write_zip_from_tree(root: Path, archive_path: Path, *, relative_to: Path) -> None:
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        for path in sorted(root.rglob("*")):
+            if path.is_file():
+                archive.write(path, arcname=str(path.relative_to(relative_to)))
+
+
 def _build_fake_chains_corpus(root: Path, *, sample_rate: int) -> Path:
     mono_specs = {
         "fast": ("frf01", "frf01_f01_fast.wav"),
@@ -1355,6 +1363,85 @@ def test_download_datasets_curates_background_music_from_fma_and_mtg(tmp_path: P
     assert fma_rock_path in combined_noise
     assert mtg_country_path in combined_noise
     assert fsd_song_path not in combined_noise
+
+
+def test_download_datasets_extracts_existing_fma_archives_when_fma_dir_is_empty(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    lists_dir = data_dir / "lists"
+    downloads_dir = data_dir / "downloads"
+    extract_dir = data_dir / "raw"
+
+    vctk_dir = tmp_path / "existing" / "VCTK-Corpus-0.92"
+    musan_dir = tmp_path / "existing" / "musan"
+    air_rir_dir = tmp_path / "existing" / "air"
+    source_fma_dir = _build_fake_fma_corpus(
+        tmp_path / "source" / "FMA",
+        [
+            {
+                "track_id": 1,
+                "title": "Chart Pop Song",
+                "artist": "Open Pop",
+                "album": "Hits",
+                "genre_top": "Pop",
+                "track_tags": ["vocals", "radio"],
+                "genres_all": [1],
+            }
+        ],
+    )
+    fma_dir = extract_dir / "FMA"
+
+    _write_zip_from_tree(
+        source_fma_dir / "fma_metadata", downloads_dir / "fma_metadata.zip", relative_to=source_fma_dir
+    )
+    _write_zip_from_tree(source_fma_dir / "fma_medium", downloads_dir / "fma_medium.zip", relative_to=source_fma_dir)
+
+    _touch(vctk_dir / "wav48_silence_trimmed" / "p001" / "sample.flac")
+    _touch(musan_dir / "noise" / "noise.wav")
+    _touch(air_rir_dir / "room.wav")
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(DOWNLOAD_SCRIPT),
+            "--no-download",
+            "--data-dir",
+            str(data_dir),
+            "--list-dir",
+            str(lists_dir),
+            "--download-dir",
+            str(downloads_dir),
+            "--extract-dir",
+            str(extract_dir),
+            "--profile",
+            "prototype",
+            "--vctk-dir",
+            str(vctk_dir),
+            "--musan-dir",
+            str(musan_dir),
+            "--fma-dir",
+            str(fma_dir),
+            "--air-rir-dir",
+            str(air_rir_dir),
+            "--no-download-librispeech",
+            "--no-download-fsd50k",
+            "--no-download-openair",
+            "--no-download-acousticrooms",
+            "--background-music-min-count",
+            "1",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (fma_dir / "fma_metadata" / "tracks.csv").exists()
+    assert (fma_dir / "fma_medium" / "000" / "000001.mp3").exists()
+    assert "extracting FMA metadata" in result.stdout or "extracting FMA metadata" in result.stderr
+    assert "extracting FMA archives" in result.stdout or "extracting FMA archives" in result.stderr
+    assert "000001.mp3" in (lists_dir / "background_music.txt").read_text(encoding="utf-8")
 
 
 def test_download_datasets_skips_completed_processing_for_existing_archive_outputs(tmp_path: Path) -> None:

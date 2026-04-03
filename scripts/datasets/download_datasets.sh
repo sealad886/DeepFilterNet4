@@ -576,6 +576,58 @@ require_dir() {
   return 0
 }
 
+detect_fma_audio_dir() {
+  local root="$1"
+  local candidate
+  for candidate in \
+    "${root}/fma_full" \
+    "${root}/fma_large" \
+    "${root}/fma_medium" \
+    "${root}/fma_small"; do
+    if [[ -d "${candidate}" ]]; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+fma_dataset_ready() {
+  local root="$1"
+  local audio_dir
+  [[ -n "${root}" && -d "${root}" ]] || return 1
+  [[ -f "${root}/fma_metadata/tracks.csv" && -f "${root}/fma_metadata/genres.csv" ]] || return 1
+  audio_dir="$(detect_fma_audio_dir "${root}" 2>/dev/null || true)"
+  [[ -n "${audio_dir}" ]] || return 1
+  find "${audio_dir}" -type f -name '*.mp3' -print -quit | grep -q .
+}
+
+detect_mtg_jamendo_audio_dir() {
+  local root="$1"
+  local candidate
+  for candidate in \
+    "${root}/raw_30s/audio-low" \
+    "${root}/raw_30s/audio" \
+    "${root}/audio-low" \
+    "${root}/audio" \
+    "${root}"; do
+    if [[ -d "${candidate}" ]] && \
+      find "${candidate}" -maxdepth 3 -type f \( -name '*.mp3' -o -name '*.low.mp3' \) -print -quit | grep -q .; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+mtg_jamendo_dataset_ready() {
+  local root="$1"
+  [[ -n "${root}" && -d "${root}" ]] || return 1
+  [[ -f "${root}/data/raw.meta.tsv" ]] || return 1
+  [[ -f "${root}/data/autotagging.tsv" || -f "${root}/data/raw_30s_cleantags_50artists.tsv" ]] || return 1
+  detect_mtg_jamendo_audio_dir "${root}" >/dev/null 2>&1
+}
+
 write_list() {
   local src_dir="$1"
   local out_file="$2"
@@ -1631,6 +1683,35 @@ if [[ ! -d "${LIBRISPEECH_DIR}" ]]; then
   shopt -u nullglob
 fi
 
+if ! fma_dataset_ready "${FMA_DIR}"; then
+  extract_if_present "FMA metadata" "${DOWNLOAD_DIR}/fma_metadata.zip" "${FMA_DIR}"
+
+  fma_archives=()
+  for archive_name in fma_full.zip fma_large.zip fma_medium.zip fma_small.zip; do
+    if [[ -f "${DOWNLOAD_DIR}/${archive_name}" ]]; then
+      fma_archives+=("${DOWNLOAD_DIR}/${archive_name}")
+    fi
+  done
+  if (( ${#fma_archives[@]} > 0 )); then
+    echo "[info] extracting FMA archives from ${DOWNLOAD_DIR}"
+    for zip in "${fma_archives[@]}"; do
+      extract_archive "${zip}" "${FMA_DIR}"
+    done
+  fi
+fi
+
+if ! mtg_jamendo_dataset_ready "${MTG_JAMENDO_DIR}"; then
+  shopt -s nullglob
+  mtg_archives=("${DOWNLOAD_DIR}"/mtg-jamendo/*.tar)
+  if (( ${#mtg_archives[@]} > 0 )); then
+    echo "[info] extracting MTG-Jamendo archives from ${DOWNLOAD_DIR}/mtg-jamendo"
+    for archive in "${mtg_archives[@]}"; do
+      extract_archive "${archive}" "${MTG_JAMENDO_DIR}"
+    done
+  fi
+  shopt -u nullglob
+fi
+
 if [[ -d "${FSD50K_DIR}" ]]; then
   # Check for JSON metadata files (the actual format FSD50K uses)
   if [[ ! -f "${FSD50K_DIR}/FSD50K.metadata/dev_clips_info_FSD50K.json" ]]; then
@@ -1664,13 +1745,17 @@ if require_dir "FSD50K" "${FSD50K_DIR}"; then
 fi
 
 FMA_PRESENT=0
-if require_dir "FMA" "${FMA_DIR}"; then
+if fma_dataset_ready "${FMA_DIR}"; then
   FMA_PRESENT=1
+else
+  echo "[skip] FMA dataset incomplete or not extracted: ${FMA_DIR}" >&2
 fi
 
 MTG_JAMENDO_PRESENT=0
-if require_dir "MTG-Jamendo" "${MTG_JAMENDO_DIR}"; then
+if mtg_jamendo_dataset_ready "${MTG_JAMENDO_DIR}"; then
   MTG_JAMENDO_PRESENT=1
+else
+  echo "[skip] MTG-Jamendo dataset incomplete or not extracted: ${MTG_JAMENDO_DIR}" >&2
 fi
 
 # RIR lists
