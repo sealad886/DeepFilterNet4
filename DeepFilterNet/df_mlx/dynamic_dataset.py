@@ -982,9 +982,10 @@ class DynamicDataset:
     def _load_speech(self, idx: int, rng: random.Random) -> Optional[np.ndarray]:
         """Load and prepare a speech sample.
 
-        Returns None if the audio is shorter than segment_samples.
-        NOTE: When using a properly built cache (with --min-duration),
-        all speech files should be long enough.
+        Short raw-list speech clips are zero-padded up to ``segment_samples``
+        so MLXDataStream does not churn through fallback indices on datasets
+        like VCTK that contain many sub-segment utterances. Zero-length or
+        unreadable files still return ``None``.
         """
         files = self.splits[self._current_split]
         path = files[idx]
@@ -992,9 +993,16 @@ class DynamicDataset:
         try:
             audio = self._load_audio(path, "speech")
 
-            # Skip audio that's too short (shouldn't happen with properly built cache)
-            if len(audio) < self.segment_samples:
+            if len(audio) == 0:
                 return None
+
+            # Properly built caches can filter or merge short speech ahead of
+            # time, but raw-list training often includes short utterances.
+            # Pad those clips so both PrefetchDataLoader and MLXDataStream can
+            # keep training instead of repeatedly failing over.
+            if len(audio) < self.segment_samples:
+                pad_length = self.segment_samples - len(audio)
+                audio = np.pad(audio, (0, pad_length), mode="constant")
 
             # Extract random segment
             if len(audio) > self.segment_samples:
@@ -1643,8 +1651,10 @@ class MLXDataStream:
         # All indices failed - raise error (no dummy data!)
         raise RuntimeError(
             f"Failed to load sample after trying {len(indices_to_try)} indices. "
-            f"Primary index: {primary_idx}. This indicates a data integrity issue. "
-            "Please verify your audio cache with validate_audio_cache.py."
+            f"Primary index: {primary_idx}. "
+            "No valid sample was produced for the current dataset "
+            "configuration. For raw-list training, verify that speech entries "
+            "are readable or build a cache with --min-duration/--merge-short."
         )
 
     def _create_stream(self, skip_batches: int = 0) -> Any:
