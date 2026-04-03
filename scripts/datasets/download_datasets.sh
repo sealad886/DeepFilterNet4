@@ -717,6 +717,16 @@ stat_size() {
   fi
 }
 
+remove_zero_byte_download_artifacts() {
+  local path="$1"
+  if [[ -f "${path}" ]] && [[ "$(stat_size "${path}")" -eq 0 ]]; then
+    rm -f "${path}"
+  fi
+  if [[ -f "${path}.aria2" ]]; then
+    rm -f "${path}.aria2"
+  fi
+}
+
 stat_mtime() {
   local path="$1"
   if stat -f %m "${path}" >/dev/null 2>&1; then
@@ -984,6 +994,10 @@ download_file() {
   if is_fsd50k_url "${url}"; then
     force_curl=1
   fi
+  if [[ -f "${out}" ]] && [[ "$(stat_size "${out}")" -eq 0 ]]; then
+    echo "[warn] removing zero-byte placeholder before retry: ${out}" >&2
+    remove_zero_byte_download_artifacts "${out}"
+  fi
   if [[ -f "${out}" ]]; then
     if [[ "${RESUME}" != "1" ]]; then
       echo "[skip] exists: ${out}"
@@ -1030,6 +1044,7 @@ download_file() {
       aria2_auth_header="--header=Authorization: token ${gh_token}"
       echo "[info] using GitHub authentication for: ${url}" >&2
     fi
+    local status=0
     if [[ "${aria2_continue}" == "1" ]]; then
       # shellcheck disable=SC2086  # Intentionally unquoted to allow empty expansion
       aria2c -x "${aria2_conn}" -s "${aria2_split}" -k "${ARIA2_MIN_SPLIT}" -c \
@@ -1037,18 +1052,18 @@ download_file() {
         --file-allocation="${aria2_file_alloc}" \
         --user-agent="${ARIA2_USER_AGENT}" \
         ${aria2_auth_header} \
-        -d "$(dirname "${out}")" -o "$(basename "${out}")" "${url}"
+        -d "$(dirname "${out}")" -o "$(basename "${out}")" "${url}" || status=$?
     else
       # shellcheck disable=SC2086  # Intentionally unquoted to allow empty expansion
       aria2c -x "${aria2_conn}" -s "${aria2_split}" -k "${ARIA2_MIN_SPLIT}" \
-      --check-integrity=true \
-      --file-allocation="${aria2_file_alloc}" \
-      --user-agent="${ARIA2_USER_AGENT}" \
-      ${aria2_auth_header} \
-      -d "$(dirname "${out}")" -o "$(basename "${out}")" "${url}"
+        --check-integrity=true \
+        --file-allocation="${aria2_file_alloc}" \
+        --user-agent="${ARIA2_USER_AGENT}" \
+        ${aria2_auth_header} \
+        -d "$(dirname "${out}")" -o "$(basename "${out}")" "${url}" || status=$?
     fi
-    status=$?
     if [[ "${status}" -ne 0 ]]; then
+      remove_zero_byte_download_artifacts "${out}"
       if [[ "${INTERRUPTED}" == "1" || "${status}" -eq 130 ]]; then
         echo "[info] download interrupted by user" >&2
         exit 130
@@ -1071,22 +1086,36 @@ download_file() {
       if [[ "${RESUME}" == "1" ]]; then
         if [[ -n "${auth_header}" ]]; then
           if ! curl -L -C - --fail -H "Authorization: token ${gh_token}" -o "${out}" "${url}"; then
+            remove_zero_byte_download_artifacts "${out}"
             echo "[warn] curl resume failed, retrying full download: ${url}" >&2
             rm -f "${out}"
-            curl -L --fail -H "Authorization: token ${gh_token}" -o "${out}" "${url}"
+            if ! curl -L --fail -H "Authorization: token ${gh_token}" -o "${out}" "${url}"; then
+              remove_zero_byte_download_artifacts "${out}"
+              return 1
+            fi
           fi
         else
           if ! curl -L -C - --fail -o "${out}" "${url}"; then
+            remove_zero_byte_download_artifacts "${out}"
             echo "[warn] curl resume failed, retrying full download: ${url}" >&2
             rm -f "${out}"
-            curl -L --fail -o "${out}" "${url}"
+            if ! curl -L --fail -o "${out}" "${url}"; then
+              remove_zero_byte_download_artifacts "${out}"
+              return 1
+            fi
           fi
         fi
       else
         if [[ -n "${auth_header}" ]]; then
-          curl -L --fail -H "Authorization: token ${gh_token}" -o "${out}" "${url}"
+          if ! curl -L --fail -H "Authorization: token ${gh_token}" -o "${out}" "${url}"; then
+            remove_zero_byte_download_artifacts "${out}"
+            return 1
+          fi
         else
-          curl -L --fail -o "${out}" "${url}"
+          if ! curl -L --fail -o "${out}" "${url}"; then
+            remove_zero_byte_download_artifacts "${out}"
+            return 1
+          fi
         fi
       fi
     elif [[ "${force_curl}" == "1" ]]; then
@@ -1096,22 +1125,36 @@ download_file() {
       if [[ "${RESUME}" == "1" ]]; then
         if [[ -n "${auth_header}" ]]; then
           if ! wget -c --header="Authorization: token ${gh_token}" -O "${out}" "${url}"; then
+            remove_zero_byte_download_artifacts "${out}"
             echo "[warn] wget resume failed, retrying full download: ${url}" >&2
             rm -f "${out}"
-            wget --header="Authorization: token ${gh_token}" -O "${out}" "${url}"
+            if ! wget --header="Authorization: token ${gh_token}" -O "${out}" "${url}"; then
+              remove_zero_byte_download_artifacts "${out}"
+              return 1
+            fi
           fi
         else
           if ! wget -c -O "${out}" "${url}"; then
+            remove_zero_byte_download_artifacts "${out}"
             echo "[warn] wget resume failed, retrying full download: ${url}" >&2
             rm -f "${out}"
-            wget -O "${out}" "${url}"
+            if ! wget -O "${out}" "${url}"; then
+              remove_zero_byte_download_artifacts "${out}"
+              return 1
+            fi
           fi
         fi
       else
         if [[ -n "${auth_header}" ]]; then
-          wget --header="Authorization: token ${gh_token}" -O "${out}" "${url}"
+          if ! wget --header="Authorization: token ${gh_token}" -O "${out}" "${url}"; then
+            remove_zero_byte_download_artifacts "${out}"
+            return 1
+          fi
         else
-          wget -O "${out}" "${url}"
+          if ! wget -O "${out}" "${url}"; then
+            remove_zero_byte_download_artifacts "${out}"
+            return 1
+          fi
         fi
       fi
     else
@@ -1227,6 +1270,11 @@ queue_download() {
   local aria2_max_tries=""
   local aria2_user_agent="${ARIA2_USER_AGENT}"
 
+  if [[ -f "${out}" ]] && [[ "$(stat_size "${out}")" -eq 0 ]]; then
+    echo "[warn] removing zero-byte placeholder before aria2 retry: ${out}" >&2
+    remove_zero_byte_download_artifacts "${out}"
+  fi
+
   if [[ -f "${out}" ]]; then
     if [[ "${RESUME}" != "1" ]]; then
       echo "[skip] exists: ${out}"
@@ -1321,11 +1369,26 @@ run_parallel_downloads() {
   if [[ ! -s "${ARIA2_INPUT_FILE}" ]]; then
     return 0
   fi
+  local status=0
   aria2c -i "${ARIA2_INPUT_FILE}" -c --check-integrity=true \
     -j "${ARIA2_MAX_CONCURRENT}" -x "${ARIA2_CONN}" -s "${ARIA2_SPLIT}" \
-    -k "${ARIA2_MIN_SPLIT}" --user-agent="${ARIA2_USER_AGENT}"
-  status=$?
+    -k "${ARIA2_MIN_SPLIT}" --user-agent="${ARIA2_USER_AGENT}" || status=$?
   if [[ "${status}" -ne 0 ]]; then
+    if [[ -f "${ARIA2_INPUT_FILE}" ]]; then
+      awk '
+        /^  dir=/ {dir=substr($0, 7)}
+        /^  out=/ {
+          out=substr($0, 7)
+          if (dir != "" && out != "") {
+            print dir "/" out
+          }
+        }
+      ' "${ARIA2_INPUT_FILE}" | while IFS= read -r path; do
+        if [[ -n "${path}" ]]; then
+          remove_zero_byte_download_artifacts "${path}"
+        fi
+      done
+    fi
     if [[ "${INTERRUPTED}" == "1" || "${status}" -eq 130 ]]; then
       echo "[info] download interrupted by user" >&2
       exit 130

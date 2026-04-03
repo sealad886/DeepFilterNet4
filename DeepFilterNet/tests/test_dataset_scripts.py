@@ -336,6 +336,63 @@ raise SystemExit(subprocess.call([REAL_PYTHON, *args]))
     path.chmod(0o755)
 
 
+def _write_fake_curl_failure_bin(path: Path) -> None:
+    script = """#!/usr/bin/env python3
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+output = None
+for idx, arg in enumerate(args):
+    if arg == "-o" and idx + 1 < len(args):
+        output = Path(args[idx + 1])
+        break
+
+if output is not None:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(b"")
+
+raise SystemExit(22)
+"""
+    path.write_text(script, encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _write_fake_aria2_failure_bin(path: Path) -> None:
+    script = """#!/usr/bin/env python3
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+if "-i" in args:
+    input_path = Path(args[args.index("-i") + 1])
+    current_dir = None
+    for raw_line in input_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.rstrip("\\n")
+        if line.startswith("  dir="):
+            current_dir = Path(line[6:])
+        elif line.startswith("  out=") and current_dir is not None:
+            target = current_dir / line[6:]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"")
+else:
+    output_dir = Path(".")
+    output_name = None
+    if "-d" in args:
+        output_dir = Path(args[args.index("-d") + 1])
+    if "-o" in args:
+        output_name = args[args.index("-o") + 1]
+    if output_name is not None:
+        target = output_dir / output_name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"")
+
+raise SystemExit(9)
+"""
+    path.write_text(script, encoding="utf-8")
+    path.chmod(0o755)
+
+
 def test_build_mlx_datastore_help_mentions_preprocess_and_merge_short() -> None:
     result = subprocess.run(
         ["bash", str(BUILD_SCRIPT), "--help"],
@@ -1541,6 +1598,119 @@ def test_download_datasets_extracts_existing_fma_archives_when_fma_dir_is_empty(
     assert "extracting FMA metadata" in result.stdout or "extracting FMA metadata" in result.stderr
     assert "extracting FMA archives" in result.stdout or "extracting FMA archives" in result.stderr
     assert "000001.mp3" in (lists_dir / "background_music.txt").read_text(encoding="utf-8")
+
+
+def test_download_datasets_removes_zero_byte_fma_metadata_after_curl_failure(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    lists_dir = data_dir / "lists"
+    downloads_dir = data_dir / "downloads"
+    extract_dir = data_dir / "raw"
+    fake_bin_dir = tmp_path / "bin"
+    fake_curl = fake_bin_dir / "curl"
+
+    fake_bin_dir.mkdir(parents=True, exist_ok=True)
+    _write_fake_curl_failure_bin(fake_curl)
+
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin_dir}{os.pathsep}{env['PATH']}"
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(DOWNLOAD_SCRIPT),
+            "--data-dir",
+            str(data_dir),
+            "--list-dir",
+            str(lists_dir),
+            "--download-dir",
+            str(downloads_dir),
+            "--extract-dir",
+            str(extract_dir),
+            "--profile",
+            "prototype",
+            "--agree-licenses",
+            "--no-aria2",
+            "--no-download-vctk",
+            "--no-download-librispeech",
+            "--no-download-musan",
+            "--download-fma",
+            "--no-download-mtg-jamendo",
+            "--no-download-fsd50k",
+            "--no-download-air",
+            "--no-download-openair",
+            "--no-download-acousticrooms",
+            "--background-music-min-count",
+            "0",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "[warn] curl resume failed, retrying full download" in result.stderr
+    assert not (downloads_dir / "fma_metadata.zip").exists()
+    assert not (downloads_dir / "fma_metadata.zip.aria2").exists()
+
+
+def test_download_datasets_removes_zero_byte_fma_metadata_after_parallel_aria2_failure(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    lists_dir = data_dir / "lists"
+    downloads_dir = data_dir / "downloads"
+    extract_dir = data_dir / "raw"
+    fake_bin_dir = tmp_path / "bin"
+    fake_aria2 = fake_bin_dir / "aria2c"
+    fake_curl = fake_bin_dir / "curl"
+
+    fake_bin_dir.mkdir(parents=True, exist_ok=True)
+    _write_fake_aria2_failure_bin(fake_aria2)
+    _write_fake_curl_failure_bin(fake_curl)
+
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin_dir}{os.pathsep}{env['PATH']}"
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(DOWNLOAD_SCRIPT),
+            "--data-dir",
+            str(data_dir),
+            "--list-dir",
+            str(lists_dir),
+            "--download-dir",
+            str(downloads_dir),
+            "--extract-dir",
+            str(extract_dir),
+            "--profile",
+            "prototype",
+            "--agree-licenses",
+            "--download-fma",
+            "--no-download-vctk",
+            "--no-download-librispeech",
+            "--no-download-musan",
+            "--no-download-mtg-jamendo",
+            "--no-download-fsd50k",
+            "--no-download-air",
+            "--no-download-openair",
+            "--no-download-acousticrooms",
+            "--background-music-min-count",
+            "0",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "[error] aria2c failed" in result.stderr
+    assert not (downloads_dir / "fma_metadata.zip").exists()
+    assert not (downloads_dir / "fma_metadata.zip.aria2").exists()
 
 
 def test_download_datasets_skips_completed_processing_for_existing_archive_outputs(tmp_path: Path) -> None:
