@@ -73,6 +73,30 @@ except ImportError:
     HAS_MLX_DATA = False
 
 
+_MLX_STREAM_FALLBACK_COUNT = 10
+RetryMetadataValue = Union[np.ndarray, np.int32]
+
+
+def _build_retry_metadata(
+    indices: Union[List[int], np.ndarray], fallback_count: int = _MLX_STREAM_FALLBACK_COUNT
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Build wrapped fallback indices for MLXDataStream retry metadata.
+
+    This precomputes an ``O(n * fallback_count)`` int32 matrix once per epoch so
+    the hot path can reuse views instead of allocating Python fallback lists and
+    numpy arrays per sample.
+    """
+    index_array = np.asarray(indices, dtype=np.int32)
+    n_indices = len(index_array)
+    if n_indices == 0:
+        return index_array, np.empty((0, fallback_count), dtype=np.int32)
+
+    base_positions = np.arange(n_indices, dtype=np.int32)[:, None]
+    fallback_offsets = np.arange(1, fallback_count + 1, dtype=np.int32)[None, :]
+    fallback_matrix = index_array[(base_positions + fallback_offsets) % n_indices]
+    return index_array, fallback_matrix
+
+
 @dataclass
 class DatasetConfig:
     """Configuration for dynamic dataset."""
@@ -768,6 +792,30 @@ class Sample:
     feat_spec: np.ndarray  # DF-band features
     snr: float
     gain: float
+
+
+def _sample_to_numpy_dict(sample: Sample) -> Dict[str, np.ndarray]:
+    """Convert a loaded Sample to C-contiguous numpy arrays for mlx-data."""
+    # compute_stft guarantees complex64, so .real/.imag are float32 views.
+    # np.require ensures C-contiguity without copying when already satisfied.
+    noisy_r = sample.noisy_spec.real
+    noisy_i = sample.noisy_spec.imag
+    clean_r = sample.clean_spec.real
+    clean_i = sample.clean_spec.imag
+    interference_r = sample.interference_spec.real
+    interference_i = sample.interference_spec.imag
+    return {
+        "noisy_real": np.require(noisy_r, dtype=np.float32, requirements="C"),
+        "noisy_imag": np.require(noisy_i, dtype=np.float32, requirements="C"),
+        "clean_real": np.require(clean_r, dtype=np.float32, requirements="C"),
+        "clean_imag": np.require(clean_i, dtype=np.float32, requirements="C"),
+        "interference_real": np.require(interference_r, dtype=np.float32, requirements="C"),
+        "interference_imag": np.require(interference_i, dtype=np.float32, requirements="C"),
+        "feat_erb": np.require(sample.feat_erb, dtype=np.float32, requirements="C"),
+        "feat_spec": np.require(sample.feat_spec, dtype=np.float32, requirements="C"),
+        "snr": np.array([sample.snr], dtype=np.float32),
+        "gain": np.array([sample.gain], dtype=np.float32),
+    }
 
 
 def _assemble_batch(samples: List[Sample]) -> Dict[str, mx.array]:
@@ -1613,44 +1661,31 @@ class MLXDataStream:
         else:
             primary_idx = int(idx_val)
 
-        # Extract fallback indices
-        fallbacks = sample_dict.get("fallbacks", np.array([], dtype=np.int32))
+        # Try the primary index first, then any fallback indices in order.
+        sample = self.dataset.get_sample(primary_idx)
+        if sample is not None:
+            return _sample_to_numpy_dict(sample)
+
+        fallbacks = sample_dict.get("fallbacks")
         if isinstance(fallbacks, np.ndarray):
-            fallback_list = fallbacks.tolist()
+            fallback_iter = fallbacks.flat
+            attempt_count = 1 + int(fallbacks.size)
+        elif fallbacks is None:
+            fallback_iter = ()
+            attempt_count = 1
         else:
-            fallback_list = list(fallbacks) if fallbacks is not None else []
+            fallback_values = tuple(int(idx) for idx in fallbacks)
+            fallback_iter = fallback_values
+            attempt_count = 1 + len(fallback_values)
 
-        # Build full list of indices to try: primary first, then fallbacks
-        indices_to_try = [primary_idx] + fallback_list
-
-        # Try each index until one succeeds
-        for try_idx in indices_to_try:
-            sample = self.dataset.get_sample(try_idx)
+        for try_idx in fallback_iter:
+            sample = self.dataset.get_sample(int(try_idx))
             if sample is not None:
-                # compute_stft guarantees complex64, so .real/.imag are float32 views.
-                # np.require ensures C-contiguity without copying when already satisfied.
-                noisy_r = sample.noisy_spec.real
-                noisy_i = sample.noisy_spec.imag
-                clean_r = sample.clean_spec.real
-                clean_i = sample.clean_spec.imag
-                interference_r = sample.interference_spec.real
-                interference_i = sample.interference_spec.imag
-                return {
-                    "noisy_real": np.require(noisy_r, dtype=np.float32, requirements="C"),
-                    "noisy_imag": np.require(noisy_i, dtype=np.float32, requirements="C"),
-                    "clean_real": np.require(clean_r, dtype=np.float32, requirements="C"),
-                    "clean_imag": np.require(clean_i, dtype=np.float32, requirements="C"),
-                    "interference_real": np.require(interference_r, dtype=np.float32, requirements="C"),
-                    "interference_imag": np.require(interference_i, dtype=np.float32, requirements="C"),
-                    "feat_erb": np.require(sample.feat_erb, dtype=np.float32, requirements="C"),
-                    "feat_spec": np.require(sample.feat_spec, dtype=np.float32, requirements="C"),
-                    "snr": np.array([sample.snr], dtype=np.float32),
-                    "gain": np.array([sample.gain], dtype=np.float32),
-                }
+                return _sample_to_numpy_dict(sample)
 
         # All indices failed - raise error (no dummy data!)
         raise RuntimeError(
-            f"Failed to load sample after trying {len(indices_to_try)} indices. "
+            f"Failed to load sample after trying {attempt_count} indices. "
             f"Primary index: {primary_idx}. "
             "No valid sample was produced for the current dataset "
             "configuration. For raw-list training, verify that speech entries "
@@ -1683,17 +1718,13 @@ class MLXDataStream:
         if skip_samples > 0 and skip_samples < len(indices):
             indices = indices[skip_samples:]
 
+        index_array, fallback_matrix = _build_retry_metadata(indices)
+
         # Create sample metadata generator with fallback indices for retry
-        # Each sample carries a list of indices to try if primary fails
-        def _sample_metadata_iter() -> Iterator[Dict[str, np.ndarray]]:
-            n = len(indices)
-            for i, primary_idx in enumerate(indices):
-                # Create fallback indices (next 10 samples in shuffled order)
-                fallbacks = [indices[(i + j) % n] for j in range(1, 11)]
-                yield {
-                    "idx": np.array([primary_idx], dtype=np.int32),
-                    "fallbacks": np.array(fallbacks, dtype=np.int32),
-                }
+        # Each sample carries retry indices as views into precomputed arrays.
+        def _sample_metadata_iter() -> Iterator[Dict[str, RetryMetadataValue]]:
+            for primary_idx, fallbacks in zip(index_array, fallback_matrix):
+                yield {"idx": primary_idx, "fallbacks": fallbacks}
 
         # Build mlx-data pipeline lazily from a Python iterable
         stream = dx.stream_python_iterable(_sample_metadata_iter)  # type: ignore[attr-defined]
