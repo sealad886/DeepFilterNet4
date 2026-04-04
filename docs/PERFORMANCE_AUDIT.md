@@ -192,9 +192,11 @@ Existing Metal kernels now include:
 4. **PERF-P1-003**: Add dtype guards to validation loop casts (~5 min)
 5. **PERF-P1-002**: Make `CombinedLoss` return lazy arrays (~15 min)
 
-## 7. Implementation Status
+## 7. Historical Prior-Repo Implementation Status
 
-### Completed (Phase 1 — P0+P1)
+The subsections below summarize prior repo work that predates the newly approved staged program in Section 0. They inform the current plan, but they do not mean those later stages have already started under the approved execution sequence.
+
+### Historical completed work (Phase 1 — P0+P1)
 
 | ID | Optimization | Files Changed | Impact |
 |----|-------------|---------------|--------|
@@ -213,7 +215,7 @@ Existing Metal kernels now include:
 
 **Test coverage**: 10 dedicated tests in `tests/test_perf_optimizations.py` + 866 existing tests pass (6 pre-existing failures unrelated to perf changes).
 
-### Completed (Phase 2 — P2 Metal kernels)
+### Historical completed work (Phase 2 — P2 Metal kernels)
 
 | ID | Optimization | Files Changed | Impact |
 |----|-------------|---------------|--------|
@@ -221,13 +223,13 @@ Existing Metal kernels now include:
 
 **Post-filter kernel details**: New `post_filter_kernel()` in `kernels.py` fuses the full post-filter computation (magnitudes, mask ratio, sinusoidal transfer, gain application) into a single Metal kernel with 1 thread per element. Includes `@mx.custom_function` + full VJP for training compatibility. Automatically used when `metal_kernels_available()` returns True, with pure-MLX fallback otherwise. Benchmarked at **1.3–1.5x faster** than the pure-MLX fallback in isolation.
 
-### Reverted (Phase 2 — P2 Mamba scan pre-allocation)
+### Historical reverted experiment (Phase 2 — P2 Mamba scan pre-allocation)
 
 | ID | Optimization | Status | Reason |
 |----|-------------|--------|--------|
 | PERF-P2-001 | Mamba scan: replace `mx.concatenate` with pre-allocated buffers + slice assignment | **REVERTED** | Benchmarking revealed **20–25% throughput regression**. MLX's lazy evaluation model makes slice assignment (scatter ops) more expensive than concatenation (simple memcpy). Pre-allocating full-size buffers with identity elements adds wasted graph nodes that are immediately overwritten. The `mx.concatenate` approach generates a simpler, more compiler-friendly computation graph. |
 
-### Benchmark Results (main@2e73dc7 vs optimized)
+### Historical benchmark results (main@2e73dc7 vs optimized)
 
 All measurements on Apple M4 Max (36GB), Python 3.10.19, MLX 0.30.6.
 
@@ -248,7 +250,7 @@ All measurements on Apple M4 Max (36GB), Python 3.10.19, MLX 0.30.6.
 
 **Test coverage**: 18 dedicated tests in `tests/test_perf_optimizations.py` + full suite passes.
 
-### Completed (Phase 3 — GAN Pipeline Optimizations)
+### Historical completed work (Phase 3 — GAN Pipeline Optimizations)
 
 | ID | Optimization | Files Changed | Impact |
 |----|-------------|---------------|--------|
@@ -256,7 +258,7 @@ All measurements on Apple M4 Max (36GB), Python 3.10.19, MLX 0.30.6.
 | GAN-P5 | Score-only discriminator forward: added `return_features: bool = True` parameter to all 5 discriminator `__call__` methods (`PeriodDiscriminator`, `ScaleDiscriminator`, `MultiPeriodDiscriminator`, `MultiScaleDiscriminator`, `CombinedDiscriminator`) | `discriminator.py` | When `return_features=False`, skips building Python lists of intermediate feature maps. Produces cleaner computation graph for disc update AD path. |
 | GAN-P3 | Score-only mode in disc update path: `disc_loss_wrapper` passes `return_features=False` since discriminator update only needs scores, not feature maps | `train_dynamic.py` | Eliminates ~48 Python list `.append()` calls and associated list bookkeeping per disc update step. |
 
-### GAN Pipeline Analysis
+### Historical GAN pipeline analysis
 
 **Architecture**: CombinedDiscriminator = MPD (5 PeriodDiscriminators, periods 2/3/5/7/11) + MSD (3 ScaleDiscriminators). Total: 8 sub-discriminators with 5-7 conv layers each = ~48 conv+activation kernel launches per forward pass.
 
@@ -272,7 +274,7 @@ All measurements on Apple M4 Max (36GB), Python 3.10.19, MLX 0.30.6.
 
 **Why `specs_to_wavs` is called twice**: The waveforms computed inside `loss_fn` (generator AD graph) are consumed by `nn.value_and_grad` and not easily extractable. The disc update path needs `mx.stop_gradient(pred_wav)` which must be created outside the gen AD graph. Caching would require restructuring the loss function return signature and `nn.value_and_grad` call chain — moderate effort with moderate risk.
 
-### GAN Optimization Candidates (Future)
+### Historical GAN optimization candidates
 
 | Priority | Optimization | Impact | Risk | Effort | Notes |
 |----------|-------------|--------|------|--------|-------|
@@ -285,7 +287,7 @@ All measurements on Apple M4 Max (36GB), Python 3.10.19, MLX 0.30.6.
 
 **MLX-specific insight**: Weight normalization (used by all disc conv layers in PyTorch version) is currently a no-op in MLX — `weight_norm_conv1d/conv2d` create plain `nn.Conv1d/Conv2d`. This means discriminator training may be less stable than the PyTorch reference. Implementing weight norm requires per-step reparameterization of `weight = g * (v / ||v||)`, which adds compute but may improve training convergence.
 
-### Remaining (Future Phases)
+### Historical future-phase candidates (not started under the approved staged program)
 
 | Priority | Optimization | Complexity |
 |----------|-------------|-----------|
