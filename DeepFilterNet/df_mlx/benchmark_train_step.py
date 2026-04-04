@@ -12,6 +12,11 @@ It compares data backend + worker/prefetch choices while measuring:
 - end-to-end step latency
 - steps/s and samples/s
 
+For the staged `df_mlx` optimization program, this is the primary promotion
+benchmark and release-candidate authority. `benchmark_pipeline.py` and
+`benchmark_hotspots.py` remain secondary diagnostics and do not replace this
+harness for promotion or perf-gate decisions.
+
 Example:
     python -m df_mlx.benchmark_train_step \
         --cache-dir /path/to/audio_cache \
@@ -654,7 +659,12 @@ def print_summary(results: List[BenchmarkResult]) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Benchmark df_mlx training-step efficiency")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Benchmark df_mlx training-step efficiency "
+            "(primary promotion authority for the staged df_mlx optimization program)"
+        )
+    )
     parser.add_argument("--speech-list", type=str, default=None, help="Speech file list (required without --cache-dir)")
     parser.add_argument("--noise-list", type=str, default=None, help="Noise file list (required without --cache-dir)")
     parser.add_argument("--rir-list", type=str, default=None, help="Optional RIR file list")
@@ -709,6 +719,7 @@ def main() -> None:
         default=False,
         help=(
             "Run the canonical benchmark matrix defined in docs/BENCHMARK_CONTRACT.md. "
+            "This is the primary promotion benchmark enforced by docs/PERF_REGRESSION_GATE.md. "
             "Overrides --batch-size, --compiled, --warmup-steps, --steps, and --repeats."
         ),
     )

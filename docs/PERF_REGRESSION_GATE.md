@@ -7,12 +7,37 @@ latency regressions in df_mlx training. It compares benchmark results from a can
 branch against a known baseline using the thresholds defined in
 [BENCHMARK_CONTRACT.md](BENCHMARK_CONTRACT.md).
 
+## Program promotion authority
+
+This gate is the operational enforcement mechanism for the staged `df_mlx`
+optimization program. Every promotion checkpoint after baseline / gate lock —
+compiled `train_dynamic.py` fast path, `MLXDataStream` data path, residual hotspot
+re-profiling, optional flagged advanced acceleration, and release-candidate
+hardening — uses the same primary authority:
+`python -m df_mlx.benchmark_train_step --contract --metadata`.
+`benchmark_pipeline.py` and `benchmark_hotspots.py` may be run to diagnose a
+stage-specific regression or validate a hypothesis, but they never replace the
+train-step benchmark for merge or promotion decisions.
+
+### Inherited promotion rules
+
+All later phases inherit the same rules from
+[BENCHMARK_CONTRACT.md](BENCHMARK_CONTRACT.md):
+
+- **Throughput**: compare `samples_per_sec_p5` to the active baseline and fail if it
+  crosses the contract threshold.
+- **Tail latency**: enforce the `step_p95_ms` threshold and keep `step_p99_ms` in
+  every artifact for spike review and release-candidate sign-off.
+- **Variance**: reject runs with coefficient of variation above 0.20 as too noisy
+  for promotion.
+
 ## When to Run
 
 - Any change touching `train_dynamic.py`, `dynamic_dataset.py`, `run_config.py`, or model code
 - Before release tags
 - After dependency upgrades (MLX, mlx-data, mlx-whisper, etc.)
 - Any PR marked with the `perf` label
+- At each staged-program promotion checkpoint after the baseline / gate lock
 
 ## Gate Procedure
 
@@ -116,12 +141,18 @@ Result: FAIL (1 regression detected)
 | **Tail latency** | `new_p95 > baseline_p95 × 1.15` | Fail if >15% tail latency increase at p95 |
 | **Variance** | `CV > 0.20` | Fail if coefficient of variation exceeds 20% |
 
+`step_p99_ms` remains a required review metric for every stage promotion and for
+release-candidate sign-off, but the hard fail tail-latency threshold stays the p95
+rule above unless this gate document is explicitly revised.
+
 See [BENCHMARK_CONTRACT.md](BENCHMARK_CONTRACT.md) for full rationale.
 
 ## References
 
 - [BENCHMARK_CONTRACT.md](BENCHMARK_CONTRACT.md) — Canonical matrix, metadata schema, thresholds
-- [benchmark_train_step.py](../DeepFilterNet/df_mlx/benchmark_train_step.py) — Benchmark entrypoint
+- [benchmark_train_step.py](../DeepFilterNet/df_mlx/benchmark_train_step.py) — Primary promotion benchmark entrypoint
+- [benchmark_pipeline.py](../DeepFilterNet/df_mlx/benchmark_pipeline.py) — Secondary data-path diagnostic benchmark
+- [benchmark_hotspots.py](../DeepFilterNet/df_mlx/benchmark_hotspots.py) — Secondary hotspot diagnostic benchmark
 - [scripts/perf_gate.py](../scripts/perf_gate.py) — Gate automation script
 - [SYNC_BARRIER_POLICY.md](SYNC_BARRIER_POLICY.md) — Sync modes for profiling
 - [DATA_PIPELINE_TUNING.md](DATA_PIPELINE_TUNING.md) — Hardware profiles

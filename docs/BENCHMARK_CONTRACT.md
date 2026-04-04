@@ -3,6 +3,34 @@
 This document defines the canonical benchmark matrix, reproducibility metadata schema,
 baseline metrics, and pass/fail threshold policy for df_mlx training-step benchmarks.
 
+## Program authority
+
+This contract is the non-negotiable benchmark authority for the staged `df_mlx`
+optimization program inside `DeepFilterNet/df_mlx/`. Promotion decisions for the
+approved sequence — baseline / gate lock, compiled `train_dynamic.py` fast path,
+`MLXDataStream` data path, residual hotspot re-profiling, optional flagged advanced
+acceleration, and release-candidate hardening — are made from
+`DeepFilterNet/df_mlx/benchmark_train_step.py` running this contract.
+`DeepFilterNet/df_mlx/benchmark_pipeline.py` and
+`DeepFilterNet/df_mlx/benchmark_hotspots.py` remain secondary diagnostic surfaces:
+they can explain or localize a win/regression for a specific phase, but they do not
+replace the train-step benchmark for promotion.
+
+### Stage-inherited expectations
+
+Every later optimization phase inherits the same acceptance checks from this
+contract:
+
+- **Throughput**: compare `samples_per_sec_p5` against the active baseline using the
+  regression gate defined below.
+- **Tail latency**: enforce the `step_p95_ms` gate below and retain `step_p99_ms`
+  in every artifact for spike review and release-candidate sign-off.
+- **Variance**: require coefficient of variation (`samples_per_sec_std /
+  samples_per_sec_mean`) to stay at or below 0.20 before results can be used for
+  promotion.
+- **Secondary diagnostics**: supporting benchmarks may add stage-specific evidence,
+  but they cannot waive or replace these train-step promotion rules.
+
 ## Canonical Matrix
 
 Every official benchmark run sweeps the following dimensions:
@@ -145,7 +173,8 @@ python -m df_mlx.benchmark_train_step \
 
 The `--contract` flag overrides individual sweep arguments and runs the full canonical
 matrix defined above. The `--metadata` flag attaches reproducibility metadata to the
-JSON output.
+JSON output. This command is the primary promotion authority used by
+[PERF_REGRESSION_GATE.md](PERF_REGRESSION_GATE.md).
 
 ## Baseline Artifact Format
 
@@ -180,5 +209,7 @@ Baseline results are stored as JSON with the following top-level structure:
 ## References
 
 - [BENCHMARKS.md](BENCHMARKS.md) — Historical benchmark results and methodology
-- [benchmark_train_step.py](../DeepFilterNet/df_mlx/benchmark_train_step.py) — Benchmark entrypoint
+- [benchmark_train_step.py](../DeepFilterNet/df_mlx/benchmark_train_step.py) — Primary promotion benchmark entrypoint
+- [benchmark_pipeline.py](../DeepFilterNet/df_mlx/benchmark_pipeline.py) — Secondary data-path diagnostic benchmark
+- [benchmark_hotspots.py](../DeepFilterNet/df_mlx/benchmark_hotspots.py) — Secondary hotspot diagnostic benchmark
 - [benchmark_common.py](../DeepFilterNet/df_mlx/benchmark_common.py) — Shared helpers
