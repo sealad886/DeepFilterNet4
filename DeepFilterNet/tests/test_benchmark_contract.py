@@ -1,4 +1,4 @@
-"""Tests for benchmark contract: metadata collection, thresholds, and matrix generation."""
+"""Tests for benchmark contract: metadata collection, thresholds, and override matrix generation."""
 
 from __future__ import annotations
 
@@ -11,11 +11,11 @@ import numpy as np
 
 from df_mlx.benchmark_train_step import (
     BenchmarkCase,
-    CONTRACT_BACKBONES,
     CONTRACT_BATCH_SIZES,
     CONTRACT_COMPILED,
-    CONTRACT_FP16,
-    CONTRACT_GRAD_ACCUM,
+    CONTRACT_REPEATS,
+    CONTRACT_STEPS,
+    CONTRACT_WARMUP,
     THRESHOLD_CV_MAX,
     THRESHOLD_LATENCY_FACTOR,
     THRESHOLD_THROUGHPUT_FACTOR,
@@ -233,34 +233,24 @@ class TestCheckRegression:
 
 
 # ---------------------------------------------------------------------------
-# Contract matrix generation
+# Contract override matrix generation
 # ---------------------------------------------------------------------------
 
 
 class TestGenerateContractMatrix:
-    def test_matrix_length(self) -> None:
+    def test_matrix_length_matches_live_contract_axes(self) -> None:
         matrix = generate_contract_matrix()
-        expected = (
-            len(CONTRACT_BACKBONES)
-            * len(CONTRACT_BATCH_SIZES)
-            * len(CONTRACT_COMPILED)
-            * len(CONTRACT_GRAD_ACCUM)
-            * len(CONTRACT_FP16)
-        )
+        expected = len(CONTRACT_BATCH_SIZES) * len(CONTRACT_COMPILED)
         assert len(matrix) == expected
 
     def test_all_entries_are_dicts(self) -> None:
         for entry in generate_contract_matrix():
             assert isinstance(entry, dict)
 
-    def test_required_keys_present(self) -> None:
-        required = {"backbone", "batch_size", "compiled", "grad_accumulation", "fp16"}
+    def test_entries_only_include_live_contract_overrides(self) -> None:
+        required = {"batch_size", "compiled", "warmup_steps", "steps", "repeats"}
         for entry in generate_contract_matrix():
-            assert required.issubset(entry.keys()), f"Missing keys in {entry}"
-
-    def test_backbone_values(self) -> None:
-        backbones = {e["backbone"] for e in generate_contract_matrix()}
-        assert backbones == set(CONTRACT_BACKBONES)
+            assert set(entry.keys()) == required, f"Unexpected keys in {entry}"
 
     def test_batch_size_values(self) -> None:
         sizes = {e["batch_size"] for e in generate_contract_matrix()}
@@ -268,26 +258,30 @@ class TestGenerateContractMatrix:
 
     def test_compiled_values(self) -> None:
         compiled = {e["compiled"] for e in generate_contract_matrix()}
-        assert compiled == {True, False}
+        assert compiled == set(CONTRACT_COMPILED)
 
-    def test_grad_accum_values(self) -> None:
-        accums = {e["grad_accumulation"] for e in generate_contract_matrix()}
-        assert accums == set(CONTRACT_GRAD_ACCUM)
+    def test_warmup_steps_are_pinned(self) -> None:
+        warmup_steps = {e["warmup_steps"] for e in generate_contract_matrix()}
+        assert warmup_steps == {CONTRACT_WARMUP}
 
-    def test_fp16_values(self) -> None:
-        fp16_vals = {e["fp16"] for e in generate_contract_matrix()}
-        assert fp16_vals == {True, False}
+    def test_measured_steps_are_pinned(self) -> None:
+        measured_steps = {e["steps"] for e in generate_contract_matrix()}
+        assert measured_steps == {CONTRACT_STEPS}
+
+    def test_repeats_are_pinned(self) -> None:
+        repeats = {e["repeats"] for e in generate_contract_matrix()}
+        assert repeats == {CONTRACT_REPEATS}
 
     def test_no_duplicates(self) -> None:
         matrix = generate_contract_matrix()
-        seen: set[tuple[str, int, bool, int, bool]] = set()
+        seen: set[tuple[int, bool, int, int, int]] = set()
         for entry in matrix:
             key = (
-                entry["backbone"],
                 entry["batch_size"],
                 entry["compiled"],
-                entry["grad_accumulation"],
-                entry["fp16"],
+                entry["warmup_steps"],
+                entry["steps"],
+                entry["repeats"],
             )
             assert key not in seen, f"Duplicate config: {entry}"
             seen.add(key)

@@ -185,33 +185,24 @@ def check_regression(
 # Contract matrix generation
 # ---------------------------------------------------------------------------
 
-CONTRACT_BACKBONES = ["dfnet4", "mamba"]
 CONTRACT_BATCH_SIZES = [1, 4, 8]
 CONTRACT_COMPILED = [True, False]
-CONTRACT_GRAD_ACCUM = [1, 2]
-CONTRACT_FP16 = [True, False]
 CONTRACT_WARMUP = 5
 CONTRACT_STEPS = 50
 CONTRACT_REPEATS = 3
 
 
 def generate_contract_matrix() -> List[Dict[str, Any]]:
-    """Return the canonical benchmark matrix as a list of config dicts."""
+    """Return the live ``--contract`` override sweep as a list of config dicts."""
     configs: List[Dict[str, Any]] = []
-    for backbone, bs, compiled, grad_accum, fp16 in itertools.product(
-        CONTRACT_BACKBONES,
-        CONTRACT_BATCH_SIZES,
-        CONTRACT_COMPILED,
-        CONTRACT_GRAD_ACCUM,
-        CONTRACT_FP16,
-    ):
+    for bs, compiled in itertools.product(CONTRACT_BATCH_SIZES, CONTRACT_COMPILED):
         configs.append(
             {
-                "backbone": backbone,
                 "batch_size": bs,
                 "compiled": compiled,
-                "grad_accumulation": grad_accum,
-                "fp16": fp16,
+                "warmup_steps": CONTRACT_WARMUP,
+                "steps": CONTRACT_STEPS,
+                "repeats": CONTRACT_REPEATS,
             }
         )
     return configs

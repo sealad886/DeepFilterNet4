@@ -47,6 +47,11 @@ def _make_record(
     }
 
 
+def _make_flat_record(**overrides: Any) -> Dict[str, Any]:
+    nested = _make_record(**overrides)
+    return {**nested["config"], **nested["metrics"]}
+
+
 def _make_metadata(commit: str = "abc1234") -> Dict[str, Any]:
     return {
         "commit": commit,
@@ -194,6 +199,14 @@ class TestCompare:
         assert "PASS" in statuses
         assert "FAIL" in statuses
 
+    def test_flat_records_use_top_level_config_and_metrics(self) -> None:
+        bl = [_make_flat_record(samples_per_sec_p5=120.0, step_p95_ms=33.0)]
+        cd = [_make_flat_record(samples_per_sec_p5=115.0, step_p95_ms=35.0)]
+        passed, rows = compare(bl, cd)
+        assert passed is True
+        assert rows[0]["config_key"] == "dfnet4/bs4/compiled/ga1/fp32"
+        assert rows[0]["status"] == "PASS"
+
 
 # ---------------------------------------------------------------------------
 # report generation tests
@@ -245,6 +258,16 @@ class TestCLI:
         cd = [_make_record()]
         bl_path = tmp_path / "bl.jsonl"
         cd_path = tmp_path / "cd.jsonl"
+        _write_jsonl(bl_path, bl)
+        _write_jsonl(cd_path, cd)
+        rc = main(["--baseline", str(bl_path), "--candidate", str(cd_path)])
+        assert rc == 0
+
+    def test_exit_0_on_pass_with_flat_jsonl_records(self, tmp_path: Path) -> None:
+        bl = [_make_flat_record()]
+        cd = [_make_flat_record()]
+        bl_path = tmp_path / "bl-flat.jsonl"
+        cd_path = tmp_path / "cd-flat.jsonl"
         _write_jsonl(bl_path, bl)
         _write_jsonl(cd_path, cd)
         rc = main(["--baseline", str(bl_path), "--candidate", str(cd_path)])
