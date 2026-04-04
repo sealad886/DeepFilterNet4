@@ -372,7 +372,7 @@ def main():
     parser.add_argument(
         "--dynamic-loss",
         type=str,
-        choices=["baseline", "awesome", "pipeline_awesome", "contrastive_awesome"],
+        choices=["baseline", "awesome", "pipeline_awesome", "contrastive_awesome", "contrastive_silence"],
         default="baseline",
         help=(
             "Dynamic loss: 'baseline' (spectral + legacy VAD), "
@@ -473,6 +473,48 @@ def main():
         "--no-contrastive-in-batch-negatives",
         action="store_true",
         help="Disable in-batch clean-frame negatives for contrastive_awesome",
+    )
+    parser.add_argument(
+        "--contrastive-silence-frames-per-sample",
+        type=int,
+        default=None,
+        help="Silence frames per sample for contrastive_silence",
+    )
+    parser.add_argument(
+        "--contrastive-silence-mask-max", type=float, default=None, help="Max mean mask for silence-frame mining"
+    )
+    parser.add_argument(
+        "--contrastive-silence-weight", type=float, default=None, help="Weight for silence suppression objective"
+    )
+    parser.add_argument(
+        "--contrastive-silence-asymmetric-penalty",
+        type=float,
+        default=None,
+        help="Penalty multiplier for residual above clean",
+    )
+    parser.add_argument(
+        "--contrastive-silence-transition-blend-low",
+        type=float,
+        default=None,
+        help="Lower mask threshold for transition blending",
+    )
+    parser.add_argument(
+        "--contrastive-silence-transition-blend-high",
+        type=float,
+        default=None,
+        help="Upper mask threshold for transition blending",
+    )
+    parser.add_argument(
+        "--contrastive-silence-low-freq-boost",
+        type=float,
+        default=None,
+        help="Freq-weight boost for low bands (<300 Hz)",
+    )
+    parser.add_argument(
+        "--contrastive-silence-high-freq-boost",
+        type=float,
+        default=None,
+        help="Freq-weight boost for high bands (>7 kHz)",
     )
     parser.add_argument(
         "--mrstft-factor",
@@ -845,6 +887,14 @@ def main():
         contrastive_interference_mask_max=default_cfg.loss.contrastive.interference_mask_max,
         contrastive_quiet_weight=default_cfg.loss.contrastive.quiet_weight,
         no_contrastive_in_batch_negatives=not default_cfg.loss.contrastive.in_batch_negatives,
+        contrastive_silence_frames_per_sample=default_cfg.loss.contrastive_silence.silence_frames_per_sample,
+        contrastive_silence_mask_max=default_cfg.loss.contrastive_silence.silence_mask_max,
+        contrastive_silence_weight=default_cfg.loss.contrastive_silence.silence_weight,
+        contrastive_silence_asymmetric_penalty=default_cfg.loss.contrastive_silence.asymmetric_penalty,
+        contrastive_silence_transition_blend_low=default_cfg.loss.contrastive_silence.transition_blend_low,
+        contrastive_silence_transition_blend_high=default_cfg.loss.contrastive_silence.transition_blend_high,
+        contrastive_silence_low_freq_boost=default_cfg.loss.contrastive_silence.low_freq_boost,
+        contrastive_silence_high_freq_boost=default_cfg.loss.contrastive_silence.high_freq_boost,
         mrstft_factor=default_cfg.loss.mrstft.factor,
         mrstft_gamma=default_cfg.loss.mrstft.gamma,
         mrstft_f_complex=default_cfg.loss.mrstft.f_complex,
@@ -1023,7 +1073,7 @@ def main():
         noise_gain_range=run_cfg.dataset.noise_gain_range,
         background_music_gain_range=run_cfg.dataset.background_music_gain_range,
         dynamic_loss=cast(
-            Literal["baseline", "awesome", "pipeline_awesome", "contrastive_awesome"],
+            Literal["baseline", "awesome", "pipeline_awesome", "contrastive_awesome", "contrastive_silence"],
             run_cfg.loss.dynamic_loss,
         ),
         pipeline_stages=run_cfg.loss.pipeline_stages,
@@ -1041,6 +1091,14 @@ def main():
         contrastive_interference_mask_max=run_cfg.loss.contrastive.interference_mask_max,
         contrastive_quiet_weight=run_cfg.loss.contrastive.quiet_weight,
         contrastive_in_batch_negatives=run_cfg.loss.contrastive.in_batch_negatives,
+        contrastive_silence_frames_per_sample=run_cfg.loss.contrastive_silence.silence_frames_per_sample,
+        contrastive_silence_mask_max=run_cfg.loss.contrastive_silence.silence_mask_max,
+        contrastive_silence_weight=run_cfg.loss.contrastive_silence.silence_weight,
+        contrastive_silence_asymmetric_penalty=run_cfg.loss.contrastive_silence.asymmetric_penalty,
+        contrastive_silence_transition_blend_low=run_cfg.loss.contrastive_silence.transition_blend_low,
+        contrastive_silence_transition_blend_high=run_cfg.loss.contrastive_silence.transition_blend_high,
+        contrastive_silence_low_freq_boost=run_cfg.loss.contrastive_silence.low_freq_boost,
+        contrastive_silence_high_freq_boost=run_cfg.loss.contrastive_silence.high_freq_boost,
         gan_enabled=run_cfg.gan.enabled,
         gan_start_epoch=run_cfg.gan.start_epoch,
         gan_ramp_epochs=run_cfg.gan.ramp_epochs,

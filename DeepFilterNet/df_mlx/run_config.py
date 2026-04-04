@@ -663,6 +663,61 @@ class ContrastiveLossConfig:
 
 
 @dataclass
+class ContrastiveSilenceConfig:
+    silence_frames_per_sample: int = cfg_field(
+        32,
+        help="Silence-heavy frames sampled per utterance for direct suppression",
+        normalize=lambda v: _normalize_int(v, min_value=1),
+        min=1,
+    )
+    silence_mask_max: float = cfg_field(
+        0.3,
+        help="Maximum mean speech mask value for silence-frame selection",
+        normalize=_normalize_probability,
+        min=0.0,
+        max=1.0,
+    )
+    silence_weight: float = cfg_field(
+        0.8,
+        help="Relative weight of silence suppression vs speech contrastive",
+        normalize=lambda v: _normalize_float(v, min_value=0.0),
+        min=0.0,
+    )
+    asymmetric_penalty: float = cfg_field(
+        2.5,
+        help="Extra penalty for residual energy above clean reference",
+        normalize=lambda v: _normalize_float(v, min_value=1.0),
+        min=1.0,
+    )
+    transition_blend_low: float = cfg_field(
+        0.3,
+        help="Lower VAD mask threshold for transition blending",
+        normalize=_normalize_probability,
+        min=0.0,
+        max=1.0,
+    )
+    transition_blend_high: float = cfg_field(
+        0.7,
+        help="Upper VAD mask threshold for transition blending",
+        normalize=_normalize_probability,
+        min=0.0,
+        max=1.0,
+    )
+    low_freq_boost: float = cfg_field(
+        1.5,
+        help="Extra silence weight for frequencies below 300 Hz",
+        normalize=lambda v: _normalize_float(v, min_value=0.0),
+        min=0.0,
+    )
+    high_freq_boost: float = cfg_field(
+        1.3,
+        help="Extra silence weight for frequencies above 7 kHz",
+        normalize=lambda v: _normalize_float(v, min_value=0.0),
+        min=0.0,
+    )
+
+
+@dataclass
 class MultiResSpecLossConfig:
     factor: float = cfg_field(
         0.0,
@@ -698,12 +753,13 @@ class MultiResSpecLossConfig:
 class LossConfig:
     dynamic_loss: str = cfg_field(
         "baseline",
-        help="Dynamic loss: baseline | awesome | pipeline_awesome | contrastive_awesome",
-        choices=["baseline", "awesome", "pipeline_awesome", "contrastive_awesome"],
+        help="Dynamic loss: baseline | awesome | pipeline_awesome | contrastive_awesome | contrastive_silence",
+        choices=["baseline", "awesome", "pipeline_awesome", "contrastive_awesome", "contrastive_silence"],
         normalize=lambda v: str(v),
         notes=(
             "If not 'awesome' or 'pipeline_awesome', the [loss.awesome] block is ignored. "
-            "If not 'contrastive_awesome', the [loss.contrastive] block is ignored."
+            "If not 'contrastive_awesome' or 'contrastive_silence', the [loss.contrastive] block is ignored. "
+            "If not 'contrastive_silence', the [loss.contrastive_silence] block is ignored."
         ),
     )
     pipeline_stages: list[dict[str, Any]] = field(
@@ -725,6 +781,7 @@ class LossConfig:
     )
     awesome: AwesomeLossConfig = field(default_factory=AwesomeLossConfig)
     contrastive: ContrastiveLossConfig = field(default_factory=ContrastiveLossConfig)
+    contrastive_silence: ContrastiveSilenceConfig = field(default_factory=ContrastiveSilenceConfig)
     mrstft: MultiResSpecLossConfig = field(default_factory=MultiResSpecLossConfig)
 
 
@@ -1259,9 +1316,13 @@ def validate_run_config(cfg: RunConfig) -> None:
         # Awesome settings are ignored unless dynamic_loss selects an awesome variant.
         pass
 
-    if cfg.loss.dynamic_loss != "contrastive_awesome":
-        # Contrastive settings are ignored unless dynamic_loss=contrastive_awesome.
+    if cfg.loss.dynamic_loss not in {"contrastive_awesome", "contrastive_silence"}:
+        # Contrastive settings are ignored unless dynamic_loss uses a contrastive variant.
         pass
+
+    if cfg.loss.dynamic_loss == "contrastive_silence":
+        if cfg.loss.contrastive_silence.transition_blend_low >= cfg.loss.contrastive_silence.transition_blend_high:
+            raise ValueError("loss.contrastive_silence.transition_blend_low must be < transition_blend_high")
 
     if cfg.loss.contrastive.interference_mask_max > cfg.loss.contrastive.speech_mask_min:
         raise ValueError("loss.contrastive.interference_mask_max must be <= loss.contrastive.speech_mask_min")

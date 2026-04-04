@@ -67,6 +67,7 @@ __all__ = [
     "_build_speech_band_mask",
     "_compute_awesome_losses",
     "_compute_contrastive_awesome_losses",
+    "_compute_contrastive_silence_losses",
     "_compute_harmonic_ratio",
     "_compute_improved_musicness",
     "_compute_musicness",
@@ -987,6 +988,256 @@ def _compute_contrastive_awesome_losses(
         snr_boost,
         speech_valid_count,
         interference_valid_count,
+    )
+
+
+# =============================================================================
+# Contrastive-silence loss (hybrid speech contrastive + direct silence suppression)
+# =============================================================================
+
+
+def _build_silence_freq_weight(
+    n_freqs: int,
+    sr: int,
+    fft_size: int,
+    low_freq_boost: float,
+    high_freq_boost: float,
+) -> mx.array:
+    """Build a per-frequency weight vector for silence suppression.
+
+    Frequencies below 300 Hz are boosted by *low_freq_boost* to penalise
+    mic hum / room tone.  Frequencies above 7 kHz are boosted by
+    *high_freq_boost* to penalise hiss.  Mid-band uses weight 1.0.
+    """
+    bin_hz = sr / fft_size
+    low_bin = int(300.0 / bin_hz)
+    high_bin = int(7000.0 / bin_hz)
+    w = np.ones(n_freqs, dtype=np.float32)
+    w[:low_bin] = low_freq_boost
+    w[high_bin:] = high_freq_boost
+    return mx.array(w)
+
+
+def _compute_contrastive_silence_losses(
+    clean_real: mx.array,
+    clean_imag: mx.array,
+    noisy_real: mx.array,
+    noisy_imag: mx.array,
+    interference_real: mx.array,
+    interference_imag: mx.array,
+    out_real: mx.array,
+    out_imag: mx.array,
+    snr: mx.array,
+    band_mask: mx.array,
+    band_bins: float,
+    mask_sharpness: float,
+    vad_z_threshold: float,
+    vad_z_slope: float,
+    vad_snr_gate_db: float,
+    vad_snr_gate_width: float,
+    proxy_enabled: bool,
+    projector: Any,
+    *,
+    temperature: float = 0.1,
+    speech_frames_per_sample: int = 32,
+    speech_mask_min: float = 0.7,
+    in_batch_negatives: bool = True,
+    silence_frames_per_sample: int = 32,
+    silence_mask_max: float = 0.3,
+    silence_weight: float = 0.8,
+    asymmetric_penalty: float = 2.5,
+    transition_blend_low: float = 0.3,
+    transition_blend_high: float = 0.7,
+    low_freq_boost: float = 1.5,
+    high_freq_boost: float = 1.3,
+    sr: int = 48000,
+    fft_size: int = 960,
+    eps: float = _EPS,
+    debug: NumericDebugger | None = None,
+    debug_ctx: dict[str, Any] | None = None,
+) -> tuple[
+    mx.array,  # total_loss
+    mx.array,  # speech_contrastive_loss
+    mx.array,  # silence_suppression_loss
+    mx.array,  # contrastive_pos_sim
+    mx.array,  # contrastive_neg_sim
+    mx.array,  # mask  (B, T, F)
+    mx.array,  # proxy_frame
+    mx.array,  # speech_ratio
+    mx.array,  # music_gate
+    mx.array,  # musicness
+    mx.array,  # mod_energy
+    mx.array,  # energy_boost
+    mx.array,  # snr_boost
+    mx.array,  # speech_valid_count
+    mx.array,  # silence_valid_count
+]:
+    """Hybrid contrastive-silence loss: InfoNCE on speech + direct L1 on silence.
+
+    Speech frames (mask_mean >= speech_mask_min) are trained with the same
+    InfoNCE contrastive objective as *contrastive_awesome*.  Silence frames
+    (mask_mean <= silence_mask_max) are pushed toward the clean reference
+    with a direct L1(log1p_mag) loss plus an asymmetric penalty for any
+    residual energy that exceeds the clean signal.  Transition frames are
+    blended between the two objectives with a soft VAD interpolation.
+    """
+    if projector is None:
+        raise ValueError("contrastive_silence requires an attached ContrastiveFrameProjector")
+
+    clean_real_f32 = clean_real.astype(mx.float32) if clean_real.dtype != mx.float32 else clean_real
+    clean_imag_f32 = clean_imag.astype(mx.float32) if clean_imag.dtype != mx.float32 else clean_imag
+    noisy_real_f32 = noisy_real.astype(mx.float32) if noisy_real.dtype != mx.float32 else noisy_real
+    noisy_imag_f32 = noisy_imag.astype(mx.float32) if noisy_imag.dtype != mx.float32 else noisy_imag
+    interference_real_f32 = (
+        interference_real.astype(mx.float32) if interference_real.dtype != mx.float32 else interference_real
+    )
+    interference_imag_f32 = (
+        interference_imag.astype(mx.float32) if interference_imag.dtype != mx.float32 else interference_imag
+    )
+    out_real_f32 = out_real.astype(mx.float32) if out_real.dtype != mx.float32 else out_real
+    out_imag_f32 = out_imag.astype(mx.float32) if out_imag.dtype != mx.float32 else out_imag
+
+    clean_log = _log1p_mag(clean_real_f32, clean_imag_f32, eps=_MAG_EPS, _assume_float32=True)
+    noise_log = _log1p_mag(interference_real_f32, interference_imag_f32, eps=_MAG_EPS, _assume_float32=True)
+    out_log = _log1p_mag(out_real_f32, out_imag_f32, eps=_MAG_EPS, _assume_float32=True)
+    mask_logits = mx.clip(
+        mask_sharpness * (clean_log - noise_log),
+        -_AWESOME_MASK_LOGIT_CLAMP,
+        _AWESOME_MASK_LOGIT_CLAMP,
+    )
+    mask = mx.stop_gradient(mx.sigmoid(mask_logits))
+
+    (
+        proxy_frame,
+        speech_ratio,
+        music_gate,
+        musicness,
+        mod_energy,
+        energy_boost,
+        snr_boost,
+    ) = _compute_proxy_gates(
+        clean_real_f32,
+        clean_imag_f32,
+        noisy_real_f32,
+        noisy_imag_f32,
+        snr,
+        band_mask,
+        band_bins,
+        vad_z_threshold,
+        vad_z_slope,
+        vad_snr_gate_db,
+        vad_snr_gate_width,
+        proxy_enabled,
+        eps=eps,
+        debug=debug,
+        debug_ctx=debug_ctx,
+        noise_real=interference_real_f32,
+        noise_imag=interference_imag_f32,
+        _assume_float32=True,
+    )
+
+    mask_mean = mx.mean(mask, axis=-1)
+
+    # ---- Speech branch: InfoNCE contrastive (same as contrastive_awesome) ----
+    speech_valid = mx.stop_gradient((mask_mean >= float(speech_mask_min)).astype(mx.float32))
+    speech_scores = mx.stop_gradient(mask_mean * proxy_frame) * speech_valid
+
+    speech_idx, speech_weights, speech_valid_rows = _select_topk_frames(
+        speech_scores,
+        speech_valid,
+        speech_frames_per_sample,
+    )
+
+    out_frames = _build_contrastive_frame_features(out_real_f32, out_imag_f32, eps=eps)
+    clean_frames = _build_contrastive_frame_features(clean_real_f32, clean_imag_f32, eps=eps)
+    noisy_frames = _build_contrastive_frame_features(noisy_real_f32, noisy_imag_f32, eps=eps)
+    interference_frames = _build_contrastive_frame_features(interference_real_f32, interference_imag_f32, eps=eps)
+
+    speech_q = projector(_gather_time_frames(out_frames, speech_idx))
+    speech_p = projector(_gather_time_frames(clean_frames, speech_idx))
+    speech_n_mix = projector(_gather_time_frames(noisy_frames, speech_idx))
+    speech_n_int = projector(_gather_time_frames(interference_frames, speech_idx))
+
+    speech_ctr_loss, speech_pos_sim, speech_neg_sim = _contrastive_info_nce(
+        speech_q,
+        speech_p,
+        speech_n_mix,
+        speech_n_int,
+        speech_weights,
+        speech_valid_rows,
+        temperature,
+        in_batch_negatives=in_batch_negatives,
+    )
+
+    # ---- Silence branch: direct L1 suppression with asymmetric penalty ----
+    silence_valid = mx.stop_gradient((mask_mean <= float(silence_mask_max)).astype(mx.float32))
+    silence_scores = mx.stop_gradient(1.0 - mask_mean) * silence_valid
+
+    silence_idx, silence_weights, silence_valid_rows = _select_topk_frames(
+        silence_scores,
+        silence_valid,
+        silence_frames_per_sample,
+    )
+
+    n_freqs = clean_log.shape[-1]
+    freq_w = _build_silence_freq_weight(n_freqs, sr, fft_size, low_freq_boost, high_freq_boost)
+
+    out_silence = mx.take_along_axis(out_log, mx.expand_dims(silence_idx, -1).astype(mx.int32), axis=1)
+    clean_silence = mx.take_along_axis(clean_log, mx.expand_dims(silence_idx, -1).astype(mx.int32), axis=1)
+
+    diff = out_silence - clean_silence
+    abs_diff = mx.abs(diff)
+    residual_above = mx.where(diff > 0.0, abs_diff * float(asymmetric_penalty), abs_diff)
+    weighted_l1 = residual_above * freq_w
+    per_frame_l1 = mx.mean(weighted_l1, axis=-1)
+
+    silence_loss = _reduce_weighted_rows(
+        per_frame_l1.reshape(-1),
+        (silence_weights * silence_valid_rows).reshape(-1),
+        eps=eps,
+    )
+
+    # ---- Transition blending: soft interpolation in the ambiguous zone ----
+    blend_low = float(transition_blend_low)
+    blend_high = float(transition_blend_high)
+    blend_range = max(blend_high - blend_low, 1e-6)
+    speech_lambda = mx.clip((mask_mean - blend_low) / blend_range, 0.0, 1.0)
+    batch_speech_frac = mx.stop_gradient(mx.mean(speech_lambda))
+    batch_silence_frac = mx.stop_gradient(1.0 - batch_speech_frac)
+
+    total_loss = (
+        batch_speech_frac * speech_ctr_loss + max(float(silence_weight), 0.0) * batch_silence_frac * silence_loss
+    )
+
+    speech_valid_count = mx.sum(speech_valid_rows)
+    silence_valid_count = mx.sum(silence_valid_rows)
+
+    contrastive_pos_sim = speech_pos_sim
+    contrastive_neg_sim = speech_neg_sim
+
+    if debug is not None:
+        debug.check("contrastive_silence.mask", mask, debug_ctx)
+        debug.check("contrastive_silence.proxy_frame", proxy_frame, debug_ctx)
+        debug.check("contrastive_silence.speech_loss", speech_ctr_loss, debug_ctx)
+        debug.check("contrastive_silence.silence_loss", silence_loss, debug_ctx)
+        debug.check("contrastive_silence.total_loss", total_loss, debug_ctx)
+
+    return (
+        total_loss,
+        speech_ctr_loss,
+        silence_loss,
+        contrastive_pos_sim,
+        contrastive_neg_sim,
+        mask,
+        proxy_frame,
+        speech_ratio,
+        music_gate,
+        musicness,
+        mod_energy,
+        energy_boost,
+        snr_boost,
+        speech_valid_count,
+        silence_valid_count,
     )
 
 

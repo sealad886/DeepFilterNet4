@@ -301,6 +301,46 @@ def _apply_cli_overrides(cfg: RunConfig, args: argparse.Namespace, argv: list[st
             "loss.contrastive.quiet_weight",
             getattr(args, "contrastive_quiet_weight", None),
         ),
+        (
+            ["--contrastive-silence-frames-per-sample"],
+            "loss.contrastive_silence.silence_frames_per_sample",
+            getattr(args, "contrastive_silence_frames_per_sample", None),
+        ),
+        (
+            ["--contrastive-silence-mask-max"],
+            "loss.contrastive_silence.silence_mask_max",
+            getattr(args, "contrastive_silence_mask_max", None),
+        ),
+        (
+            ["--contrastive-silence-weight"],
+            "loss.contrastive_silence.silence_weight",
+            getattr(args, "contrastive_silence_weight", None),
+        ),
+        (
+            ["--contrastive-silence-asymmetric-penalty"],
+            "loss.contrastive_silence.asymmetric_penalty",
+            getattr(args, "contrastive_silence_asymmetric_penalty", None),
+        ),
+        (
+            ["--contrastive-silence-transition-blend-low"],
+            "loss.contrastive_silence.transition_blend_low",
+            getattr(args, "contrastive_silence_transition_blend_low", None),
+        ),
+        (
+            ["--contrastive-silence-transition-blend-high"],
+            "loss.contrastive_silence.transition_blend_high",
+            getattr(args, "contrastive_silence_transition_blend_high", None),
+        ),
+        (
+            ["--contrastive-silence-low-freq-boost"],
+            "loss.contrastive_silence.low_freq_boost",
+            getattr(args, "contrastive_silence_low_freq_boost", None),
+        ),
+        (
+            ["--contrastive-silence-high-freq-boost"],
+            "loss.contrastive_silence.high_freq_boost",
+            getattr(args, "contrastive_silence_high_freq_boost", None),
+        ),
         (["--mrstft-factor"], "loss.mrstft.factor", getattr(args, "mrstft_factor", None)),
         (["--mrstft-gamma"], "loss.mrstft.gamma", getattr(args, "mrstft_gamma", None)),
         (["--mrstft-f-complex"], "loss.mrstft.f_complex", getattr(args, "mrstft_f_complex", None)),
