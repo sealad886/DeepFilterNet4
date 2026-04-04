@@ -1,8 +1,32 @@
 # Performance Audit Report: DeepFilterNet/df_mlx/
 
-**Date**: 2026-02-15
+**Date**: 2026-02-15 (reconciled to current repository state on 2026-04-04)
 **Scope**: `DeepFilterNet/df_mlx/` — MLX-based audio noise suppression on Apple Silicon
 **Focus**: Tensor manipulation/casting reduction, CPython→Metal/MLX migration
+
+---
+
+## 0. Current-State Reconciliation (2026-04-04)
+
+This audit remains the record of earlier profiling work, but the active optimization program now starts from the following repository realities:
+
+| Surface | File | Current role in the program |
+|---|---|---|
+| Canonical train-step benchmark | `DeepFilterNet/df_mlx/benchmark_train_step.py` | Primary authority for stage promotion and perf-gate decisions |
+| Data-path benchmark | `DeepFilterNet/df_mlx/benchmark_pipeline.py` | Existing harness used primarily to validate the `MLXDataStream` path against the canonical train-step benchmark |
+| Hotspot microbench | `DeepFilterNet/df_mlx/benchmark_hotspots.py` | Existing residual hotspot harness; no new harness needs to be added before optimization work |
+| Streaming compile surface | `DeepFilterNet/df_mlx/model.py:StreamingDfNet4.process_frame()` | Already compiled; any streaming follow-up should target `process_audio()` orchestration or output accumulation instead |
+
+### Approved execution sequence
+
+1. Baseline / gate lock
+2. Compiled `train_dynamic.py` fast path
+3. `MLXDataStream` data path
+4. Residual hotspot re-profiling
+5. Optional flagged advanced acceleration
+6. Release-candidate hardening
+
+`PrefetchDataLoader` remains a comparison backend in existing benchmarks, but it is out of scope as an optimization target for this program.
 
 ---
 
@@ -16,10 +40,10 @@
 6. **Attention causal mask `.astype(out.dtype)` computed per call** — should be pre-built at init
 7. **`CombinedLoss` uses 5 `float()` sync barriers mid-computation** — should return lazy `mx.array` dict
 8. **Validation loop casts FP32→FP32** (4 no-op casts) — validation data is never FP16
-9. **Existing Metal kernels (3) cover highest-cost operations** — DfOp, iSTFT, mel-power-log
+9. **Existing Metal kernels (4) include the major fused runtime paths** — DfOp, iSTFT, mel-power-log, and post-filter
 10. **Training step IS compiled via `mx.compile`** — Python loops in model are traced and unrolled at compile time, so they don't add per-step CPython overhead
 11. **Mamba parallel scan creates ~14 temporary tensors per forward** via concatenation in a `for d in range(log2_L)` loop — these could be reduced with pre-allocated buffers
-12. **Streaming inference (`StreamingDfNet4.process_frame`) is NOT compiled** — massive per-frame Python dispatch overhead
+12. **Streaming inference still has Python orchestration in `StreamingDfNet4.process_audio()`** — `process_frame()` is already compiled, but the outer frame loop and output accumulation remain eager
 
 ## 2. Repo Performance Map
 
@@ -33,7 +57,7 @@
 2. Inference: audio load→STFT→model forward→mask+DfOp→iSTFT→audio save
 
 ### Concurrency Model
-- Data loading: `PrefetchDataLoader` with worker threads (NumPy/SciPy)
+- Data loading: `MLXDataStream` on the optimized MLX path; `PrefetchDataLoader` remains available as a comparison backend
 - Compute: Single-threaded MLX with lazy evaluation, compiled graph execution
 - GPU: Apple Metal via MLX framework
 
@@ -45,7 +69,9 @@
 ## 3. Measurement & Benchmark Plan
 
 ### Tools
-- `DeepFilterNet/df_mlx/benchmark_train_step.py` — existing harness for training throughput
+- `DeepFilterNet/df_mlx/benchmark_train_step.py` — canonical harness for training throughput and tail latency
+- `DeepFilterNet/df_mlx/benchmark_pipeline.py` — existing data-path benchmark, used primarily for `MLXDataStream` validation
+- `DeepFilterNet/df_mlx/benchmark_hotspots.py` — existing residual hotspot microbench for STFT, iSTFT, MelSpectrogram, DfOp, and SpectralLoss
 - `time.perf_counter` instrumentation at key points
 - MLX's lazy evaluation means profiling requires strategic `mx.eval()` placement
 
@@ -55,7 +81,7 @@ cd DeepFilterNet
 source ../.venv/bin/activate
 python -m df_mlx.benchmark_train_step \
     --cache-dir /path/to/cache \
-    --backends prefetch \
+    --backends mlx_stream \
     --batch-size 4 \
     --steps 50 \
     --warmup-steps 10
@@ -133,26 +159,29 @@ python -m df_mlx.benchmark_train_step \
 - **Proposed Optimization**: Pre-allocate output buffer and use scatter/slice assignment
 - **Risks**: Complex refactor; compiled training traces this away; mainly affects inference
 
-### PERF-P2-002: Streaming inference not compiled
+### PERF-P2-002: Streaming outer loop remains Python-orchestrated
 - **Severity**: P2
-- **Component**: `model.py:StreamingDfNet4.process_frame`
-- **Evidence**: ~70+ MLX op dispatches per frame without compilation
-- **Proposed Optimization**: Wrap in `mx.compile` with state handling
-- **Risks**: Complex — requires careful state management with `mx.compile`
+- **Component**: `model.py:StreamingDfNet4.process_audio`
+- **Evidence**:
+  - `StreamingDfNet4.process_frame()` already routes through an `@mx.compile` inner function in `_create_compiled_fn()`
+  - `process_audio()` still slices/pads frames in Python, appends outputs to a Python list, and concatenates them at the end
+  - Any remaining streaming overhead comes from outer-loop orchestration and output accumulation, not from a missing compile wrapper on `process_frame()`
+- **Proposed Optimization**: Only after staged re-profiling, evaluate compile-friendly batching or reduced Python orchestration around `process_audio()` / output accumulation
+- **Risks**: Must preserve state threading, chunk-boundary behavior, and parity with batch inference
 
 ## 5. Hardware Acceleration Opportunities
 
-Existing Metal kernels already cover the 3 highest-cost per-frame operations:
+Existing Metal kernels now include:
 1. `df_op_kernel` — fused gather + complex MAC for DfOp
 2. `istft_overlap_add_kernel` — fused overlap-add + window normalization
 3. `mel_power_log_kernel` — fused power-spectrum → mel → log
+4. `post_filter_kernel` — fused post-filter path
 
 ### Additional candidates (ranked)
 
 | Priority | Operation | Current | Proposed | Expected Win |
 |----------|-----------|---------|----------|-------------|
 | P1 | Complex mask + concat (DfOp output) | 2× concat + 4 muls + 2 adds | Fused Metal kernel | Minor — eliminates 2 allocations |
-| P2 | Post-filter (7 element-wise ops) | Separate ops | Fused Metal kernel | ~2× by eliminating intermediates |
 | P2 | Mamba scan (associative scan) | Python loop + concat | Native `mx.associative_scan` or Metal | Depends on MLX roadmap |
 
 ## 6. Quick Wins (Under 60 minutes)
@@ -260,5 +289,5 @@ All measurements on Apple M4 Max (36GB), Python 3.10.19, MLX 0.30.6.
 
 | Priority | Optimization | Complexity |
 |----------|-------------|-----------|
-| P2 | Compile `StreamingDfNet4.process_frame` | High — requires refactoring StreamingState into compile-friendly container |
+| P2 | Re-profile streaming follow-up around `StreamingDfNet4.process_audio()` | Medium — `process_frame()` is already compiled; only pursue this if later profiling shows streaming orchestration still matters |
 | P3 | `mx.associative_scan` for Mamba (when available) | Low — depends on MLX roadmap |

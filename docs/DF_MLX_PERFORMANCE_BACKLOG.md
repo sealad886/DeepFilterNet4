@@ -1,17 +1,19 @@
 # DF-MLX Performance Backlog (Execution Plan)
 
-Last updated: 2026-02-15
+Last updated: 2026-04-04
 
-This backlog translates the identified performance program into implementable work for this repository.
+This backlog reflects the approved current-state optimization program for `DeepFilterNet/df_mlx/`.
+It is intentionally grounded in the repository as it exists today, not in older backlog assumptions.
 
 ## Scope
 
 - Target module: `DeepFilterNet/df_mlx/`
+- Optimization scope: MLX/Metal-only surfaces inside `df_mlx`
 - Primary goals:
   1. Increase train-step throughput (samples/s)
   2. Reduce p95/p99 step latency jitter
-  3. Reduce avoidable host sync / Python overhead
-  4. Keep behavior and convergence stable
+  3. Reduce avoidable host sync / Python overhead on the MLX training path
+  4. Keep behavior, convergence, and resume semantics stable
 - Validation standard:
   - `docs/BENCHMARK_CONTRACT.md`
   - `docs/PERF_REGRESSION_GATE.md`
@@ -20,87 +22,76 @@ This backlog translates the identified performance program into implementable wo
 
 ## Delivery principles
 
-1. Ship high-ROI pure-MLX and control-plane reductions first.
-2. Use CPython/Rust extensions for CPU-heavy data-path loops.
-3. Use custom MLX kernels for fused tensor math that remains dominant after refactors.
-4. Every item must define:
-   - concrete files/symbols
-   - explicit acceptance criteria
-   - required tests/benchmarks
+1. `DeepFilterNet/df_mlx/benchmark_train_step.py` is the canonical authority for promotion decisions.
+2. `DeepFilterNet/df_mlx/benchmark_pipeline.py` already exists and should be used primarily to validate the `MLXDataStream` path against train-step behavior.
+3. `DeepFilterNet/df_mlx/benchmark_hotspots.py` already exists and should be used only for residual hotspot re-profiling after earlier stages land.
+4. `StreamingDfNet4.process_frame()` is already compiled; any later streaming follow-up targets `process_audio()` orchestration or other residual overhead, not re-adding compilation to the inner frame kernel.
+5. `PrefetchDataLoader` remains a comparison backend in existing benchmarks, but it is out of scope as an optimization target for this program.
+6. Advanced compile or Metal-kernel work stays feature-flagged until benchmark and parity evidence justify promotion.
 
 ---
 
-## Short-term program (0-4 weeks)
+## Benchmark surfaces (current repository state)
 
-### Epic S0 — Baseline and measurement hardening
-
-| ID | Item | Type | Files | Acceptance criteria |
-|---|---|---|---|---|
-| S0.1 | Capture baseline 48-point benchmark matrix | Validation | `df_mlx/benchmark_train_step.py`, `logs/` | Contract run completes; reproducibility metadata and baseline artifact stored |
-| S0.2 | Add hotspot microbench harness for feature frontends and DF op | Pure-MLX infra | `df_mlx/benchmark_pipeline.py` (or new `benchmark_hotspots.py`) | Repeatable per-op timing for mel frontend, DfOp, iSTFT paths |
-
-### Epic S1 — Pure-MLX hot-path vectorization
-
-| ID | Item | Type | Files | Acceptance criteria |
-|---|---|---|---|---|
-| S1.1 | Vectorize DNSMOS mel frontend (remove nested Python loops) | Pure-MLX | `df_mlx/dnsmos_proxy.py` | Numerical parity test passes; reduced CPU overhead in hotspot benchmark |
-| S1.2 | Vectorize DfOp tap-window construction | Pure-MLX | `df_mlx/modules.py`, `df_mlx/ops.py` | Output parity test passes; no model-shape regressions |
-| S1.3 | Reduce redundant train/validation host conversions in non-debug modes | Pure-MLX | `df_mlx/train_dynamic.py` | Metric parity preserved for required outputs; fewer host conversions |
-
-### Epic S2 — Data path optimization
-
-| ID | Item | Type | Files | Acceptance criteria |
-|---|---|---|---|---|
-| S2.1 | Reduce `np.stack`/Python list churn in batch assembly | Pure-MLX / CPython | `df_mlx/dynamic_dataset.py` | Throughput improves in loader-only benchmark, no resume regressions |
-| S2.2 | Batch packing acceleration in extension-backed path | CPython (PyO3/Rust) | `pyDF-data/`, `df_mlx/dynamic_dataset.py` | Equivalent output tensors, lower CPU per batch |
-| S2.3 | Resume/determinism hardening after loader changes | Validation | `tests/test_checkpoint_resume_dynamic.py`, `tests/test_dynamic_dataset_failure_modes.py` | All resume semantics tests pass |
+| Surface | File | Current role |
+|---|---|---|
+| Canonical train-step benchmark | `DeepFilterNet/df_mlx/benchmark_train_step.py` | Primary authority for throughput, tail latency, and perf-gate promotion decisions |
+| Data-path benchmark | `DeepFilterNet/df_mlx/benchmark_pipeline.py` | Existing harness for loader/data-wait behavior; use primarily for `MLXDataStream` validation alongside the train-step benchmark |
+| Hotspot microbench | `DeepFilterNet/df_mlx/benchmark_hotspots.py` | Existing per-op harness for residual hotspot re-profiling after Stage 1 and Stage 2 work |
 
 ---
 
-## Mid-term program (1-2 months)
+## Approved execution sequence
 
-### Epic M1 — Compile strategy and mode partitioning
-
-| ID | Item | Type | Files | Acceptance criteria |
-|---|---|---|---|---|
-| M1.1 | Separate throughput mode vs diagnostic mode execution surfaces | Pure-MLX | `df_mlx/train_dynamic.py`, run-config docs | Fast mode avoids expensive diagnostics while preserving required checkpoints |
-| M1.2 | Gen-only compiled GAN experiment implementation (guarded) | Pure-MLX compile | `df_mlx/train_dynamic.py`, `tests/test_gan_compile_experiment.py` | Meets experiment guardrails and no correctness regressions |
-
-### Epic M2 — iSTFT and spectral pipeline optimization
-
-| ID | Item | Type | Files | Acceptance criteria |
-|---|---|---|---|---|
-| M2.1 | Improve iSTFT overlap-add paths for common ratios | Pure-MLX | `df_mlx/ops.py` | Existing iSTFT vectorization tests pass; latency improvement in microbench |
-| M2.2 | Optional fused spectral frontend for loss paths | Pure-MLX / kernel-ready | `df_mlx/loss.py`, `df_mlx/ops.py` | Equal loss values within tolerance; lower kernel launch count |
+1. Baseline / gate lock
+2. Compiled `train_dynamic.py` fast path
+3. `MLXDataStream` data path
+4. Residual hotspot re-profiling
+5. Optional flagged advanced acceleration
+6. Release-candidate hardening
 
 ---
 
-## Long-term program (2-4+ months)
-
-### Epic L1 — Custom MLX kernel track
+## Stage 0 — Baseline and stale-assumption lock
 
 | ID | Item | Type | Files | Acceptance criteria |
 |---|---|---|---|---|
-| L1.1 | Custom Metal kernel for DfOp gather+complex MAC | Custom MLX kernel | new kernel module + `df_mlx/modules.py` integration | Numerical parity, measurable speedup over pure-MLX implementation |
-| L1.2 | Custom Metal kernel for iSTFT overlap-add/normalization | Custom MLX kernel | new kernel module + `df_mlx/ops.py` integration | Numerical parity and improved p95 latency |
-| L1.3 | Optional kernelized mel frontend for DNSMOS | Custom MLX kernel | kernel module + `df_mlx/dnsmos_proxy.py` | Faster mel extraction under DNSMOS-heavy workloads |
+| S0.1 | Lock the benchmark contract and baseline measurement surfaces | Validation | `docs/BENCHMARK_CONTRACT.md`, `docs/PERF_REGRESSION_GATE.md`, `DeepFilterNet/df_mlx/benchmark_train_step.py`, `logs/` | Contract run metadata is captured and the canonical baseline is recorded for the active program |
+| S0.2 | Reconcile roadmap and benchmark surfaces with current code | Docs / validation | `docs/DF_MLX_PERFORMANCE_BACKLOG.md`, `docs/PERFORMANCE_AUDIT.md`, `DeepFilterNet/df_mlx/benchmark_pipeline.py`, `DeepFilterNet/df_mlx/benchmark_hotspots.py` | Docs enumerate the current benchmark entrypoints and contain no stale claims about missing hotspot harnesses, an uncompiled `process_frame()`, or `PrefetchDataLoader` optimization scope |
 
-### Epic L2 — Full CPython acceleration lane
+## Stage 1 — Compiled `train_dynamic.py` fast path
 
 | ID | Item | Type | Files | Acceptance criteria |
 |---|---|---|---|---|
-| L2.1 | Move high-frequency data augment/mix operations into Rust-backed extension | CPython (PyO3/Rust) | `pyDF-data/src/`, `df_mlx/dynamic_dataset.py` | Functional parity with Python path, reduced CPU wall-time |
-| L2.2 | Introduce guarded fallback architecture for extension path | CPython infra | `df_mlx/dynamic_dataset.py`, docs | Works with/without extension installed; tests cover both paths |
+| S1.1 | Separate throughput-oriented fast execution from diagnostic/control-plane work | Pure-MLX compile | `DeepFilterNet/df_mlx/train_dynamic.py`, related training helpers/docs | `benchmark_train_step.py` shows the fast path pays only for release-candidate work while required checkpoints and diagnostics remain available behind explicit mode/config surfaces |
 
----
+## Stage 2 — `MLXDataStream` data path
 
-## Dependency order (execution sequence)
+| ID | Item | Type | Files | Acceptance criteria |
+|---|---|---|---|---|
+| S2.1 | Reduce `MLXDataStream`-side Python batch materialization and MLX conversion overhead | MLX data path | `DeepFilterNet/df_mlx/dynamic_dataset.py`, `DeepFilterNet/df_mlx/benchmark_pipeline.py` | `benchmark_pipeline.py` (`mlx_stream`) and `benchmark_train_step.py` both improve or hold the regression gate |
+| S2.2 | Harden resume/determinism after `MLXDataStream` changes | Validation | `DeepFilterNet/tests/test_checkpoint_resume_dynamic.py`, `DeepFilterNet/tests/test_dynamic_dataset_failure_modes.py`, `DeepFilterNet/df_mlx/test_dynamic_dataset_safety.py` | Resume/determinism checks pass with the optimized `MLXDataStream` path |
 
-1. S0.1 → S0.2 (baseline + measurement)
-2. S1.1 → S1.2 → S1.3 (vectorize compute/control-plane hotspots)
-3. S2.1 → S2.2 → S2.3 (data path + extension + determinism)
-4. M1.x and M2.x once short-term wins stabilize
-5. L1/L2 after profiling confirms residual bottlenecks justify complexity
+## Stage 3 — Residual hotspot re-profiling
+
+| ID | Item | Type | Files | Acceptance criteria |
+|---|---|---|---|---|
+| S3.1 | Re-profile train-step, data-path, and hotspot surfaces after Stage 1 and Stage 2 | Validation | `DeepFilterNet/df_mlx/benchmark_train_step.py`, `DeepFilterNet/df_mlx/benchmark_pipeline.py`, `DeepFilterNet/df_mlx/benchmark_hotspots.py`, `logs/` | Residual hotspots are ranked with train-step data first and microbench data second |
+| S3.2 | Optimize only residual MLX hotspots that still move the train-step benchmark | Pure-MLX / MLX runtime | `DeepFilterNet/df_mlx/dnsmos_proxy.py`, `DeepFilterNet/df_mlx/modules.py`, `DeepFilterNet/df_mlx/ops.py`, `DeepFilterNet/df_mlx/model.py` | Any targeted hotspot change preserves parity and produces a measurable train-step win |
+
+Stage 3 note: older candidate surfaces such as the DNSMOS mel frontend, DfOp tap-window work, or streaming follow-up stay deferred until re-profiling confirms they still matter. If streaming work is promoted, it should target `StreamingDfNet4.process_audio()` orchestration/output accumulation rather than the already-compiled `process_frame()` inner loop.
+
+## Stage 4 — Optional flagged advanced acceleration
+
+| ID | Item | Type | Files | Acceptance criteria |
+|---|---|---|---|---|
+| S4.1 | Add guarded compile or Metal-kernel experiments only for benchmark-proven residual bottlenecks | Feature-flagged MLX/Metal | `DeepFilterNet/df_mlx/` kernel/compile surfaces plus supporting tests/docs | Experimental paths are disabled by default, preserve parity, and show a benchmark win before any promotion |
+
+## Stage 5 — Release-candidate hardening
+
+| ID | Item | Type | Files | Acceptance criteria |
+|---|---|---|---|---|
+| S5.1 | Re-run the contract, perf gate, and focused safety suite for the chosen fast path | Validation | `docs/BENCHMARK_CONTRACT.md`, `docs/PERF_REGRESSION_GATE.md`, `DeepFilterNet/df_mlx/benchmark_train_step.py`, targeted `df_mlx` tests | The release-candidate path clears the benchmark gate and focused correctness/resume verification |
 
 ---
 
@@ -110,15 +101,17 @@ An item is done only when all are true:
 
 1. Code merged locally with tests for behavior parity/safety.
 2. Focused tests pass (`pytest`) for changed components.
-3. Benchmark evidence recorded (before/after) and does not trip perf gate.
+3. Benchmark evidence recorded (before/after) and does not trip the perf gate.
 4. No convention violations (`docs/CONVENTIONS.md` invariants maintained).
 
 ---
 
 ## Current implementation status
 
-- S0.1: complete (benchmark contract + gate infrastructure already in repo)
-- S0.2: not started
-- S1.1: in progress (starting now)
-- S1.2: in progress (starting now)
-- Remaining items: not started
+- `benchmark_train_step.py`: present and canonical.
+- `benchmark_pipeline.py`: present and available for `MLXDataStream` validation.
+- `benchmark_hotspots.py`: present and available for residual hotspot re-profiling.
+- `StreamingDfNet4.process_frame()`: already compiled; any future streaming work should target `process_audio()` or other residual orchestration surfaces.
+- S0.1: complete (benchmark contract + gate infrastructure already in repo).
+- S0.2: complete (current-state reconciliation landed on 2026-04-04).
+- S1.x and later: not started under the approved execution sequence.
