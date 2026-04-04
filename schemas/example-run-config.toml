@@ -18,7 +18,7 @@ backbone_type = "attention"
 variant = "full"
 
 [loss]
-# Try typing 'dynamic_loss = ' and you'll see: "baseline", "awesome", "pipeline_awesome", "contrastive_awesome"
+# Try typing 'dynamic_loss = ' and you'll see: "baseline", "awesome", "pipeline_awesome", "contrastive_awesome", "contrastive_silence"
 dynamic_loss = "pipeline_awesome"
 
 [loss.awesome]
@@ -39,6 +39,17 @@ speech_mask_min = 0.7
 interference_mask_max = 0.3
 quiet_weight = 0.5
 in_batch_negatives = true
+
+# Used when dynamic_loss = "contrastive_silence"
+# Shares [loss.contrastive] speech-branch settings above; silence-specific settings below.
+[loss.contrastive_silence]
+silence_frames_per_sample = 32
+silence_mask_max = 0.3
+silence_weight = 0.8
+asymmetric_penalty = 2.5
+transition_blend_range = [0.3, 0.7]
+low_freq_boost = 1.5
+high_freq_boost = 1.3
 
 [loss.mrstft]
 factor = 0.2
