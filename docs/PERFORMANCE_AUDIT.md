@@ -30,7 +30,9 @@ This audit remains the record of earlier profiling work, but the active optimiza
 
 ---
 
-## 1. Executive Summary
+> **Historical audit context for Sections 1-6:** The remaining sections preserve the original audit observations, measurement recommendations, and candidate optimizations that informed the approved staged program in Section 0. They are not the current execution queue. Read Section 0 as the current approved plan, Sections 1-6 as historical audit guidance, and Section 7 as historical prior-repo implementation status.
+
+## 1. Historical Audit Executive Summary
 
 1. **~13 redundant `.astype(mx.float32)` graph nodes per training step** in the loss computation path — functions defensively cast inputs that are already FP32after earlier casts in the call chain
 2. **`_log1p_mag()` casts unconditionally** — wastes 2 graph nodes per call when inputs are already FP32 (called 3× with FP32 noise inputs per step)
@@ -45,7 +47,7 @@ This audit remains the record of earlier profiling work, but the active optimiza
 11. **Mamba parallel scan creates ~14 temporary tensors per forward** via concatenation in a `for d in range(log2_L)` loop — these could be reduced with pre-allocated buffers
 12. **Streaming inference still has Python orchestration in `StreamingDfNet4.process_audio()`** — `process_frame()` is already compiled, but the outer frame loop and output accumulation remain eager
 
-## 2. Repo Performance Map
+## 2. Historical Audit Repo Performance Map
 
 ### Entrypoints
 - **Training**: `train_dynamic.py:main()` → `training_cli_main.py:main()` → compiled training step
@@ -66,7 +68,7 @@ This audit remains the record of earlier profiling work, but the active optimiza
 - MLX→NumPy at inference output (`np.array(audio)`)
 - File I/O via soundfile/librosa (CPU)
 
-## 3. Measurement & Benchmark Plan
+## 3. Historical Audit Measurement & Benchmark Plan
 
 ### Tools
 - `DeepFilterNet/df_mlx/benchmark_train_step.py` — canonical harness for training throughput and tail latency
@@ -92,7 +94,7 @@ python -m df_mlx.benchmark_train_step \
 - Per-step latency (p50/p95/p99)
 - Memory RSS
 
-## 4. Findings (Prioritized)
+## 4. Historical Audit Findings (Prioritized Recommendations)
 
 ### PERF-P0-001: Redundant FP32 casts in awesome/pipeline loss chain
 - **Severity**: P0
@@ -169,7 +171,7 @@ python -m df_mlx.benchmark_train_step \
 - **Proposed Optimization**: Only after staged re-profiling, evaluate compile-friendly batching or reduced Python orchestration around `process_audio()` / output accumulation
 - **Risks**: Must preserve state threading, chunk-boundary behavior, and parity with batch inference
 
-## 5. Hardware Acceleration Opportunities
+## 5. Historical Audit Hardware Acceleration Opportunities
 
 Existing Metal kernels now include:
 1. `df_op_kernel` — fused gather + complex MAC for DfOp
@@ -184,7 +186,7 @@ Existing Metal kernels now include:
 | P1 | Complex mask + concat (DfOp output) | 2× concat + 4 muls + 2 adds | Fused Metal kernel | Minor — eliminates 2 allocations |
 | P2 | Mamba scan (associative scan) | Python loop + concat | Native `mx.associative_scan` or Metal | Depends on MLX roadmap |
 
-## 6. Quick Wins (Under 60 minutes)
+## 6. Historical Audit Quick Wins (Under 60 minutes)
 
 1. **PERF-P0-001**: Add dtype guards to `_log1p_mag` and musicness functions (~15 min)
 2. **PERF-P0-002**: Refactor `_compute_pipeline_awesome_losses` cast-once (~15 min)
