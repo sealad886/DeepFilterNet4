@@ -139,9 +139,9 @@ Hardware: Apple M3 Max (40 cores, 48GB)
 
 | Config | Metric | Baseline | Candidate | Delta | Status |
 |--------|--------|----------|-----------|-------|--------|
-| dfnet4/bs4/compiled | samples/s | 120.5 | 118.2 | -1.9% | PASS |
-| dfnet4/bs4/eager | step_p95_ms | 33.2 | 38.1 | +14.8% | PASS |
-| dfnet4/bs8/compiled | samples/s | 230.1 | 195.3 | -15.1% | FAIL |
+| full/bs4/compiled/ga1/fp32 | samples/s | 120.5 | 118.2 | -1.9% | PASS |
+| full/bs4/eager/ga1/fp32 | step_p95_ms | 33.2 | 38.1 | +14.8% | PASS |
+| full/bs8/compiled/ga1/fp32 | samples/s | 230.1 | 195.3 | -15.1% | FAIL |
 
 Result: FAIL (1 regression detected)
 ```

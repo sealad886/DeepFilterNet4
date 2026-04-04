@@ -1,6 +1,6 @@
 # Benchmark Contract & Baseline Matrix
 
-This document defines the canonical benchmark matrix, reproducibility metadata schema,
+This document defines the current contract sweep, reproducibility metadata schema,
 baseline metrics, and pass/fail threshold policy for df_mlx training-step benchmarks.
 
 ## Program authority
@@ -33,17 +33,23 @@ contract:
 
 ## Canonical Matrix
 
-Every official benchmark run sweeps the following dimensions:
+With `--contract`, the benchmark currently pins the following promotion-critical
+dimensions while leaving the remaining CLI sweep arguments at the values you pass
+(or their defaults):
 
 | Dimension | Values | Notes |
 |-----------|--------|-------|
-| Backbone | `dfnet4` (primary), `mamba` (secondary) | `dfnet4` is the default model variant |
-| Batch size | 1, 4, 8 | Sweep across small/medium workloads |
-| Compile mode | `compiled`, `eager` | MLX `mx.compile` on/off |
-| Grad accumulation | 1, 2 | Effective batch scaling |
-| FP16 | on, off | Half-precision training toggle |
+| Batch size | 1, 4, 8 | Overridden by `--contract` |
+| Compile mode | `compiled`, `eager` | Overridden by `--contract` |
+| Warmup steps | 5 | Overridden by `--contract` |
+| Measured steps | 50 | Overridden by `--contract` |
+| Repeats | 3 | Overridden by `--contract` |
 
-This produces **2 × 3 × 2 × 2 × 2 = 48** configuration points per backend.
+Other sweep axes — backend, workers, backend-specific prefetch setting, split,
+model variant, optimizer hyperparameters, DSP configuration, and seed — continue
+to come from the active CLI arguments in `benchmark_train_step.py`. As a result,
+the exact case count depends on those settings and on whether optional backends
+such as `mlx_stream` are available in the environment.
 
 ## Warmup Policy
 
@@ -136,8 +142,9 @@ PASS  — all three gates pass
 FAIL  — any gate fails
 ```
 
-The current standalone promotion path (`scripts/perf_gate.py`) applies these
-thresholds without an override mode.
+The current standalone promotion path (`scripts/perf_gate.py`) has no
+`BENCHMARK_OVERRIDE`-style force-pass mode, although its throughput and latency
+threshold factors can still be adjusted with CLI flags.
 
 ### Tolerance Rationale
 
@@ -160,9 +167,11 @@ python -m df_mlx.benchmark_train_step \
     --json-out logs/benchmark_contract.json
 ```
 
-The `--contract` flag overrides individual sweep arguments and runs the full canonical
-matrix defined above. The `--metadata` flag attaches reproducibility metadata to the
-JSON output. This command is the primary promotion authority used by
+The `--contract` flag pins the promotion-critical sweep parameters listed above by
+overriding `--batch-size`, `--compiled`, `--warmup-steps`, `--steps`, and
+`--repeats`. Other sweep axes continue to use the CLI values in effect. The
+`--metadata` flag attaches reproducibility metadata to the JSON output. This
+command is the primary promotion authority used by
 [PERF_REGRESSION_GATE.md](PERF_REGRESSION_GATE.md).
 
 ## Baseline Artifact Format
@@ -241,9 +250,9 @@ top-level structure:
 
 Current `results[]` entries are flat `BenchmarkResult` records. For compatibility,
 `scripts/perf_gate.py` accepts both this flat shape and the older nested
-`{"config": {...}, "metrics": {...}}` record format. Use the nested shape when
-you need every contract dimension spelled out explicitly for standalone gate
-matching.
+`{"config": {...}, "metrics": {...}}` record format. Gate config keys are derived
+from whatever fields are present in each record, so flat and nested artifacts only
+compare cleanly when they encode the same dimensions.
 
 ## References
 
