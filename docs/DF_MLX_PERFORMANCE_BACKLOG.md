@@ -23,7 +23,7 @@ It is intentionally grounded in the repository as it exists today, not in older 
 ## Delivery principles
 
 1. `DeepFilterNet/df_mlx/benchmark_train_step.py` is the canonical authority for train-step throughput, tail latency, and perf-gate promotion decisions.
-2. `benchmark_train_step.py` does not execute the `train_dynamic.py` batch loop, `debug.sync_mode`, or sync-window metric collection, so loop-level fast-path changes on that surface require supplemental verification from focused tests and short controlled `train_dynamic.py` runs.
+2. `benchmark_train_step.py` measures an isolated train-step contract: `_build_train_step()` creates its own local `loss_fn` / `step_fn` pair and therefore does not execute the `train_dynamic.py` batch loop, `debug.sync_mode`, or sync-window metric collection. Loop-level fast-path changes on that surface require supplemental verification from focused tests and short controlled `train_dynamic.py` runs.
 3. `DeepFilterNet/benchmark_sync_barriers.py` is an optional diagnostic microbenchmark for sync-barrier hypotheses only; it does not replace either the canonical train-step benchmark or loop-level `train_dynamic.py` verification.
 4. `DeepFilterNet/df_mlx/benchmark_pipeline.py` already exists and should be used primarily to validate the `MLXDataStream` path against train-step behavior.
 5. `DeepFilterNet/df_mlx/benchmark_hotspots.py` already exists and should be used only for residual hotspot re-profiling after earlier stages land.
@@ -33,7 +33,7 @@ It is intentionally grounded in the repository as it exists today, not in older 
 
 ---
 
-## Benchmark surfaces (current repository state)
+## Benchmark and verification surfaces (current repository state)
 
 | Surface | File | Current role |
 |---|---|---|

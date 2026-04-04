@@ -19,11 +19,11 @@ latency: `python -m df_mlx.benchmark_train_step --contract --metadata`.
 stage-specific regression or validate a hypothesis, but they never replace the
 train-step benchmark for merge or promotion decisions.
 
-`benchmark_train_step.py` also has an explicit scope boundary: it builds a local
-loss/grad/update step and does not execute the `train_dynamic.py` batch loop,
-`debug.sync_mode`, or sync-window metric collection. For loop-control changes on
-that surface, the canonical gate benchmark remains required but is not sufficient
-on its own.
+`benchmark_train_step.py` also has an explicit scope boundary: `_build_train_step()`
+creates its own local `loss_fn` / `step_fn` pair and does not execute the
+`train_dynamic.py` batch loop, `debug.sync_mode`, or sync-window metric
+collection. For loop-control changes on that surface, the canonical gate
+benchmark remains required but is not sufficient on its own.
 
 ### Supplemental verification for `train_dynamic.py` loop-control changes
 

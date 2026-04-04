@@ -17,11 +17,12 @@ hardening — all inherit this same throughput/tail-latency contract from
 they can explain or localize a win/regression for a specific phase, but they do not
 replace the train-step benchmark for promotion.
 
-`benchmark_train_step.py` also has a deliberate scope boundary: it constructs a
-local loss/grad/update step and does not execute the `train_dynamic.py` batch
-loop, `debug.sync_mode`, or sync-window metric collection. Contract artifacts
-therefore remain necessary for program-level train-step promotion, but they do
-not directly prove loop-level overhead changes inside `train_dynamic.py`.
+`benchmark_train_step.py` also has a deliberate scope boundary: `_build_train_step()`
+creates its own local `loss_fn` / `step_fn` pair and does not execute the
+`train_dynamic.py` batch loop, `debug.sync_mode`, or sync-window metric
+collection. Contract artifacts therefore remain necessary for program-level
+train-step promotion, but they do not directly prove loop-level overhead
+changes inside `train_dynamic.py`.
 
 For phases that change those loop-level surfaces, combine this contract artifact
 with the supplemental verification described in
