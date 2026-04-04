@@ -5,16 +5,29 @@ baseline metrics, and pass/fail threshold policy for df_mlx training-step benchm
 
 ## Program authority
 
-This contract is the non-negotiable benchmark authority for the staged `df_mlx`
-optimization program inside `DeepFilterNet/df_mlx/`. Promotion decisions for the
-approved sequence — baseline / gate lock, compiled `train_dynamic.py` fast path,
-`MLXDataStream` data path, residual hotspot re-profiling, optional flagged advanced
-acceleration, and release-candidate hardening — are made from
-`DeepFilterNet/df_mlx/benchmark_train_step.py` running this contract.
+This contract is the non-negotiable train-step benchmark authority for the
+staged `df_mlx` optimization program inside `DeepFilterNet/df_mlx/`. Promotion
+decisions for the approved sequence — baseline / gate lock, compiled
+`train_dynamic.py` fast path, `MLXDataStream` data path, residual hotspot
+re-profiling, optional flagged advanced acceleration, and release-candidate
+hardening — all inherit this same throughput/tail-latency contract from
+`DeepFilterNet/df_mlx/benchmark_train_step.py`.
 `DeepFilterNet/df_mlx/benchmark_pipeline.py` and
 `DeepFilterNet/df_mlx/benchmark_hotspots.py` remain secondary diagnostic surfaces:
 they can explain or localize a win/regression for a specific phase, but they do not
 replace the train-step benchmark for promotion.
+
+`benchmark_train_step.py` also has a deliberate scope boundary: it constructs a
+local loss/grad/update step and does not execute the `train_dynamic.py` batch
+loop, `debug.sync_mode`, or sync-window metric collection. Contract artifacts
+therefore remain necessary for program-level train-step promotion, but they do
+not directly prove loop-level overhead changes inside `train_dynamic.py`.
+
+For phases that change those loop-level surfaces, combine this contract artifact
+with the supplemental verification described in
+[PERF_REGRESSION_GATE.md](PERF_REGRESSION_GATE.md): focused sync-mode behavior
+tests, short controlled `train_dynamic.py` runs, and optional
+`benchmark_sync_barriers.py` diagnostics.
 
 ### Stage-inherited expectations
 
@@ -171,8 +184,10 @@ The `--contract` flag pins the promotion-critical sweep parameters listed above 
 overriding `--batch-size`, `--compiled`, `--warmup-steps`, `--steps`, and
 `--repeats`. Other sweep axes continue to use the CLI values in effect. The
 `--metadata` flag attaches reproducibility metadata to the JSON output. This
-command is the primary promotion authority used by
-[PERF_REGRESSION_GATE.md](PERF_REGRESSION_GATE.md).
+command is the primary train-step promotion authority used by
+[PERF_REGRESSION_GATE.md](PERF_REGRESSION_GATE.md), but loop-level
+`train_dynamic.py` sync-mode changes still require the supplemental verification
+surfaces called out there.
 
 ## Baseline Artifact Format
 
@@ -260,4 +275,8 @@ compare cleanly when they encode the same dimensions.
 - [benchmark_train_step.py](../DeepFilterNet/df_mlx/benchmark_train_step.py) — Primary promotion benchmark entrypoint
 - [benchmark_pipeline.py](../DeepFilterNet/df_mlx/benchmark_pipeline.py) — Secondary data-path diagnostic benchmark
 - [benchmark_hotspots.py](../DeepFilterNet/df_mlx/benchmark_hotspots.py) — Secondary hotspot diagnostic benchmark
+- [benchmark_sync_barriers.py](../DeepFilterNet/benchmark_sync_barriers.py) — Supplemental sync-barrier microbenchmark
 - [benchmark_common.py](../DeepFilterNet/df_mlx/benchmark_common.py) — Shared helpers
+- [PERF_REGRESSION_GATE.md](PERF_REGRESSION_GATE.md) — Promotion gate and supplemental verification rules
+- [SYNC_BARRIER_POLICY.md](SYNC_BARRIER_POLICY.md) — `train_dynamic.py` sync-mode semantics
+- [IMPLEMENTATION_HANDOFF.md](IMPLEMENTATION_HANDOFF.md) — Existing short `train_dynamic.py` verification runs

@@ -22,12 +22,14 @@ It is intentionally grounded in the repository as it exists today, not in older 
 
 ## Delivery principles
 
-1. `DeepFilterNet/df_mlx/benchmark_train_step.py` is the canonical authority for promotion decisions.
-2. `DeepFilterNet/df_mlx/benchmark_pipeline.py` already exists and should be used primarily to validate the `MLXDataStream` path against train-step behavior.
-3. `DeepFilterNet/df_mlx/benchmark_hotspots.py` already exists and should be used only for residual hotspot re-profiling after earlier stages land.
-4. `StreamingDfNet4.process_frame()` is already compiled; any later streaming follow-up targets `process_audio()` orchestration or other residual overhead, not re-adding compilation to the inner frame kernel.
-5. `PrefetchDataLoader` remains a comparison backend in existing benchmarks, but it is out of scope as an optimization target for this program.
-6. Advanced compile or Metal-kernel work stays feature-flagged until benchmark and parity evidence justify promotion.
+1. `DeepFilterNet/df_mlx/benchmark_train_step.py` is the canonical authority for train-step throughput, tail latency, and perf-gate promotion decisions.
+2. `benchmark_train_step.py` does not execute the `train_dynamic.py` batch loop, `debug.sync_mode`, or sync-window metric collection, so loop-level fast-path changes on that surface require supplemental verification from focused tests and short controlled `train_dynamic.py` runs.
+3. `DeepFilterNet/benchmark_sync_barriers.py` is an optional diagnostic microbenchmark for sync-barrier hypotheses only; it does not replace either the canonical train-step benchmark or loop-level `train_dynamic.py` verification.
+4. `DeepFilterNet/df_mlx/benchmark_pipeline.py` already exists and should be used primarily to validate the `MLXDataStream` path against train-step behavior.
+5. `DeepFilterNet/df_mlx/benchmark_hotspots.py` already exists and should be used only for residual hotspot re-profiling after earlier stages land.
+6. `StreamingDfNet4.process_frame()` is already compiled; any later streaming follow-up targets `process_audio()` orchestration or other residual overhead, not re-adding compilation to the inner frame kernel.
+7. `PrefetchDataLoader` remains a comparison backend in existing benchmarks, but it is out of scope as an optimization target for this program.
+8. Advanced compile or Metal-kernel work stays feature-flagged until benchmark and parity evidence justify promotion.
 
 ---
 
@@ -35,7 +37,9 @@ It is intentionally grounded in the repository as it exists today, not in older 
 
 | Surface | File | Current role |
 |---|---|---|
-| Canonical train-step benchmark | `DeepFilterNet/df_mlx/benchmark_train_step.py` | Primary authority for throughput, tail latency, and perf-gate promotion decisions |
+| Canonical train-step benchmark | `DeepFilterNet/df_mlx/benchmark_train_step.py` | Primary authority for train-step throughput, tail latency, and perf-gate promotion decisions |
+| `train_dynamic.py` loop verification | `DeepFilterNet/tests/test_fast_sync_metric_suppression.py`, `DeepFilterNet/tests/test_sync_cadence_integration.py`, `DeepFilterNet/tests/test_sync_mode_partitioning.py`, `docs/IMPLEMENTATION_HANDOFF.md` | Required supplemental evidence for changes that affect `sync_mode` cadence or sync-window metric collection inside the real training loop |
+| Sync-barrier microbenchmark | `DeepFilterNet/benchmark_sync_barriers.py` | Optional synthetic diagnostic for barrier-pattern hypotheses; not a substitute for the real `train_dynamic.py` loop checks |
 | Data-path benchmark | `DeepFilterNet/df_mlx/benchmark_pipeline.py` | Existing harness for loader/data-wait behavior; use primarily for `MLXDataStream` validation alongside the train-step benchmark |
 | Hotspot microbench | `DeepFilterNet/df_mlx/benchmark_hotspots.py` | Existing per-op harness for residual hotspot re-profiling after Stage 1 and Stage 2 work |
 
@@ -63,7 +67,7 @@ It is intentionally grounded in the repository as it exists today, not in older 
 
 | ID | Item | Type | Files | Acceptance criteria |
 |---|---|---|---|---|
-| S1.1 | Separate throughput-oriented fast execution from diagnostic/control-plane work | Pure-MLX compile | `DeepFilterNet/df_mlx/train_dynamic.py`, related training helpers/docs | `benchmark_train_step.py` shows the fast path pays only for release-candidate work while required checkpoints and diagnostics remain available behind explicit mode/config surfaces |
+| S1.1 | Separate throughput-oriented fast execution from diagnostic/control-plane work | Pure-MLX compile | `DeepFilterNet/df_mlx/train_dynamic.py`, related training helpers/docs | `benchmark_train_step.py` still clears the train-step contract, while focused `sync_mode` tests plus short controlled `train_dynamic.py` runs confirm that loop-level fast-mode cleanup suppresses intentionally skipped sync-window metrics without removing explicit diagnostic modes |
 
 ## Stage 2 — `MLXDataStream` data path
 

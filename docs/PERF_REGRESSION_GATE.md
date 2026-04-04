@@ -13,11 +13,37 @@ This gate is the operational enforcement mechanism for the staged `df_mlx`
 optimization program. Every promotion checkpoint after baseline / gate lock —
 compiled `train_dynamic.py` fast path, `MLXDataStream` data path, residual hotspot
 re-profiling, optional flagged advanced acceleration, and release-candidate
-hardening — uses the same primary authority:
-`python -m df_mlx.benchmark_train_step --contract --metadata`.
+hardening — uses the same primary train-step authority for throughput and tail
+latency: `python -m df_mlx.benchmark_train_step --contract --metadata`.
 `benchmark_pipeline.py` and `benchmark_hotspots.py` may be run to diagnose a
 stage-specific regression or validate a hypothesis, but they never replace the
 train-step benchmark for merge or promotion decisions.
+
+`benchmark_train_step.py` also has an explicit scope boundary: it builds a local
+loss/grad/update step and does not execute the `train_dynamic.py` batch loop,
+`debug.sync_mode`, or sync-window metric collection. For loop-control changes on
+that surface, the canonical gate benchmark remains required but is not sufficient
+on its own.
+
+### Supplemental verification for `train_dynamic.py` loop-control changes
+
+When a candidate changes `train_dynamic.py` behavior that depends on
+`sync_mode`, eval cadence, or sync-window metric collection, promotion evidence
+must also include:
+
+1. Focused sync-mode behavior tests:
+   - `DeepFilterNet/tests/test_fast_sync_metric_suppression.py`
+   - `DeepFilterNet/tests/test_sync_cadence_integration.py`
+   - `DeepFilterNet/tests/test_sync_mode_partitioning.py`
+2. Short controlled `python -m df_mlx.train_dynamic` runs using
+   `sync_mode=fast` and `sync_mode=debug` or `sync_mode=profile` for loop-level
+   observability, using the existing checks documented in
+   [IMPLEMENTATION_HANDOFF.md](IMPLEMENTATION_HANDOFF.md) and
+   [SYNC_BARRIER_POLICY.md](SYNC_BARRIER_POLICY.md).
+3. Optional `DeepFilterNet/benchmark_sync_barriers.py` runs when you need a
+   synthetic barrier-pattern diagnostic. This benchmark is supporting evidence
+   only and does not replace either the canonical gate or the real training-loop
+   checks.
 
 ### Inherited promotion rules
 
@@ -38,6 +64,9 @@ All later phases inherit the same rules from
 - After dependency upgrades (MLX, mlx-data, mlx-whisper, etc.)
 - Any PR marked with the `perf` label
 - At each staged-program promotion checkpoint after the baseline / gate lock
+- Any `train_dynamic.py` change that affects `sync_mode`, eval cadence, or
+  sync-window metric collection (run the supplemental verification above in
+  addition to the canonical gate)
 
 ## Gate Procedure
 
@@ -116,8 +145,12 @@ When the gate fails:
        --candidate candidate.json
    '
    ```
-3. **Profile the regressed path**: Run the benchmark with `sync_mode=profile` to
-   collect detailed timing breakdowns.
+3. **Profile the regressed path**: If the suspected regression lives in
+   `train_dynamic.py` loop control or observability, reproduce it with a short
+   controlled `python -m df_mlx.train_dynamic` run using `sync_mode=profile`.
+   Use `benchmark_pipeline.py`, `benchmark_hotspots.py`, or
+   `benchmark_sync_barriers.py` only as supporting diagnostics for narrower
+   hypotheses.
 4. **Small regressions (< 5%)**: Request perf-team review. May be acceptable with
    documented justification.
 5. **Large regressions (≥ 5%)**: Block merge until the regression is resolved or an
@@ -166,6 +199,8 @@ See [BENCHMARK_CONTRACT.md](BENCHMARK_CONTRACT.md) for full rationale.
 - [benchmark_train_step.py](../DeepFilterNet/df_mlx/benchmark_train_step.py) — Primary promotion benchmark entrypoint
 - [benchmark_pipeline.py](../DeepFilterNet/df_mlx/benchmark_pipeline.py) — Secondary data-path diagnostic benchmark
 - [benchmark_hotspots.py](../DeepFilterNet/df_mlx/benchmark_hotspots.py) — Secondary hotspot diagnostic benchmark
+- [benchmark_sync_barriers.py](../DeepFilterNet/benchmark_sync_barriers.py) — Supplemental sync-barrier microbenchmark
 - [scripts/perf_gate.py](../scripts/perf_gate.py) — Gate automation script
 - [SYNC_BARRIER_POLICY.md](SYNC_BARRIER_POLICY.md) — Sync modes for profiling
+- [IMPLEMENTATION_HANDOFF.md](IMPLEMENTATION_HANDOFF.md) — Existing short `train_dynamic.py` verification runs
 - [DATA_PIPELINE_TUNING.md](DATA_PIPELINE_TUNING.md) — Hardware profiles
