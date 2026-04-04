@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
+import math
+import statistics
 from unittest.mock import patch
 
+import numpy as np
+
 from df_mlx.benchmark_train_step import (
+    BenchmarkCase,
     CONTRACT_BACKBONES,
     CONTRACT_BATCH_SIZES,
     CONTRACT_COMPILED,
@@ -13,6 +19,7 @@ from df_mlx.benchmark_train_step import (
     THRESHOLD_CV_MAX,
     THRESHOLD_LATENCY_FACTOR,
     THRESHOLD_THROUGHPUT_FACTOR,
+    _aggregate,
     check_regression,
     collect_reproducibility_metadata,
     generate_contract_matrix,
@@ -284,3 +291,77 @@ class TestGenerateContractMatrix:
             )
             assert key not in seen, f"Duplicate config: {entry}"
             seen.add(key)
+
+
+class TestBenchmarkAuthoritySchema:
+    def test_aggregate_emits_per_repeat_throughput_statistics(self) -> None:
+        case = BenchmarkCase(
+            backend="prefetch",
+            split="train",
+            epoch=0,
+            workers=2,
+            prefetch=4,
+            batch_size=8,
+            warmup_steps=1,
+            steps=10,
+            repeats=3,
+            compiled=True,
+            model_variant="full",
+            learning_rate=0.001,
+            weight_decay=0.0,
+            grad_clip=0.0,
+            sample_rate=48000,
+            segment_length=5.0,
+            fft_size=960,
+            hop_size=480,
+            nb_erb=32,
+            nb_df=96,
+            seed=42,
+        )
+        runs = [
+            {
+                "data_latencies_ms": [1.0, 1.1],
+                "step_latencies_ms": [2.0, 2.1],
+                "total_latencies_ms": [3.0, 3.1],
+                "losses": [0.20, 0.19],
+                "steps": 8,
+                "samples": 64,
+                "elapsed_s": 0.5,
+            },
+            {
+                "data_latencies_ms": [1.2, 1.3],
+                "step_latencies_ms": [2.2, 2.3],
+                "total_latencies_ms": [3.2, 3.3],
+                "losses": [0.18, 0.17],
+                "steps": 8,
+                "samples": 64,
+                "elapsed_s": 0.8,
+            },
+            {
+                "data_latencies_ms": [1.4, 1.5],
+                "step_latencies_ms": [2.4, 2.5],
+                "total_latencies_ms": [3.4, 3.5],
+                "losses": [0.16, 0.15],
+                "steps": 8,
+                "samples": 64,
+                "elapsed_s": 1.0,
+            },
+        ]
+
+        per_repeat_samples_per_sec = [run["samples"] / run["elapsed_s"] for run in runs]
+        aggregate = asdict(_aggregate(case, runs))
+
+        assert "samples_per_sec" in aggregate
+        assert aggregate["samples_per_sec"] == 192 / 2.3
+
+        expected_keys = {
+            "samples_per_sec_mean",
+            "samples_per_sec_std",
+            "samples_per_sec_p5",
+            "samples_per_sec_p95",
+        }
+        assert expected_keys.issubset(aggregate)
+        assert math.isclose(aggregate["samples_per_sec_mean"], statistics.mean(per_repeat_samples_per_sec))
+        assert math.isclose(aggregate["samples_per_sec_std"], statistics.stdev(per_repeat_samples_per_sec))
+        assert math.isclose(aggregate["samples_per_sec_p5"], float(np.percentile(per_repeat_samples_per_sec, 5)))
+        assert math.isclose(aggregate["samples_per_sec_p95"], float(np.percentile(per_repeat_samples_per_sec, 95)))

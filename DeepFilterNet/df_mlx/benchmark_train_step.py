@@ -283,6 +283,10 @@ class BenchmarkResult:
     total_p99_ms: float
     steps_per_sec: float
     samples_per_sec: float
+    samples_per_sec_mean: float
+    samples_per_sec_std: float
+    samples_per_sec_p5: float
+    samples_per_sec_p95: float
     loss_mean: float
     loss_std: float
     loss_last: float
@@ -564,18 +568,22 @@ def _aggregate(case: BenchmarkCase, runs: List[Dict[str, Any]]) -> BenchmarkResu
     step_latencies: List[float] = []
     total_latencies: List[float] = []
     losses: List[float] = []
+    samples_per_sec_runs: List[float] = []
     measured_steps = 0
     measured_samples = 0
     total_seconds = 0.0
 
     for run in runs:
+        elapsed_s = float(run["elapsed_s"])
         data_latencies.extend(run["data_latencies_ms"])
         step_latencies.extend(run["step_latencies_ms"])
         total_latencies.extend(run["total_latencies_ms"])
         losses.extend(run["losses"])
         measured_steps += int(run["steps"])
-        measured_samples += int(run["samples"])
-        total_seconds += float(run["elapsed_s"])
+        samples = int(run["samples"])
+        measured_samples += samples
+        total_seconds += elapsed_s
+        samples_per_sec_runs.append(samples / elapsed_s if elapsed_s > 0 else 0.0)
 
     data_mean = statistics.mean(data_latencies) if data_latencies else math.nan
     step_mean = statistics.mean(step_latencies) if step_latencies else math.nan
@@ -586,6 +594,10 @@ def _aggregate(case: BenchmarkCase, runs: List[Dict[str, Any]]) -> BenchmarkResu
 
     steps_per_sec = measured_steps / total_seconds if total_seconds > 0 else 0.0
     samples_per_sec = measured_samples / total_seconds if total_seconds > 0 else 0.0
+    samples_per_sec_mean = statistics.mean(samples_per_sec_runs) if samples_per_sec_runs else 0.0
+    samples_per_sec_std = statistics.stdev(samples_per_sec_runs) if len(samples_per_sec_runs) > 1 else 0.0
+    samples_per_sec_p5 = _safe_percentile(samples_per_sec_runs, 5) if samples_per_sec_runs else 0.0
+    samples_per_sec_p95 = _safe_percentile(samples_per_sec_runs, 95) if samples_per_sec_runs else 0.0
 
     return BenchmarkResult(
         backend=case.backend,
@@ -623,6 +635,10 @@ def _aggregate(case: BenchmarkCase, runs: List[Dict[str, Any]]) -> BenchmarkResu
         total_p99_ms=_safe_percentile(total_latencies, 99),
         steps_per_sec=steps_per_sec,
         samples_per_sec=samples_per_sec,
+        samples_per_sec_mean=samples_per_sec_mean,
+        samples_per_sec_std=samples_per_sec_std,
+        samples_per_sec_p5=samples_per_sec_p5,
+        samples_per_sec_p95=samples_per_sec_p95,
         loss_mean=loss_mean,
         loss_std=loss_std,
         loss_last=loss_last,
