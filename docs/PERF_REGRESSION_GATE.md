@@ -46,63 +46,75 @@ All later phases inherit the same rules from
    ```bash
    cd DeepFilterNet
    python -m df_mlx.benchmark_train_step \
-       --contract --metadata \
-       --cache-dir /path/to/audio_cache \
-       --json-out baseline.jsonl
+        --contract --metadata \
+        --cache-dir /path/to/audio_cache \
+        --json-out baseline.json
    ```
 3. **Checkout candidate** branch.
 4. Run the same benchmark:
    ```bash
    python -m df_mlx.benchmark_train_step \
-       --contract --metadata \
-       --cache-dir /path/to/audio_cache \
-       --json-out candidate.jsonl
+        --contract --metadata \
+        --cache-dir /path/to/audio_cache \
+        --json-out candidate.json
    ```
 5. **Compare** with the perf gate script:
    ```bash
    python scripts/perf_gate.py \
-       --baseline baseline.jsonl \
-       --candidate candidate.jsonl \
-       --report gate_report.md
+        --baseline baseline.json \
+        --candidate candidate.json \
+        --report gate_report.md
    ```
 6. Review the generated report. Exit code 0 = pass, 1 = fail, 2 = error.
 
 ## Reproducibility Controls
 
-- **Same hardware**: Baseline and candidate must run on the same machine. The gate
-  script compares hardware metadata hashes and warns on mismatch.
-- **Thermal settle**: Allow a 30-second cooldown between benchmark runs. The benchmark
-  script inserts this automatically between repeats.
+- **Same hardware**: Baseline and candidate should run on the same machine. The gate
+  report surfaces recorded metadata, but `scripts/perf_gate.py` does not currently
+  auto-fail on hardware or runtime metadata mismatches; compare both artifacts
+  manually before treating the result as authoritative.
+- **Thermal settle**: If you run baseline and candidate back-to-back on one machine,
+  allow manual cooldown as needed. `benchmark_train_step.py` does not currently
+  inject a fixed 30-second pause between repeats or between the two runs.
 - **Close resource-heavy apps**: Browsers, IDEs, and other GPU-consuming applications
   should be closed during benchmark runs.
-- **3 trials, use median**: Each config point runs 3 independent repeats. The median
-  is used for comparison to reduce outlier impact.
+- **3 repeats feed the contract metrics**: Each config point runs 3 independent
+  repeats, and the emitted artifact records the aggregated `samples_per_sec_p5`,
+  `step_p95_ms`, `samples_per_sec_mean`, and `samples_per_sec_std` values. The gate
+  compares those reported fields directly; it does not recompute a median from raw
+  repeats.
 - **Metadata audit trail**: Every run records chip, GPU cores, memory, OS version,
-  Python version, MLX version, and git commit. This metadata is stored in the JSONL
-  output for post-hoc auditing.
+  Python version, MLX version, and git commit. This metadata is stored in the JSON
+  artifact for post-hoc auditing.
 
 ## Variance Policy
 
 - **CV > 20%**: Results are unreliable. Re-run with additional warmup steps or under
   quieter conditions (fewer background processes, cooler hardware).
-- **Outlier detection**: Drop any run where a metric deviates more than 3σ from the
-  group median. This prevents a single thermal-throttle spike from poisoning results.
-- **Minimum valid runs**: At least 3 valid runs must remain after outlier filtering.
-  If fewer survive, the gate reports an error (exit code 2) and the benchmark must be
-  re-run.
+- **No automatic outlier filtering**: The current benchmark/gate path uses the
+  emitted aggregates as-is. It does not apply 3σ trimming or enforce a minimum
+  surviving-run count after filtering.
 
 ## Triage Protocol
 
 When the gate fails:
 
-1. **Check environment drift**: Compare hardware metadata between baseline and
-   candidate. If `reproducibility_hash` differs, re-run on matching hardware.
+1. **Check environment drift**: Compare the recorded hardware, OS, and runtime
+   metadata between baseline and candidate artifacts. If the machine or runtime
+   changed, re-run on matching hardware before treating the comparison as
+   authoritative.
 2. **Isolate the regression commit**: Use `git bisect` with the benchmark script:
    ```bash
    git bisect start <bad-commit> <good-commit>
-   git bisect run python scripts/perf_gate.py \
-       --baseline baseline.jsonl \
-       --candidate <(python -m df_mlx.benchmark_train_step --contract --metadata --json-out /dev/stdout)
+   git bisect run bash -lc '
+     python -m df_mlx.benchmark_train_step \
+       --contract --metadata \
+       --cache-dir /path/to/audio_cache \
+       --json-out candidate.json &&
+     python scripts/perf_gate.py \
+       --baseline baseline.json \
+       --candidate candidate.json
+   '
    ```
 3. **Profile the regressed path**: Run the benchmark with `sync_mode=profile` to
    collect detailed timing breakdowns.
@@ -110,9 +122,10 @@ When the gate fails:
    documented justification.
 5. **Large regressions (≥ 5%)**: Block merge until the regression is resolved or an
    equivalent performance improvement is identified elsewhere.
-6. **Override escape hatch**: Set `BENCHMARK_OVERRIDE=1` with a documented
-   justification in the PR description. Overrides are logged in the report and must
-   never be used for release baselines.
+6. **No scripted override**: `scripts/perf_gate.py` does not currently honor
+   `BENCHMARK_OVERRIDE` or emit an overridden PASS result. If you need to proceed
+   after a noisy run, re-benchmark or record the manual decision outside the gate
+   report.
 
 ## Report Format
 

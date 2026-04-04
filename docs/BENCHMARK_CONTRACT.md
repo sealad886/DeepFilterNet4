@@ -58,7 +58,9 @@ This produces **2 × 3 × 2 × 2 × 2 = 48** configuration points per backend.
 
 ## Reproducibility Metadata Schema
 
-Every benchmark run **must** capture the following metadata alongside results:
+When `benchmark_train_step.py` is run with `--metadata`, it emits the following
+run-level metadata alongside `results[]`. Each `results[]` entry is the flat
+`BenchmarkResult` record written by the benchmark today.
 
 ```json
 {
@@ -77,15 +79,7 @@ Every benchmark run **must** capture the following metadata alongside results:
     "mlx_nn": "0.24.0"
   },
   "commit": "abcdef1",
-  "config": {
-    "backbone": "dfnet4",
-    "batch_size": 4,
-    "compiled": true,
-    "grad_accumulation": 1,
-    "fp16": false
-  },
-  "timestamp": "2026-02-14T12:00:00+00:00",
-  "reproducibility_hash": "<sha256(commit+config_json+chip)>"
+  "timestamp": "2026-02-14T12:00:00+00:00"
 }
 ```
 
@@ -102,13 +96,12 @@ Every benchmark run **must** capture the following metadata alongside results:
 | `runtime.mlx` | string | MLX framework version |
 | `runtime.mlx_nn` | string | MLX neural network module version (if available) |
 | `commit` | string | Short git commit hash |
-| `config` | object | Full benchmark configuration for this run |
 | `timestamp` | string | ISO 8601 UTC timestamp |
-| `reproducibility_hash` | string | SHA-256 of `commit + sorted(config) + chip` |
 
 ## Baseline Metrics
 
-Each configuration point produces the following aggregated metrics:
+Each configuration point records the following key aggregated metrics used by the
+contract and promotion gate:
 
 | Metric | Unit | Description |
 |--------|------|-------------|
@@ -124,7 +117,7 @@ Each configuration point produces the following aggregated metrics:
 | `data_p99_ms` | ms | 99th percentile data-loading latency |
 | `loss_mean` | scalar | Mean loss value |
 | `loss_std` | scalar | Loss standard deviation |
-| `peak_rss_mb` | MB | Peak resident set size |
+| `loss_last` | scalar | Final measured loss value |
 
 ## Pass/Fail Threshold Policy
 
@@ -140,15 +133,11 @@ Each configuration point produces the following aggregated metrics:
 
 ```
 PASS  — all three gates pass
-FAIL  — any gate fails (unless overridden)
-OVERRIDE — set BENCHMARK_OVERRIDE=1 env var to force pass with warning
+FAIL  — any gate fails
 ```
 
-### Override Mechanism
-
-Setting the environment variable `BENCHMARK_OVERRIDE=1` suppresses failures and emits
-a warning instead. This is intended for known-noisy environments (e.g. CI with shared
-hardware) and **must not** be used for release baselines.
+The current standalone promotion path (`scripts/perf_gate.py`) applies these
+thresholds without an override mode.
 
 ### Tolerance Rationale
 
@@ -178,33 +167,83 @@ JSON output. This command is the primary promotion authority used by
 
 ## Baseline Artifact Format
 
-Baseline results are stored as JSON with the following top-level structure:
+With `--metadata`, `benchmark_train_step.py` writes JSON with the following
+top-level structure:
 
 ```json
 {
-  "metadata": { "...reproducibility fields..." },
+  "metadata": {
+    "hardware": {
+      "chip": "Apple M3 Max",
+      "gpu_cores": 40,
+      "memory_gb": 48
+    },
+    "os": {
+      "name": "macOS",
+      "version": "15.2"
+    },
+    "runtime": {
+      "python": "3.11.12",
+      "mlx": "0.24.1",
+      "mlx_nn": "0.24.0"
+    },
+    "commit": "abcdef1",
+    "timestamp": "2026-02-14T12:00:00+00:00"
+  },
   "results": [
     {
-      "config": { "backbone": "dfnet4", "batch_size": 4, "compiled": true, "...": "..." },
-      "metrics": {
-        "samples_per_sec_mean": 12.5,
-        "samples_per_sec_std": 0.3,
-        "samples_per_sec_p5": 11.8,
-        "samples_per_sec_p95": 13.1,
-        "step_mean_ms": 80.0,
-        "step_p95_ms": 95.0,
-        "step_p99_ms": 110.0,
-        "data_mean_ms": 5.0,
-        "data_p95_ms": 8.0,
-        "data_p99_ms": 12.0,
-        "loss_mean": 0.31,
-        "loss_std": 0.02,
-        "peak_rss_mb": 1200
-      }
+      "backend": "mlx_stream",
+      "split": "train",
+      "epoch": 0,
+      "workers": 4,
+      "prefetch": 16,
+      "batch_size": 4,
+      "warmup_steps": 5,
+      "steps_requested": 50,
+      "repeats": 3,
+      "compiled": true,
+      "model_variant": "full",
+      "learning_rate": 0.001,
+      "weight_decay": 0.0,
+      "grad_clip": 0.0,
+      "sample_rate": 48000,
+      "segment_length": 5.0,
+      "fft_size": 960,
+      "hop_size": 480,
+      "nb_erb": 32,
+      "nb_df": 96,
+      "seed": 42,
+      "measured_steps": 150,
+      "measured_samples": 600,
+      "total_seconds": 48.0,
+      "data_mean_ms": 5.0,
+      "data_p95_ms": 8.0,
+      "data_p99_ms": 12.0,
+      "step_mean_ms": 80.0,
+      "step_p95_ms": 95.0,
+      "step_p99_ms": 110.0,
+      "total_mean_ms": 85.0,
+      "total_p95_ms": 101.0,
+      "total_p99_ms": 118.0,
+      "steps_per_sec": 3.1,
+      "samples_per_sec": 12.5,
+      "samples_per_sec_mean": 12.6,
+      "samples_per_sec_std": 0.3,
+      "samples_per_sec_p5": 11.8,
+      "samples_per_sec_p95": 13.1,
+      "loss_mean": 0.31,
+      "loss_std": 0.02,
+      "loss_last": 0.28
     }
   ]
 }
 ```
+
+Current `results[]` entries are flat `BenchmarkResult` records. For compatibility,
+`scripts/perf_gate.py` accepts both this flat shape and the older nested
+`{"config": {...}, "metrics": {...}}` record format. Use the nested shape when
+you need every contract dimension spelled out explicitly for standalone gate
+matching.
 
 ## References
 
