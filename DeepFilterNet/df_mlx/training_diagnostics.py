@@ -56,6 +56,7 @@ class DiagnosticContext:
     use_awesome_loss: bool
     use_pipeline_awesome_loss: bool
     use_contrastive_awesome_loss: bool
+    use_contrastive_silence_loss: bool
     vad_band_mask: mx.array
     vad_band_bins: float
     awesome_mask_sharpness: float
@@ -66,6 +67,14 @@ class DiagnosticContext:
     contrastive_interference_mask_max: float
     contrastive_quiet_weight: float
     contrastive_in_batch_negatives: bool
+    contrastive_silence_frames_per_sample: int
+    contrastive_silence_mask_max: float
+    contrastive_silence_weight: float
+    contrastive_silence_asymmetric_penalty: float
+    contrastive_silence_transition_blend_low: float
+    contrastive_silence_transition_blend_high: float
+    contrastive_silence_low_freq_boost: float
+    contrastive_silence_high_freq_boost: float
     vad_z_threshold: float
     vad_z_slope: float
     vad_snr_gate_db: float

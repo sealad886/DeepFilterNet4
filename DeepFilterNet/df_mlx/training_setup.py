@@ -282,6 +282,7 @@ def print_training_config(
     awesome_mask_sharpness: float = 1.0,
     awesome_warmup_steps: int = 0,
     contrastive_cfg: Any | None = None,
+    contrastive_silence_cfg: Any | None = None,
     vad_proxy_enabled: bool = False,
     gan_enabled: bool = False,
     gan_adv_weight: float = 0.0,
@@ -324,6 +325,7 @@ def print_training_config(
     use_awesome_loss = dynamic_loss == "awesome"
     use_pipeline_awesome_loss = dynamic_loss == "pipeline_awesome"
     use_contrastive_awesome_loss = dynamic_loss == "contrastive_awesome"
+    use_contrastive_silence_loss = dynamic_loss == "contrastive_silence"
     vad_eval_enabled = vad_eval_mode != "off"
 
     # Print file counts after dataset init (so cache files are included)
@@ -371,6 +373,18 @@ def print_training_config(
             f"interference_k={contrastive_cfg.interference_frames_per_sample}, "
             f"quiet_w={contrastive_cfg.quiet_weight}, "
             f"in_batch_neg={'on' if contrastive_cfg.in_batch_negatives else 'off'}"
+        )
+    if use_contrastive_silence_loss and contrastive_silence_cfg is not None:
+        print(
+            "  Contrastive silence: "
+            f"silence_k={contrastive_silence_cfg.silence_frames_per_sample}, "
+            f"silence_mask_max={contrastive_silence_cfg.silence_mask_max}, "
+            f"silence_w={contrastive_silence_cfg.silence_weight}, "
+            f"asym={contrastive_silence_cfg.asymmetric_penalty}, "
+            f"blend=[{contrastive_silence_cfg.transition_blend_low}, "
+            f"{contrastive_silence_cfg.transition_blend_high}], "
+            f"lo_freq={contrastive_silence_cfg.low_freq_boost}, "
+            f"hi_freq={contrastive_silence_cfg.high_freq_boost}"
         )
     if gan_enabled:
         print(
@@ -469,6 +483,7 @@ def print_epoch_summary(
     use_awesome_loss: bool,
     use_pipeline_awesome_loss: bool,
     use_contrastive_awesome_loss: bool,
+    use_contrastive_silence_loss: bool = False,
     use_mrstft_loss: bool,
     use_vad_train_reg: bool,
     gan_enabled: bool,
@@ -493,6 +508,7 @@ def print_epoch_summary(
     printed when *debug_numerics* is ``True`` and the relevant counters
     are positive.
     """
+    _any_contrastive = use_contrastive_awesome_loss or use_contrastive_silence_loss
     epoch_throughput = samples_processed / epoch_time if epoch_time > 0 else 0
 
     improvement_marker = "★" if avg_valid_loss <= best_valid_loss else ""
@@ -502,6 +518,7 @@ def print_epoch_summary(
         or use_awesome_loss
         or use_pipeline_awesome_loss
         or use_contrastive_awesome_loss
+        or use_contrastive_silence_loss
         or use_vad_train_reg
         or use_mrstft_loss
         or gan_enabled
@@ -530,7 +547,7 @@ def print_epoch_summary(
                     f"AwSm: {epoch_avgs['awesome_smooth']:.4f}",
                 ]
             )
-        if use_contrastive_awesome_loss:
+        if _any_contrastive:
             loss_parts.extend(
                 [
                     f"Ctr: {epoch_avgs['contrastive_loss']:.4f}",
@@ -565,7 +582,7 @@ def print_epoch_summary(
             f"  VAD stats: p_ref={epoch_avgs['p_ref']:.2f} | "
             f"p_out={epoch_avgs['p_out']:.2f} | gate={epoch_avgs['gate']:.0f}%"
         )
-    if (use_awesome_loss or use_pipeline_awesome_loss or use_contrastive_awesome_loss) and verbose:
+    if (use_awesome_loss or use_pipeline_awesome_loss or _any_contrastive) and verbose:
         print(
             "  Awesome stats: "
             f"mask={epoch_avgs['mask_mean']:.2f} "
@@ -579,7 +596,7 @@ def print_epoch_summary(
         )
     if debug_numerics:
         parts: list[str] = []
-        if (use_awesome_loss or use_pipeline_awesome_loss or use_contrastive_awesome_loss) and num_debug_logs > 0:
+        if (use_awesome_loss or use_pipeline_awesome_loss or _any_contrastive) and num_debug_logs > 0:
             avg_mask_clip = train_mask_clip_rate / num_debug_logs
             avg_eps_clean = train_eps_clean_rate / num_debug_logs
             avg_eps_noise = train_eps_noise_rate / num_debug_logs
@@ -659,6 +676,7 @@ class AuxLossSetupResult:
     use_awesome_loss: bool
     use_pipeline_awesome_loss: bool
     use_contrastive_awesome_loss: bool
+    use_contrastive_silence_loss: bool
     use_vad_loss: bool
     use_vad_train_reg: bool
     use_mrstft_loss: bool
@@ -735,6 +753,7 @@ def setup_auxiliary_losses(
     use_awesome_loss = dynamic_loss == "awesome"
     use_pipeline_awesome_loss = dynamic_loss == "pipeline_awesome"
     use_contrastive_awesome_loss = dynamic_loss == "contrastive_awesome"
+    use_contrastive_silence_loss = dynamic_loss == "contrastive_silence"
     pipeline_stage_defs = sorted((pipeline_stages or []), key=lambda s: int(s.get("start_epoch", 0)))
 
     base_awesome_loss_weight = awesome_loss_weight
@@ -818,7 +837,14 @@ def setup_auxiliary_losses(
 
     if vad_eval_mode == "auto":
         vad_eval_mode = (
-            "proxy" if (use_awesome_loss or use_pipeline_awesome_loss or use_contrastive_awesome_loss) else "off"
+            "proxy"
+            if (
+                use_awesome_loss
+                or use_pipeline_awesome_loss
+                or use_contrastive_awesome_loss
+                or use_contrastive_silence_loss
+            )
+            else "off"
         )
     vad_eval_enabled = vad_eval_mode != "off"
     silero_vad = None
@@ -847,6 +873,7 @@ def setup_auxiliary_losses(
         or use_awesome_loss
         or use_pipeline_awesome_loss
         or use_contrastive_awesome_loss
+        or use_contrastive_silence_loss
         or vad_eval_enabled
         or use_vad_train_reg
     )
@@ -866,6 +893,7 @@ def setup_auxiliary_losses(
         use_awesome_loss=use_awesome_loss,
         use_pipeline_awesome_loss=use_pipeline_awesome_loss,
         use_contrastive_awesome_loss=use_contrastive_awesome_loss,
+        use_contrastive_silence_loss=use_contrastive_silence_loss,
         use_vad_loss=use_vad_loss,
         use_vad_train_reg=use_vad_train_reg,
         use_mrstft_loss=use_mrstft_loss,

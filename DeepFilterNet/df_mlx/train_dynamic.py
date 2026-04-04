@@ -93,6 +93,7 @@ from df_mlx.training_helpers import (
 from df_mlx.training_losses import (
     _compute_awesome_losses,
     _compute_contrastive_awesome_losses,
+    _compute_contrastive_silence_losses,
     _compute_pipeline_awesome_losses,
     _compute_speech_band_logmag_loss,
     _compute_vad_loss,
@@ -295,7 +296,9 @@ def train(
     speech_gain_range: Tuple[float, float] | None = None,
     noise_gain_range: Tuple[float, float] | None = None,
     background_music_gain_range: Tuple[float, float] | None = None,
-    dynamic_loss: Literal["baseline", "awesome", "pipeline_awesome", "contrastive_awesome"] = "baseline",
+    dynamic_loss: Literal[
+        "baseline", "awesome", "pipeline_awesome", "contrastive_awesome", "contrastive_silence"
+    ] = "baseline",
     pipeline_stages: list[dict[str, Any]] | None = None,
     awesome_loss_weight: float = 0.4,
     awesome_mask_sharpness: float = 6.0,
@@ -311,6 +314,14 @@ def train(
     contrastive_interference_mask_max: float = 0.3,
     contrastive_quiet_weight: float = 0.5,
     contrastive_in_batch_negatives: bool = True,
+    contrastive_silence_frames_per_sample: int = 32,
+    contrastive_silence_mask_max: float = 0.3,
+    contrastive_silence_weight: float = 0.8,
+    contrastive_silence_asymmetric_penalty: float = 2.5,
+    contrastive_silence_transition_blend_low: float = 0.3,
+    contrastive_silence_transition_blend_high: float = 0.7,
+    contrastive_silence_low_freq_boost: float = 1.5,
+    contrastive_silence_high_freq_boost: float = 1.3,
     gan_enabled: bool = False,
     gan_start_epoch: int = 0,
     gan_ramp_epochs: int = 0,
@@ -420,7 +431,7 @@ def train(
         noise_gain_range: Optional override for noise gain range (dB)
         background_music_gain_range: Optional override for background-music source gain range (dB)
         dynamic_loss: Which dynamic loss to use ("baseline", "awesome", "pipeline_awesome",
-            or "contrastive_awesome")
+            "contrastive_awesome", or "contrastive_silence")
         pipeline_stages: Optional staged loss schedule with entries containing
             start_epoch and optional overrides for awesome_loss_weight,
             vad_loss_weight, and vad_speech_loss_weight.
@@ -438,6 +449,14 @@ def train(
         contrastive_interference_mask_max: Maximum mean speech mask for interference-frame mining
         contrastive_quiet_weight: Relative weight for interference-selected contrastive loss
         contrastive_in_batch_negatives: Use in-batch clean negatives for contrastive_awesome
+        contrastive_silence_frames_per_sample: Silence-heavy frames mined per sample
+        contrastive_silence_mask_max: Maximum mean speech mask for silence-frame mining
+        contrastive_silence_weight: Relative weight for silence suppression loss
+        contrastive_silence_asymmetric_penalty: Penalty multiplier for residual above clean
+        contrastive_silence_transition_blend_low: Soft VAD transition blend lower bound
+        contrastive_silence_transition_blend_high: Soft VAD transition blend upper bound
+        contrastive_silence_low_freq_boost: Frequency-band weight boost for low-freq hum
+        contrastive_silence_high_freq_boost: Frequency-band weight boost for high-freq hiss
         vad_proxy_enabled: Enable cheap VAD proxy gating for awesome loss
         vad_loss_weight: Weight for VAD speech-preservation loss
         vad_threshold: VAD probability threshold for speech gating
@@ -586,6 +605,7 @@ def train(
     use_awesome_loss = _aux.use_awesome_loss
     use_pipeline_awesome_loss = _aux.use_pipeline_awesome_loss
     use_contrastive_awesome_loss = _aux.use_contrastive_awesome_loss
+    use_contrastive_silence_loss = _aux.use_contrastive_silence_loss
     pipeline_stage_defs = _aux.pipeline_stage_defs
     base_awesome_loss_weight = _aux.base_awesome_loss_weight
     base_vad_loss_weight = _aux.base_vad_loss_weight
@@ -617,6 +637,10 @@ def train(
         base_awesome_loss_weight = contrastive_loss_weight
         pipeline_stage_defs = []
 
+    if use_contrastive_silence_loss:
+        base_awesome_loss_weight = contrastive_loss_weight
+        pipeline_stage_defs = []
+
     contrastive_cfg = SimpleNamespace(
         loss_weight=contrastive_loss_weight,
         warmup_steps=contrastive_warmup_steps,
@@ -629,6 +653,17 @@ def train(
         interference_mask_max=contrastive_interference_mask_max,
         quiet_weight=contrastive_quiet_weight,
         in_batch_negatives=contrastive_in_batch_negatives,
+    )
+
+    contrastive_silence_cfg = SimpleNamespace(
+        silence_frames_per_sample=contrastive_silence_frames_per_sample,
+        silence_mask_max=contrastive_silence_mask_max,
+        silence_weight=contrastive_silence_weight,
+        asymmetric_penalty=contrastive_silence_asymmetric_penalty,
+        transition_blend_low=contrastive_silence_transition_blend_low,
+        transition_blend_high=contrastive_silence_transition_blend_high,
+        low_freq_boost=contrastive_silence_low_freq_boost,
+        high_freq_boost=contrastive_silence_high_freq_boost,
     )
 
     min_lr = learning_rate_min if learning_rate_min is not None else learning_rate * 0.01
@@ -647,6 +682,7 @@ def train(
         awesome_mask_sharpness=awesome_mask_sharpness,
         awesome_warmup_steps=awesome_warmup_steps,
         contrastive_cfg=contrastive_cfg,
+        contrastive_silence_cfg=contrastive_silence_cfg,
         vad_proxy_enabled=vad_proxy_enabled,
         gan_enabled=gan_enabled,
         gan_adv_weight=gan_adv_weight,
@@ -731,6 +767,14 @@ def train(
         contrastive_interference_mask_max=contrastive_interference_mask_max,
         contrastive_quiet_weight=contrastive_quiet_weight,
         contrastive_in_batch_negatives=contrastive_in_batch_negatives,
+        contrastive_silence_frames_per_sample=contrastive_silence_frames_per_sample,
+        contrastive_silence_mask_max=contrastive_silence_mask_max,
+        contrastive_silence_weight=contrastive_silence_weight,
+        contrastive_silence_asymmetric_penalty=contrastive_silence_asymmetric_penalty,
+        contrastive_silence_transition_blend_low=contrastive_silence_transition_blend_low,
+        contrastive_silence_transition_blend_high=contrastive_silence_transition_blend_high,
+        contrastive_silence_low_freq_boost=contrastive_silence_low_freq_boost,
+        contrastive_silence_high_freq_boost=contrastive_silence_high_freq_boost,
         vad_proxy_enabled=vad_proxy_enabled,
         gan_enabled=gan_enabled,
         gan_start_epoch=gan_start_epoch,
@@ -832,8 +876,12 @@ def train(
     model = init_model(
         config=model_config,
         variant=model_variant,
-        contrastive_hidden_dim=(contrastive_hidden_dim if use_contrastive_awesome_loss else None),
-        contrastive_embedding_dim=(contrastive_embedding_dim if use_contrastive_awesome_loss else None),
+        contrastive_hidden_dim=(
+            contrastive_hidden_dim if (use_contrastive_awesome_loss or use_contrastive_silence_loss) else None
+        ),
+        contrastive_embedding_dim=(
+            contrastive_embedding_dim if (use_contrastive_awesome_loss or use_contrastive_silence_loss) else None
+        ),
     )
     num_params = count_parameters(model)
     print(f"  Parameters: {num_params:,}")
@@ -862,7 +910,9 @@ def train(
     warmup_steps = warmup_epochs * optimizer_steps_per_epoch
     vad_warmup_steps = vad_warmup_epochs * optimizer_steps_per_epoch if use_vad_loss else 0
     awesome_warmup_steps = max(int(awesome_warmup_steps), 0) if (use_awesome_loss or use_pipeline_awesome_loss) else 0
-    contrastive_warmup_steps = max(int(contrastive_warmup_steps), 0) if use_contrastive_awesome_loss else 0
+    contrastive_warmup_steps = (
+        max(int(contrastive_warmup_steps), 0) if (use_contrastive_awesome_loss or use_contrastive_silence_loss) else 0
+    )
 
     schedule = WarmupCosineSchedule(
         base_lr=learning_rate,
@@ -1074,6 +1124,43 @@ def train(
                 interference_mask_max=contrastive_interference_mask_max,
                 quiet_weight=contrastive_quiet_weight,
                 in_batch_negatives=contrastive_in_batch_negatives,
+            )
+            total_loss = total_loss + awesome_weight * contrastive_loss
+
+        if use_contrastive_silence_loss:
+            contrastive_loss, _, _, _, _, _, _, _, _, _, _, _, _, _, _ = _compute_contrastive_silence_losses(
+                noisy_real,
+                noisy_imag,
+                clean_real,
+                clean_imag,
+                interference_real,
+                interference_imag,
+                spec_out[0],
+                spec_out[1],
+                snr,
+                vad_band_mask,
+                vad_band_bins,
+                awesome_mask_sharpness,
+                vad_z_threshold,
+                vad_z_slope,
+                vad_snr_gate_db,
+                vad_snr_gate_width,
+                vad_proxy_enabled,
+                getattr(model, "contrastive_projector", None),
+                temperature=contrastive_temperature,
+                speech_frames_per_sample=contrastive_speech_frames_per_sample,
+                speech_mask_min=contrastive_speech_mask_min,
+                in_batch_negatives=contrastive_in_batch_negatives,
+                silence_frames_per_sample=contrastive_silence_frames_per_sample,
+                silence_mask_max=contrastive_silence_mask_max,
+                silence_weight=contrastive_silence_weight,
+                asymmetric_penalty=contrastive_silence_asymmetric_penalty,
+                transition_blend_low=contrastive_silence_transition_blend_low,
+                transition_blend_high=contrastive_silence_transition_blend_high,
+                low_freq_boost=contrastive_silence_low_freq_boost,
+                high_freq_boost=contrastive_silence_high_freq_boost,
+                sr=config.sample_rate,
+                fft_size=config.fft_size,
             )
             total_loss = total_loss + awesome_weight * contrastive_loss
 
@@ -1308,6 +1395,43 @@ def train(
                 )
                 total_loss = total_loss + awesome_weight * contrastive_loss
 
+            if use_contrastive_silence_loss:
+                contrastive_loss, _, _, _, _, _, _, _, _, _, _, _, _, _, _ = _compute_contrastive_silence_losses(
+                    noisy_real,
+                    noisy_imag,
+                    clean_real,
+                    clean_imag,
+                    interference_real,
+                    interference_imag,
+                    spec_out[0],
+                    spec_out[1],
+                    snr,
+                    vad_band_mask,
+                    vad_band_bins,
+                    awesome_mask_sharpness,
+                    vad_z_threshold,
+                    vad_z_slope,
+                    vad_snr_gate_db,
+                    vad_snr_gate_width,
+                    vad_proxy_enabled,
+                    getattr(model, "contrastive_projector", None),
+                    temperature=contrastive_temperature,
+                    speech_frames_per_sample=contrastive_speech_frames_per_sample,
+                    speech_mask_min=contrastive_speech_mask_min,
+                    in_batch_negatives=contrastive_in_batch_negatives,
+                    silence_frames_per_sample=contrastive_silence_frames_per_sample,
+                    silence_mask_max=contrastive_silence_mask_max,
+                    silence_weight=contrastive_silence_weight,
+                    asymmetric_penalty=contrastive_silence_asymmetric_penalty,
+                    transition_blend_low=contrastive_silence_transition_blend_low,
+                    transition_blend_high=contrastive_silence_transition_blend_high,
+                    low_freq_boost=contrastive_silence_low_freq_boost,
+                    high_freq_boost=contrastive_silence_high_freq_boost,
+                    sr=config.sample_rate,
+                    fft_size=config.fft_size,
+                )
+                total_loss = total_loss + awesome_weight * contrastive_loss
+
             if use_vad_loss:
                 vad_loss, p_ref, _, gate = _compute_vad_loss(
                     clean_real,
@@ -1390,6 +1514,7 @@ def train(
         use_awesome_loss=use_awesome_loss,
         use_pipeline_awesome_loss=use_pipeline_awesome_loss,
         use_contrastive_awesome_loss=use_contrastive_awesome_loss,
+        use_contrastive_silence_loss=use_contrastive_silence_loss,
         vad_band_mask=vad_band_mask,
         vad_band_bins=vad_band_bins,
         awesome_mask_sharpness=awesome_mask_sharpness,
@@ -1405,6 +1530,14 @@ def train(
         contrastive_interference_mask_max=contrastive_interference_mask_max,
         contrastive_quiet_weight=contrastive_quiet_weight,
         contrastive_in_batch_negatives=contrastive_in_batch_negatives,
+        contrastive_silence_frames_per_sample=contrastive_silence_frames_per_sample,
+        contrastive_silence_mask_max=contrastive_silence_mask_max,
+        contrastive_silence_weight=contrastive_silence_weight,
+        contrastive_silence_asymmetric_penalty=contrastive_silence_asymmetric_penalty,
+        contrastive_silence_transition_blend_low=contrastive_silence_transition_blend_low,
+        contrastive_silence_transition_blend_high=contrastive_silence_transition_blend_high,
+        contrastive_silence_low_freq_boost=contrastive_silence_low_freq_boost,
+        contrastive_silence_high_freq_boost=contrastive_silence_high_freq_boost,
         use_vad_loss=use_vad_loss,
         vad_threshold=vad_threshold,
         vad_margin=vad_margin,
@@ -1828,6 +1961,7 @@ def train(
         use_awesome_loss=use_awesome_loss,
         use_pipeline_awesome_loss=use_pipeline_awesome_loss,
         use_contrastive_awesome_loss=use_contrastive_awesome_loss,
+        use_contrastive_silence_loss=use_contrastive_silence_loss,
         use_vad_loss=use_vad_loss,
         use_vad_train_reg=use_vad_train_reg,
         use_mrstft_loss=use_mrstft_loss,
@@ -1933,7 +2067,9 @@ def train(
             "vad_loss_weight": loop_state.epoch_vad_loss_weight,
             "vad_speech_loss_weight": loop_state.epoch_vad_speech_loss_weight,
         }
-        aux_weight_label = "contrastive_w" if use_contrastive_awesome_loss else "awesome_w"
+        aux_weight_label = (
+            "contrastive_w" if (use_contrastive_awesome_loss or use_contrastive_silence_loss) else "awesome_w"
+        )
         print(
             "  Stage "
             f"{loop_state.active_stage_index} ({loop_state.active_stage_name}) | "
@@ -2268,7 +2404,7 @@ def train(
                 _prev_speech_w_mx = mx.array(speech_weight, dtype=mx.float32)
             speech_weight_mx = _prev_speech_w_mx
             awesome_frac = 1.0
-            if use_contrastive_awesome_loss and contrastive_warmup_steps > 0:
+            if (use_contrastive_awesome_loss or use_contrastive_silence_loss) and contrastive_warmup_steps > 0:
                 awesome_frac = min(1.0, loop_state.global_step / max(contrastive_warmup_steps, 1))
             elif (use_awesome_loss or use_pipeline_awesome_loss) and awesome_warmup_steps > 0:
                 awesome_frac = min(1.0, loop_state.global_step / max(awesome_warmup_steps, 1))
@@ -2321,7 +2457,7 @@ def train(
                     check_dtype=use_fp16,
                     expected_dtype=mx.bfloat16 if use_fp16 else mx.float32,
                 )
-                if use_contrastive_awesome_loss:
+                if use_contrastive_awesome_loss or use_contrastive_silence_loss:
                     _assert_compile_boundary_shapes(
                         interference_real,
                         clean_real,
@@ -2774,6 +2910,7 @@ def train(
                     use_awesome_loss=use_awesome_loss,
                     use_pipeline_awesome_loss=use_pipeline_awesome_loss,
                     use_contrastive_awesome_loss=use_contrastive_awesome_loss,
+                    use_contrastive_silence_loss=use_contrastive_silence_loss,
                     use_vad_train_reg=use_vad_train_reg,
                     use_fp16=use_fp16,
                     gan_active=gan_active,
@@ -2812,6 +2949,14 @@ def train(
                     contrastive_interference_mask_max=contrastive_interference_mask_max,
                     contrastive_quiet_weight=contrastive_quiet_weight,
                     contrastive_in_batch_negatives=contrastive_in_batch_negatives,
+                    contrastive_silence_frames_per_sample=contrastive_silence_frames_per_sample,
+                    contrastive_silence_mask_max=contrastive_silence_mask_max,
+                    contrastive_silence_weight=contrastive_silence_weight,
+                    contrastive_silence_asymmetric_penalty=contrastive_silence_asymmetric_penalty,
+                    contrastive_silence_transition_blend_low=contrastive_silence_transition_blend_low,
+                    contrastive_silence_transition_blend_high=contrastive_silence_transition_blend_high,
+                    contrastive_silence_low_freq_boost=contrastive_silence_low_freq_boost,
+                    contrastive_silence_high_freq_boost=contrastive_silence_high_freq_boost,
                     debugger=debugger,
                     debug_ctx=debug_ctx,
                     accums=_epoch_accums,
@@ -2836,6 +2981,7 @@ def train(
                     use_awesome_loss=use_awesome_loss,
                     use_pipeline_awesome_loss=use_pipeline_awesome_loss,
                     use_contrastive_awesome_loss=use_contrastive_awesome_loss,
+                    use_contrastive_silence_loss=use_contrastive_silence_loss,
                     use_vad_train_reg=use_vad_train_reg,
                     gan_active=gan_active,
                 )
@@ -3015,6 +3161,7 @@ def train(
             use_awesome_loss=use_awesome_loss,
             use_pipeline_awesome_loss=use_pipeline_awesome_loss,
             use_contrastive_awesome_loss=use_contrastive_awesome_loss,
+            use_contrastive_silence_loss=use_contrastive_silence_loss,
             use_mrstft_loss=use_mrstft_loss,
             use_vad_train_reg=use_vad_train_reg,
             gan_enabled=gan_enabled,
