@@ -285,14 +285,15 @@ def collect_sync_metrics(
     # ------------------------------------------------------------------
     # Compute model output for any metric block that needs it.
     # ------------------------------------------------------------------
-    needs_model_out = not loss_was_nonfinite and (
+    needs_model_out = emit_detailed_metrics and not loss_was_nonfinite and (
         use_vad_loss
         or use_awesome_loss
         or use_pipeline_awesome_loss
         or use_contrastive_awesome_loss
         or use_contrastive_silence_loss
         or use_vad_train_reg
-        or (emit_detailed_metrics and (use_mrstft_loss or gan_active))
+        or use_mrstft_loss
+        or gan_active
     )
     out: tuple[mx.array, mx.array] | None = None
     spec_out: tuple[mx.array, mx.array] | None = None

@@ -3176,6 +3176,7 @@ def train(
             gan_fm_weight=gan_fm_weight,
             verbose=verbose,
             debug_numerics=debug_numerics,
+            emit_detailed_metrics=emit_detailed_metrics,
             num_debug_logs=_epoch_accums["num_debug_logs"],
             train_mask_clip_rate=_epoch_accums["mask_clip_rate"],
             train_eps_clean_rate=_epoch_accums["eps_clean_rate"],

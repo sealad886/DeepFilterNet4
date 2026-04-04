@@ -490,6 +490,7 @@ def print_epoch_summary(
     gan_fm_weight: float,
     verbose: bool,
     debug_numerics: bool,
+    emit_detailed_metrics: bool = True,
     num_debug_logs: int = 0,
     train_mask_clip_rate: float = 0.0,
     train_eps_clean_rate: float = 0.0,
@@ -513,7 +514,7 @@ def print_epoch_summary(
 
     improvement_marker = "★" if avg_valid_loss <= best_valid_loss else ""
     loss_summary = ""
-    if (
+    if emit_detailed_metrics and (
         use_vad_loss
         or use_awesome_loss
         or use_pipeline_awesome_loss
@@ -577,12 +578,12 @@ def print_epoch_summary(
         f"{epoch_time:.1f}s"
     )
 
-    if use_vad_loss and verbose:
+    if emit_detailed_metrics and use_vad_loss and verbose:
         print(
             f"  VAD stats: p_ref={epoch_avgs['p_ref']:.2f} | "
             f"p_out={epoch_avgs['p_out']:.2f} | gate={epoch_avgs['gate']:.0f}%"
         )
-    if (use_awesome_loss or use_pipeline_awesome_loss or _any_contrastive) and verbose:
+    if emit_detailed_metrics and (use_awesome_loss or use_pipeline_awesome_loss or _any_contrastive) and verbose:
         print(
             "  Awesome stats: "
             f"mask={epoch_avgs['mask_mean']:.2f} "
@@ -594,7 +595,7 @@ def print_epoch_summary(
             f"e_boost={epoch_avgs['energy_boost']:.2f} "
             f"snr_boost={epoch_avgs['snr_boost']:.2f}"
         )
-    if debug_numerics:
+    if emit_detailed_metrics and debug_numerics:
         parts: list[str] = []
         if (use_awesome_loss or use_pipeline_awesome_loss or _any_contrastive) and num_debug_logs > 0:
             avg_mask_clip = train_mask_clip_rate / num_debug_logs

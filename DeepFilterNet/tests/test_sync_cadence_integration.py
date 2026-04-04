@@ -78,6 +78,9 @@ class TestFastModeSuppression:
         assert "loss_val = float(loss)" in TRAIN_SOURCE
         assert "samples_per_sec" in TRAIN_SOURCE
 
+    def test_epoch_summary_receives_emit_flag(self) -> None:
+        assert "emit_detailed_metrics=emit_detailed_metrics" in TRAIN_SOURCE
+
 
 # ---------------------------------------------------------------------------
 # 3. Debug mode: per-step grad norm logging
