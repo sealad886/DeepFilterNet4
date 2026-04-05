@@ -1,5 +1,9 @@
 # Repository Guidelines
 
+**Generated:** 2026-04-05
+**Commit:** 387b666
+**Branch:** feat/background-music-dataset
+
 ## ⚠️ CRITICAL: Repository Identity
 - **This is sealad886/DeepFilterNet4** — a standalone fork
 - **There is NO upstream repository relationship**
@@ -24,12 +28,47 @@ instead of the repo-managed shims.
 For full workflow details: `bd prime`
 
 ## Project Structure & Module Organization
+
+**Workspace structure:** Root-level monorepo with 6 Rust crates + 1 Python package
 - `DeepFilterNet/` is the main Python package (training, inference, configs, scripts). Core code lives in `DeepFilterNet/df/`.
 - `DeepFilterNet/tests/` contains Python tests (pytest).
 - `libDF/` and `ladspa/` host Rust crates for DSP/runtime and the LADSPA plugin.
 - `models/` stores packaged pretrained model archives.
 - `docs/`, `assets/`, and `demo/` contain documentation, media, and the demo app.
 - `pyDF/` and `pyDF-data/` provide Python bindings and data loading utilities.
+
+## WHERE TO LOOK
+| Task | Location | Notes |
+|------|----------|-------|
+| MLX training/inference | `DeepFilterNet/df_mlx/` | **Active dev path** — native Apple Silicon |
+| Core Python models | `DeepFilterNet/df/` | Legacy PyTorch implementation |
+| DSP/Rust runtime | `libDF/src/` | STFT, ISTFT, data loading |
+| LADSPA plugin | `ladspa/src/` | Real-time noise suppression |
+| Python bindings | `pyDF/` | `maturin develop` for rebuild |
+| Data loader bindings | `pyDF-data/` | Requires HDF5 headers |
+| Training scripts | `DeepFilterNet/df/scripts/` | Legacy train.py, prepare_data.py |
+| Test data handling | `scripts/datasets/` | Dataset creation utilities |
+
+## CONVENTIONS
+- Python: Black (`line-length = 120`), isort, Pyright type checking
+- Rust: `cargo fmt` (follows `rustfmt.toml`)
+- Commit messages: Conventional Commits (`feat(whisper): ...`)
+- Tests: pytest, `test_*.py` files, `mps` marker for Apple Silicon
+- **MUST use Beads for non-trivial work** (`bd prime`, issue tracking)
+- **MUST push before handoff** (mandatory closeout)
+
+## ANTI-PATTERNS (THIS PROJECT)
+- **NEVER** create PRs to `Rikorose/DeepFilterNet` — this is a standalone fork
+- **NEVER** use `bd sync` — use `bd dolt ...` commands instead
+- **NEVER** stop before pushing — work is NOT complete until `git push` succeeds
+- **NEVER** assume PyTorch backend for training — MLX is primary for Apple Silicon
+- **NEVER** skip quality gates (tests, linters) before committing
+
+## UNIQUE STYLES
+- Dual config system: legacy `.ini` + new TOML `run_config.toml` for df_mlx
+- Hardware presets for MLX: `entry`, `pro`, `max`, `ultra`, `debug`
+- VAD head with soft gating in df_mlx for speech-aware enhancement
+- Beads hook shims in `.githooks/` (not upstream-managed)
 
 ## Build, Test, and Development Commands
 - `python3 -m pip install -e ./DeepFilterNet[train,eval]` — install the DeepFilterNet package plus training/eval deps in the active environment.

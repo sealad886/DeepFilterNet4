@@ -208,14 +208,14 @@ def test_compiled_grad_accumulation_uses_compiled_loss_and_grad_path():
     source = (Path(__file__).resolve().parents[1] / "df_mlx" / "train_dynamic.py").read_text()
     assert "def compiled_loss_and_grad_step(" in source
     assert "if grad_accumulation_steps > 1:" in source
-    assert "loss, model_out, cached_out_wav, cached_clean_wav, grads = (" in source
-    assert "active_compiled_lag(" in source
+    assert "loss, model_out, cached_out_wav, cached_clean_wav, grads = active_compiled_lag(" in source
 
 
 def test_train_loop_uses_cumulative_completed_micro_batches_after_resume():
     source = (Path(__file__).resolve().parents[1] / "df_mlx" / "train_dynamic.py").read_text()
-    assert "epoch_micro_batches_completed = completed_micro_batches(" in source
-    assert "resume_batches_for_epoch, num_train_batches" in source
+    assert (
+        "epoch_micro_batches_completed = completed_micro_batches(resume_batches_for_epoch, num_train_batches)" in source
+    )
     assert "batch_idx=epoch_micro_batches_completed" in source
 
 
