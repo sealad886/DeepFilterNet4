@@ -98,6 +98,7 @@ from df_mlx.training_losses import (
     _compute_speech_band_logmag_loss,
     _compute_vad_loss,
     _compute_vad_reg_loss,
+    _z_score_clean_energy,
 )
 from df_mlx.training_metrics import (
     collect_sync_metrics,
@@ -297,7 +298,11 @@ def train(
     noise_gain_range: Tuple[float, float] | None = None,
     background_music_gain_range: Tuple[float, float] | None = None,
     dynamic_loss: Literal[
-        "baseline", "awesome", "pipeline_awesome", "contrastive_awesome", "contrastive_silence"
+        "baseline",
+        "awesome",
+        "pipeline_awesome",
+        "contrastive_awesome",
+        "contrastive_silence",
     ] = "baseline",
     pipeline_stages: list[dict[str, Any]] | None = None,
     awesome_loss_weight: float = 0.4,
@@ -1057,6 +1062,26 @@ def train(
                 fm_loss = feature_match_loss(real_feats, fake_feats)
                 total_loss = total_loss + fm_weight * fm_loss
 
+        # Precompute z-scored clean energy ONCE for all loss functions that need it
+        # This avoids redundant computation across awesome, pipeline_awesome, contrastive, and VAD losses
+        precomputed_z = None
+        if (
+            use_awesome_loss
+            or use_pipeline_awesome_loss
+            or use_contrastive_awesome_loss
+            or use_contrastive_silence_loss
+            or use_vad_loss
+        ):
+            precomputed_z = _z_score_clean_energy(
+                clean_real,
+                clean_imag,
+                vad_band_mask,
+                vad_band_bins,
+                vad_z_threshold,
+                vad_z_slope,
+                _EPS,
+            )
+
         if use_awesome_loss:
             awesome_loss, _, _, _, _, _, _, _, _, _, _, _ = _compute_awesome_losses(
                 noisy_real,
@@ -1074,6 +1099,7 @@ def train(
                 vad_snr_gate_db,
                 vad_snr_gate_width,
                 vad_proxy_enabled,
+                _precomputed_z=precomputed_z,
             )
             total_loss = total_loss + awesome_weight * awesome_loss
 
@@ -1094,6 +1120,7 @@ def train(
                 vad_snr_gate_db,
                 vad_snr_gate_width,
                 vad_proxy_enabled,
+                _precomputed_z=precomputed_z,
             )
             total_loss = total_loss + awesome_weight * pipeline_loss
 
@@ -1124,6 +1151,7 @@ def train(
                 interference_mask_max=contrastive_interference_mask_max,
                 quiet_weight=contrastive_quiet_weight,
                 in_batch_negatives=contrastive_in_batch_negatives,
+                _precomputed_z=precomputed_z,
             )
             total_loss = total_loss + awesome_weight * contrastive_loss
 
@@ -1161,6 +1189,7 @@ def train(
                 high_freq_boost=contrastive_silence_high_freq_boost,
                 sr=config.sample_rate,
                 fft_size=config.fft_size,
+                _precomputed_z=precomputed_z,
             )
             total_loss = total_loss + awesome_weight * contrastive_loss
 
@@ -1179,6 +1208,7 @@ def train(
                 vad_snr_gate_width,
                 vad_z_threshold,
                 vad_z_slope,
+                _precomputed_z=precomputed_z,
             )
             # IMPORTANT: avoid Python control flow on runtime weight tensors in
             # compiled paths. speech_weight may be an mx.array scalar, and
@@ -1281,6 +1311,24 @@ def train(
             spec_loss = spectral_loss(spec_out, target_spec)
             total_loss = spec_loss
 
+            precomputed_z = None
+            if (
+                use_awesome_loss
+                or use_pipeline_awesome_loss
+                or use_contrastive_awesome_loss
+                or use_contrastive_silence_loss
+                or use_vad_loss
+            ):
+                precomputed_z = _z_score_clean_energy(
+                    clean_real,
+                    clean_imag,
+                    vad_band_mask,
+                    vad_band_bins,
+                    vad_z_threshold,
+                    vad_z_slope,
+                    _EPS,
+                )
+
             out_wav = None
             clean_wav = None
             # GAN always active: always compute waveforms
@@ -1342,6 +1390,7 @@ def train(
                     vad_snr_gate_db,
                     vad_snr_gate_width,
                     vad_proxy_enabled,
+                    _precomputed_z=precomputed_z,
                 )
                 total_loss = total_loss + awesome_weight * awesome_loss
 
@@ -1362,6 +1411,7 @@ def train(
                     vad_snr_gate_db,
                     vad_snr_gate_width,
                     vad_proxy_enabled,
+                    _precomputed_z=precomputed_z,
                 )
                 total_loss = total_loss + awesome_weight * pipeline_loss
 
@@ -1392,6 +1442,7 @@ def train(
                     interference_mask_max=contrastive_interference_mask_max,
                     quiet_weight=contrastive_quiet_weight,
                     in_batch_negatives=contrastive_in_batch_negatives,
+                    _precomputed_z=precomputed_z,
                 )
                 total_loss = total_loss + awesome_weight * contrastive_loss
 
@@ -1429,6 +1480,7 @@ def train(
                     high_freq_boost=contrastive_silence_high_freq_boost,
                     sr=config.sample_rate,
                     fft_size=config.fft_size,
+                    _precomputed_z=precomputed_z,
                 )
                 total_loss = total_loss + awesome_weight * contrastive_loss
 
@@ -1447,6 +1499,7 @@ def train(
                     vad_snr_gate_width,
                     vad_z_threshold,
                     vad_z_slope,
+                    _precomputed_z=precomputed_z,
                 )
                 # IMPORTANT: avoid Python control flow on runtime weight tensors
                 # in compiled paths (see loss_fn comment above).
@@ -2129,7 +2182,10 @@ def train(
             if epoch < music_start_epoch:
                 cur_p_music = 0.0
             elif music_ramp_epochs > 0:
-                cur_p_music = min(target_p_music, target_p_music * (epoch - music_start_epoch + 1) / music_ramp_epochs)
+                cur_p_music = min(
+                    target_p_music,
+                    target_p_music * (epoch - music_start_epoch + 1) / music_ramp_epochs,
+                )
             else:
                 cur_p_music = target_p_music
             dataset.config.p_background_music = cur_p_music

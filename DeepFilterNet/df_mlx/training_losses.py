@@ -81,6 +81,7 @@ __all__ = [
     "_compute_vad_reg_loss",
     "_log1p_mag",
     "_snr_bucket_name",
+    "_z_score_clean_energy",
 ]
 
 # =============================================================================
@@ -208,7 +209,13 @@ def _compute_vad_probs(
         _, clean_band, log_clean, z_ref_raw, z_ref, p_ref = _precomputed_z
     else:
         _, clean_band, log_clean, z_ref_raw, z_ref, p_ref = _z_score_clean_energy(
-            clean_real, clean_imag, band_mask, band_bins, vad_z_threshold, vad_z_slope, eps
+            clean_real,
+            clean_imag,
+            band_mask,
+            band_bins,
+            vad_z_threshold,
+            vad_z_slope,
+            eps,
         )
 
     out_power = out_real**2 + out_imag**2
@@ -250,6 +257,7 @@ def _compute_vad_loss(
     vad_z_slope: float,
     debug: NumericDebugger | None = None,
     debug_ctx: dict[str, Any] | None = None,
+    _precomputed_z: tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array] | None = None,
 ) -> tuple[mx.array, mx.array, mx.array, mx.array]:
     """Compute soft VAD loss and diagnostics.
 
@@ -266,6 +274,7 @@ def _compute_vad_loss(
         vad_z_slope,
         debug=debug,
         debug_ctx=debug_ctx,
+        _precomputed_z=_precomputed_z,
     )
 
     speech_gate = mx.clip((p_ref - vad_threshold) / (1.0 - vad_threshold + _EPS), 0.0, 1.0)
@@ -502,7 +511,15 @@ def _compute_proxy_gates(
         debug.check("proxy.energy_boost", energy_boost, debug_ctx)
         debug.check("proxy.snr_boost", snr_boost, debug_ctx)
         debug.check("proxy.frame", proxy_frame, debug_ctx)
-    return proxy_frame, speech_ratio, music_gate, musicness, mod_energy, energy_boost, snr_boost
+    return (
+        proxy_frame,
+        speech_ratio,
+        music_gate,
+        musicness,
+        mod_energy,
+        energy_boost,
+        snr_boost,
+    )
 
 
 def _compute_awesome_teacher_signals(
@@ -522,12 +539,30 @@ def _compute_awesome_teacher_signals(
     eps: float = _EPS,
     debug: NumericDebugger | None = None,
     debug_ctx: dict[str, Any] | None = None,
-) -> tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array, mx.array, mx.array, mx.array]:
+    _assume_float32: bool = False,
+    _precomputed_z: tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array] | None = None,
+) -> tuple[
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+]:
     """Return the stop-gradient teacher signals used by awesome-family losses."""
-    clean_real_f32 = clean_real.astype(mx.float32) if clean_real.dtype != mx.float32 else clean_real
-    clean_imag_f32 = clean_imag.astype(mx.float32) if clean_imag.dtype != mx.float32 else clean_imag
-    noisy_real_f32 = noisy_real.astype(mx.float32) if noisy_real.dtype != mx.float32 else noisy_real
-    noisy_imag_f32 = noisy_imag.astype(mx.float32) if noisy_imag.dtype != mx.float32 else noisy_imag
+    if not _assume_float32:
+        clean_real_f32 = clean_real.astype(mx.float32) if clean_real.dtype != mx.float32 else clean_real
+        clean_imag_f32 = clean_imag.astype(mx.float32) if clean_imag.dtype != mx.float32 else clean_imag
+        noisy_real_f32 = noisy_real.astype(mx.float32) if noisy_real.dtype != mx.float32 else noisy_real
+        noisy_imag_f32 = noisy_imag.astype(mx.float32) if noisy_imag.dtype != mx.float32 else noisy_imag
+    else:
+        clean_real_f32 = clean_real
+        clean_imag_f32 = clean_imag
+        noisy_real_f32 = noisy_real
+        noisy_imag_f32 = noisy_imag
 
     clean_log = _log1p_mag(clean_real_f32, clean_imag_f32, eps=_MAG_EPS, _assume_float32=True)
     noise_real = noisy_real_f32 - clean_real_f32
@@ -573,6 +608,7 @@ def _compute_awesome_teacher_signals(
         noise_real=noise_real,
         noise_imag=noise_imag,
         _assume_float32=True,
+        _precomputed_z=_precomputed_z,
     )
 
     return (
@@ -608,6 +644,8 @@ def _compute_awesome_losses(
     eps: float = _EPS,
     debug: NumericDebugger | None = None,
     debug_ctx: dict[str, Any] | None = None,
+    _assume_float32: bool = False,
+    _precomputed_z: tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array] | None = None,
 ) -> tuple[
     mx.array,
     mx.array,
@@ -622,7 +660,13 @@ def _compute_awesome_losses(
     mx.array,
     mx.array,
 ]:
-    """Compute awesome loss components and diagnostic gates."""
+    """Compute awesome loss components and diagnostic gates.
+
+    Args:
+        _assume_float32: When True, skip dtype checks — caller guarantees FP32 inputs.
+        _precomputed_z: Optional tuple from ``_z_score_clean_energy`` to skip
+            redundant clean-signal z-scoring in teacher signal computation.
+    """
     # Cast all inputs to FP32 once at function entry (avoids redundant casts downstream)
     out_real_f32 = out_real.astype(mx.float32) if out_real.dtype != mx.float32 else out_real
     out_imag_f32 = out_imag.astype(mx.float32) if out_imag.dtype != mx.float32 else out_imag
@@ -656,6 +700,8 @@ def _compute_awesome_losses(
         eps=eps,
         debug=debug,
         debug_ctx=debug_ctx,
+        _assume_float32=_assume_float32,
+        _precomputed_z=_precomputed_z,
     )
 
     proxy_frame = proxy_frame[:, :, None]
@@ -822,6 +868,7 @@ def _compute_contrastive_awesome_losses(
     eps: float = _EPS,
     debug: NumericDebugger | None = None,
     debug_ctx: dict[str, Any] | None = None,
+    _precomputed_z: tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array] | None = None,
 ) -> tuple[
     mx.array,
     mx.array,
@@ -1055,6 +1102,7 @@ def _compute_contrastive_silence_losses(
     eps: float = _EPS,
     debug: NumericDebugger | None = None,
     debug_ctx: dict[str, Any] | None = None,
+    _precomputed_z: tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array] | None = None,
 ) -> tuple[
     mx.array,  # total_loss
     mx.array,  # speech_contrastive_loss
@@ -1392,6 +1440,7 @@ def _compute_pipeline_awesome_losses(
     eps: float = _EPS,
     debug: NumericDebugger | None = None,
     debug_ctx: dict[str, Any] | None = None,
+    _precomputed_z: tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array] | None = None,
 ) -> tuple[
     mx.array,  # total loss
     mx.array,  # speech loss
@@ -1458,25 +1507,22 @@ def _compute_pipeline_awesome_losses(
         debug.check("pipeline.raw_mask", raw_mask, debug_ctx)
         debug.check("pipeline.mask", mask, debug_ctx)
 
-    # Reuse pre-cast FP32 values for proxy gates (no duplicate casts)
-    clean_band, log_clean = band_energy(clean_real_f32, clean_imag_f32, band_mask, band_bins, eps)
+    if _precomputed_z is not None:
+        _, clean_band, log_clean, z_ref_raw, z_ref, p_ref = _precomputed_z
+    else:
+        clean_band, log_clean = band_energy(clean_real_f32, clean_imag_f32, band_mask, band_bins, eps)
+        mu = mx.mean(log_clean, axis=1, keepdims=True)
+        variance = mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True)
+        sigma = mx.sqrt(mx.maximum(variance, _MIN_VARIANCE) + eps)
+        z_ref_raw = (log_clean - mu) / (sigma + eps)
+        z_ref = mx.clip(z_ref_raw, -_VAD_LOGIT_CLAMP, _VAD_LOGIT_CLAMP)
+        z_slope = max(vad_z_slope, 1e-3)
+        p_ref = mx.sigmoid((z_ref - vad_z_threshold) / z_slope)
+
     # Noise still needs the standard path (different inputs, only used for ratio)
     noise_power = noise_real**2 + noise_imag**2
     noise_band = mx.sum(noise_power * band_mask, axis=-1) / (band_bins + eps)
     speech_ratio = clean_band / (clean_band + noise_band + eps)
-
-    # Z-scored log energy for VAD proxy
-    # Edge case handling: if variance is near-zero (silence), use neutral z-scores
-    mu = mx.mean(log_clean, axis=1, keepdims=True)
-    variance = mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True)
-    # Use a minimum variance threshold to avoid division instability on silence
-    sigma = mx.sqrt(mx.maximum(variance, _MIN_VARIANCE) + eps)
-    # When variance is too low, z-scores become unreliable; clamp them
-    z_ref_raw = (log_clean - mu) / (sigma + eps)
-    z_ref = mx.clip(z_ref_raw, -_VAD_LOGIT_CLAMP, _VAD_LOGIT_CLAMP)
-
-    z_slope = max(vad_z_slope, 1e-3)
-    p_ref = mx.sigmoid((z_ref - vad_z_threshold) / z_slope)
 
     # Modulation proxy
     # Edge case: with single frame, no modulation can be computed
