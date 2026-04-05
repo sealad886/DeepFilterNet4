@@ -799,20 +799,6 @@ def _assemble_batch(samples: List[Sample]) -> Dict[str, mx.array]:
     if n == 0:
         raise ValueError("Cannot assemble empty batch")
 
-    if n == 1:
-        s = samples[0]
-        return {
-            "noisy_real": mx.array(np.ascontiguousarray(s.noisy_spec.real[None])),
-            "noisy_imag": mx.array(np.ascontiguousarray(s.noisy_spec.imag[None])),
-            "clean_real": mx.array(np.ascontiguousarray(s.clean_spec.real[None])),
-            "clean_imag": mx.array(np.ascontiguousarray(s.clean_spec.imag[None])),
-            "interference_real": mx.array(np.ascontiguousarray(s.interference_spec.real[None])),
-            "interference_imag": mx.array(np.ascontiguousarray(s.interference_spec.imag[None])),
-            "feat_erb": mx.array(np.ascontiguousarray(s.feat_erb[None])),
-            "feat_spec": mx.array(np.ascontiguousarray(s.feat_spec[None])),
-            "snr": mx.array([s.snr]),
-        }
-
     s0 = samples[0]
     spec_shape = s0.noisy_spec.real.shape
     erb_shape = s0.feat_erb.shape
@@ -840,14 +826,14 @@ def _assemble_batch(samples: List[Sample]) -> Dict[str, mx.array]:
         snr_arr[i] = s.snr
 
     return {
-        "noisy_real": mx.array(np.ascontiguousarray(noisy_real)),
-        "noisy_imag": mx.array(np.ascontiguousarray(noisy_imag)),
-        "clean_real": mx.array(np.ascontiguousarray(clean_real)),
-        "clean_imag": mx.array(np.ascontiguousarray(clean_imag)),
-        "interference_real": mx.array(np.ascontiguousarray(interference_real)),
-        "interference_imag": mx.array(np.ascontiguousarray(interference_imag)),
-        "feat_erb": mx.array(np.ascontiguousarray(feat_erb)),
-        "feat_spec": mx.array(np.ascontiguousarray(feat_spec)),
+        "noisy_real": mx.array(noisy_real),
+        "noisy_imag": mx.array(noisy_imag),
+        "clean_real": mx.array(clean_real),
+        "clean_imag": mx.array(clean_imag),
+        "interference_real": mx.array(interference_real),
+        "interference_imag": mx.array(interference_imag),
+        "feat_erb": mx.array(feat_erb),
+        "feat_spec": mx.array(feat_spec),
         "snr": mx.array(snr_arr),
     }
 
