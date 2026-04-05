@@ -44,13 +44,13 @@ background_music_gain_range = [0, 20]
 
 [training]
 epochs = 220
-batch_size = 40              # Increased from 20: DfOp VJP optimization reduces
-learning_rate = 1e-4        # backward pass memory, enabling larger batches
+batch_size = 10             # Smaller batch: DfOp VJP optimization enables
+learning_rate = 1e-4        # more frequent gradient updates
 learning_rate_min = 1e-7
 weight_decay = 0.0
 warmup_epochs = 20
 patience = 0
-grad_accumulation_steps = 1  # Reduced from 2: effective batch unchanged (40)
+grad_accumulation_steps = 4  # Effective batch: 40 (10 * 4)
 max_grad_norm = 1.0
 fp16 = true
 seed = 42
