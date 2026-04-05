@@ -1,15 +1,20 @@
 # DfNet4 Performance Audit: Mamba Backbone Dominance
 
-**Date**: 2026-04-05
+**Date**: 2026-04-05 (updated 2026-04-06)
 **Component**: `df_mlx` training pathway
 **Hardware**: Apple M3 Pro (18 GPU cores, 36GB)
 
 ## Summary
 
 An adversarial performance audit of the `df_mlx` train_dynamic pathway
-reveals that the **Mamba backbone accounts for 80-95% of forward pass
+reveals that the **Mamba backbone accounts for 80-96% of forward pass
 time**. Python-level training loop optimizations provide negligible speedup
 because `mx.compile` CSE already optimizes the compiled graph.
+
+**Key result**: `mx.checkpoint` on `_selective_scan` eliminates a
+catastrophic memory cliff at batch≥32, delivering **2× speedup** for
+forward+backward and **7.4× speedup** for the selective scan backward pass
+at that batch size, with only ~5% overhead at smaller batches.
 
 ## Component-Level Benchmark Results
 
@@ -59,6 +64,26 @@ operations with the same inputs. This means:
 
 ## Optimization Paths
 
+### ✅ IMPLEMENTED: Gradient Checkpoint on Selective Scan
+
+Wrapping `_selective_scan` with `mx.checkpoint` eliminates ~4GB of
+intermediate array storage during backprop by recomputing the scan
+during the backward pass.
+
+| Metric | Before | After | Improvement |
+|--------|--------|-------|-------------|
+| forward_backward batch=32 | 765ms (σ=1129ms) | 383ms (σ=11ms) | **2.0× faster, 100× less variance** |
+| selective_scan batch=32 | 346ms (P95=1218ms) | 47ms (P95=50ms) | **7.4× faster** |
+| forward_backward batch≤16 | baseline | +5% | Negligible overhead |
+
+**Root cause**: The iterative doubling scan creates ~60 intermediate arrays
+of shape `(batch, 64, d_inner=512, d_state=16)`. At batch≥32, these total
+~4GB and cause catastrophic memory pressure with sporadic GPU stalls.
+`mx.checkpoint` tells MLX to recompute these intermediates during backprop
+instead of storing them.
+
+**Commit**: `0b5ff63`
+
 ### A. Metal Kernel for Selective Scan (~20% forward pass)
 
 The parallel prefix scan in `mamba.py:_selective_scan` creates ~60 graph
@@ -95,6 +120,7 @@ The training loop is well-optimized:
 | z-score precomputation | `66d4acf` | Zero (CSE redundancy) |
 | Dead FP32 code removal | `66d4acf` | Cleanup |
 | Component benchmark tool | `5bdd5f5` | New diagnostic |
+| **Gradient checkpoint scan** | **`0b5ff63`** | **2× batch=32 fwd+bwd, 7.4× scan** |
 
 ## Recommendations
 
