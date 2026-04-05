@@ -802,14 +802,14 @@ def _assemble_batch(samples: List[Sample]) -> Dict[str, mx.array]:
     if n == 1:
         s = samples[0]
         return {
-            "noisy_real": mx.array(s.noisy_spec.real[None]),
-            "noisy_imag": mx.array(s.noisy_spec.imag[None]),
-            "clean_real": mx.array(s.clean_spec.real[None]),
-            "clean_imag": mx.array(s.clean_spec.imag[None]),
-            "interference_real": mx.array(s.interference_spec.real[None]),
-            "interference_imag": mx.array(s.interference_spec.imag[None]),
-            "feat_erb": mx.array(s.feat_erb[None]),
-            "feat_spec": mx.array(s.feat_spec[None]),
+            "noisy_real": mx.array(np.ascontiguousarray(s.noisy_spec.real[None])),
+            "noisy_imag": mx.array(np.ascontiguousarray(s.noisy_spec.imag[None])),
+            "clean_real": mx.array(np.ascontiguousarray(s.clean_spec.real[None])),
+            "clean_imag": mx.array(np.ascontiguousarray(s.clean_spec.imag[None])),
+            "interference_real": mx.array(np.ascontiguousarray(s.interference_spec.real[None])),
+            "interference_imag": mx.array(np.ascontiguousarray(s.interference_spec.imag[None])),
+            "feat_erb": mx.array(np.ascontiguousarray(s.feat_erb[None])),
+            "feat_spec": mx.array(np.ascontiguousarray(s.feat_spec[None])),
             "snr": mx.array([s.snr]),
         }
 
