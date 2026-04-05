@@ -95,15 +95,33 @@ class DatasetConfig:
     nb_df: int = 96
 
     # Mixing parameters
-    snr_range: Tuple[float, float] = (-5.0, 40.0)  # dB, matching Rust [-5, 0, 5, 10, 20, 40]
+    snr_range: Tuple[float, float] = (
+        -5.0,
+        40.0,
+    )  # dB, matching Rust [-5, 0, 5, 10, 20, 40]
     snr_range_extreme: Tuple[float, float] = (-20.0, -5.0)  # dB, near-obscured speech
-    snr_range_very_low: Tuple[float, float] = (-30.0, -20.0)  # dB, severely obscured speech
+    snr_range_very_low: Tuple[float, float] = (
+        -30.0,
+        -20.0,
+    )  # dB, severely obscured speech
     p_extreme_snr: float = 0.1  # Probability of sampling from snr_range_extreme
     p_very_low_snr: float = 0.0  # Probability of sampling from snr_range_very_low
-    gain_range: Tuple[float, float] = (-6.0, 6.0)  # dB (legacy; retained for compatibility)
-    speech_gain_range: Tuple[float, float] = (-12.0, 12.0)  # dB, varies absolute speech loudness
-    noise_gain_range: Tuple[float, float] = (-12.0, 12.0)  # dB, varies relative noise contributions
-    background_music_gain_range: Tuple[float, float] = (0.0, 12.0)  # dB, lets music sit loudly behind speech
+    gain_range: Tuple[float, float] = (
+        -6.0,
+        6.0,
+    )  # dB (legacy; retained for compatibility)
+    speech_gain_range: Tuple[float, float] = (
+        -12.0,
+        12.0,
+    )  # dB, varies absolute speech loudness
+    noise_gain_range: Tuple[float, float] = (
+        -12.0,
+        12.0,
+    )  # dB, varies relative noise contributions
+    background_music_gain_range: Tuple[float, float] = (
+        0.0,
+        12.0,
+    )  # dB, lets music sit loudly behind speech
 
     # Augmentation probabilities
     p_reverb: float = 0.5  # Probability of applying RIR
@@ -781,6 +799,20 @@ def _assemble_batch(samples: List[Sample]) -> Dict[str, mx.array]:
     if n == 0:
         raise ValueError("Cannot assemble empty batch")
 
+    if n == 1:
+        s = samples[0]
+        return {
+            "noisy_real": mx.array(s.noisy_spec.real[None]),
+            "noisy_imag": mx.array(s.noisy_spec.imag[None]),
+            "clean_real": mx.array(s.clean_spec.real[None]),
+            "clean_imag": mx.array(s.clean_spec.imag[None]),
+            "interference_real": mx.array(s.interference_spec.real[None]),
+            "interference_imag": mx.array(s.interference_spec.imag[None]),
+            "feat_erb": mx.array(s.feat_erb[None]),
+            "feat_spec": mx.array(s.feat_spec[None]),
+            "snr": mx.array([s.snr]),
+        }
+
     s0 = samples[0]
     spec_shape = s0.noisy_spec.real.shape
     erb_shape = s0.feat_erb.shape
@@ -808,14 +840,14 @@ def _assemble_batch(samples: List[Sample]) -> Dict[str, mx.array]:
         snr_arr[i] = s.snr
 
     return {
-        "noisy_real": mx.array(noisy_real),
-        "noisy_imag": mx.array(noisy_imag),
-        "clean_real": mx.array(clean_real),
-        "clean_imag": mx.array(clean_imag),
-        "interference_real": mx.array(interference_real),
-        "interference_imag": mx.array(interference_imag),
-        "feat_erb": mx.array(feat_erb),
-        "feat_spec": mx.array(feat_spec),
+        "noisy_real": mx.array(np.ascontiguousarray(noisy_real)),
+        "noisy_imag": mx.array(np.ascontiguousarray(noisy_imag)),
+        "clean_real": mx.array(np.ascontiguousarray(clean_real)),
+        "clean_imag": mx.array(np.ascontiguousarray(clean_imag)),
+        "interference_real": mx.array(np.ascontiguousarray(interference_real)),
+        "interference_imag": mx.array(np.ascontiguousarray(interference_imag)),
+        "feat_erb": mx.array(np.ascontiguousarray(feat_erb)),
+        "feat_spec": mx.array(np.ascontiguousarray(feat_spec)),
         "snr": mx.array(snr_arr),
     }
 
