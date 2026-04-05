@@ -188,17 +188,17 @@ def _dfop_vjp(primals, cotangents, _outputs):
     # --- Gradient w.r.t. spec_pad ---
     # d_spec_pad[b, t+k, f] += conj(coef[b,t,f,k]) * d_out[b,t,f]
     # conj(c)(d) = (c_r*d_r + c_i*d_i) + (c_r*d_i - c_i*d_r)*i
-    # Loop over df_order taps (typically 5) — each tap shifts by 1
+    # Vectorized: compute all tap gradients at once (B, T, nb_df, df_order)
+    # Then scatter each tap's contribution to its offset position
     d_spec_real_pad = mx.zeros_like(spec_real_pad)
     d_spec_imag_pad = mx.zeros_like(spec_imag_pad)
 
+    grad_r_all = coef_real * mx.expand_dims(d_out_real, axis=-1) + coef_imag * mx.expand_dims(d_out_imag, axis=-1)
+    grad_i_all = coef_real * mx.expand_dims(d_out_imag, axis=-1) - coef_imag * mx.expand_dims(d_out_real, axis=-1)
+
     for k in range(df_order):
-        cr_k = coef_real[:, :, :, k]  # (B, T, nb_df)
-        ci_k = coef_imag[:, :, :, k]
-        grad_r = cr_k * d_out_real + ci_k * d_out_imag
-        grad_i = cr_k * d_out_imag - ci_k * d_out_real
-        d_spec_real_pad = d_spec_real_pad.at[:, k : k + output_time, :].add(grad_r)
-        d_spec_imag_pad = d_spec_imag_pad.at[:, k : k + output_time, :].add(grad_i)
+        d_spec_real_pad = d_spec_real_pad.at[:, k : k + output_time, :].add(grad_r_all[:, :, :, k])
+        d_spec_imag_pad = d_spec_imag_pad.at[:, k : k + output_time, :].add(grad_i_all[:, :, :, k])
 
     return d_spec_real_pad, d_spec_imag_pad, d_coef_real, d_coef_imag
 
