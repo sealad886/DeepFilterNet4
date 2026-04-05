@@ -284,15 +284,25 @@ def collect_sync_metrics(
 
     # ------------------------------------------------------------------
     # Compute model output for any metric block that needs it.
+    # In FAST mode (emit_detailed_metrics=False) skip all per-component
+    # loss recomputation — the composite loss_val is already available
+    # from the training step.  This eliminates redundant forward-pass
+    # work (z-scoring, band energy, musicness, InfoNCE, etc.) that
+    # would otherwise double the compute cost at every sync boundary.
     # ------------------------------------------------------------------
-    needs_model_out = not loss_was_nonfinite and (
-        use_vad_loss
-        or use_awesome_loss
-        or use_pipeline_awesome_loss
-        or use_contrastive_awesome_loss
-        or use_contrastive_silence_loss
-        or use_vad_train_reg
-        or (emit_detailed_metrics and (use_mrstft_loss or gan_active))
+    needs_model_out = (
+        not loss_was_nonfinite
+        and emit_detailed_metrics
+        and (
+            use_vad_loss
+            or use_awesome_loss
+            or use_pipeline_awesome_loss
+            or use_contrastive_awesome_loss
+            or use_contrastive_silence_loss
+            or use_vad_train_reg
+            or use_mrstft_loss
+            or gan_active
+        )
     )
     out: tuple[mx.array, mx.array] | None = None
     spec_out: tuple[mx.array, mx.array] | None = None
