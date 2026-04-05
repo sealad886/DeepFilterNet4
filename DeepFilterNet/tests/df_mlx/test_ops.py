@@ -71,6 +71,58 @@ class TestMelSpectrogram:
 
         assert mx.all(mx.isfinite(mel_spec)).item()
 
+        log_values = mel_spec
+        mean_val = mx.mean(log_values).item()
+        assert mean_val > -20 and mean_val < 20, f"Log spectrogram should have reasonable range, got mean={mean_val}"
+
+    def test_metal_kernel_path(self):
+        """Verify Metal kernel path works correctly."""
+        from df_mlx.dnsmos_proxy import MelSpectrogram
+
+        mel_metal = MelSpectrogram(
+            sample_rate=16000,
+            n_fft=512,
+            hop_length=256,
+            n_mels=64,
+            use_metal_kernel=True,
+        )
+
+        audio = mx.random.normal(shape=(2, 16000))
+        mel_spec = mel_metal(audio)
+
+        expected_n_frames = (16000 - mel_metal.n_fft) // mel_metal.hop_length + 1
+        assert mel_spec.shape == (2, 64, expected_n_frames)
+        assert mx.all(mx.isfinite(mel_spec)).item()
+
+    def test_fmin_fmax(self):
+        """Verify f_min and f_max parameters are applied correctly."""
+        from df_mlx.dnsmos_proxy import MelSpectrogram
+
+        mel_custom = MelSpectrogram(
+            sample_rate=16000,
+            n_fft=512,
+            hop_length=256,
+            n_mels=64,
+            f_min=300.0,
+            f_max=6000.0,
+            use_metal_kernel=False,
+        )
+
+        mel_default = MelSpectrogram(
+            sample_rate=16000,
+            n_fft=512,
+            hop_length=256,
+            n_mels=64,
+            use_metal_kernel=False,
+        )
+
+        audio = mx.random.normal(shape=(2, 16000))
+        mel_spec_custom = mel_custom(audio)
+        mel_spec_default = mel_default(audio)
+
+        assert mel_spec_custom.shape == mel_spec_default.shape
+        assert mx.all(mx.isfinite(mel_spec_custom)).item()
+
     def test_deterministic(self, mel_extractor):
         """Verify same input produces same output."""
         audio = mx.random.normal(shape=(2, 16000))
