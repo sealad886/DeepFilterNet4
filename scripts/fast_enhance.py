@@ -1,18 +1,26 @@
 #!/usr/bin/env python3
-"""Fast batch audio enhancement with DFNet4-MLX.
+"""Fast batch audio enhancement with DFNet4-MLX and Rich TUI.
 
 Three-stage pipeline that overlaps I/O with GPU work:
-  1. Thread pool decodes audio files (ffmpeg for m4a/mp3, soundfile for wav/flac)
+  1. Thread pool decodes audio files (ffmpeg for m4a/mp3/mp4, soundfile for wav/flac)
   2. Main thread runs MLX model enhancement (GPU)
   3. Thread pool saves results asynchronously (soundfile)
 
-Single model initialization handles multiple input directories.
+Supports multiple checkpoint directories — processes them sequentially (GPU is
+the scarce resource; parallel models would thrash Metal and waste memory).
 
 Usage:
+    # Single checkpoint
     python scripts/fast_enhance.py \\
-        --input /path/to/noisy1 --output /path/to/enhanced1 \\
-        --input /path/to/noisy2 --output /path/to/enhanced2 \\
+        -i /path/to/noisy1 -i /path/to/noisy2 \\
+        --output-base /path/to/output \\
         --checkpoint-dir /path/to/checkpoints
+
+    # Multiple checkpoints (one model load per checkpoint, shared file list)
+    python scripts/fast_enhance.py \\
+        -i /path/to/noisy1 -i /path/to/noisy2 \\
+        --output-base /path/to/output \\
+        --checkpoint-dir /path/to/ckpt1 --checkpoint-dir /path/to/ckpt2
 """
 
 import argparse
@@ -21,9 +29,9 @@ import os
 import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
-from typing import List, NamedTuple, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 import numpy as np
 
@@ -31,8 +39,113 @@ SCRIPT_DIR = Path(__file__).parent.absolute()
 DF_DIR = SCRIPT_DIR.parent / "DeepFilterNet"
 sys.path.insert(0, str(DF_DIR))
 
-AUDIO_EXTENSIONS = {".wav", ".flac", ".mp3", ".ogg", ".opus", ".m4a", ".aac"}
+AUDIO_EXTENSIONS = {".wav", ".flac", ".mp3", ".ogg", ".opus", ".m4a", ".aac", ".mp4", ".m4v"}
 TARGET_SR = 48000
+
+
+# ---------------------------------------------------------------------------
+# Rich TUI helpers
+# ---------------------------------------------------------------------------
+
+try:
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+    from rich.table import Table
+
+    _RICH = True
+except ImportError:
+    _RICH = False
+
+
+def _make_console() -> "Console":
+    if _RICH:
+        return Console()
+    raise RuntimeError("rich is required")
+
+
+def _make_progress(console: "Console") -> "Progress":
+    return Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(bar_width=40),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        TextColumn("{task.fields[status]}"),
+        console=console,
+        transient=False,
+    )
+
+
+def _checkpoint_header(console: "Console", idx: int, total: int, ckpt_name: str, ckpt_file: str, info: dict) -> None:
+    """Print a rich panel header for a checkpoint run."""
+    lines = [
+        f"[bold cyan]Checkpoint {idx}/{total}[/bold cyan]: [bold]{ckpt_name}[/bold]",
+        f"  File: [dim]{ckpt_file}[/dim]",
+    ]
+    if info.get("backbone"):
+        lines.append(f"  Backbone: [yellow]{info['backbone']}[/yellow]  Variant: {info.get('variant', 'full')}")
+    console.print(Panel("\n".join(lines), border_style="blue", padding=(0, 1)))
+
+
+def _checkpoint_summary(console: "Console", ckpt_name: str, stats: dict) -> None:
+    """Print a rich table summarising one checkpoint run."""
+    table = Table(title=f"[bold]{ckpt_name}[/bold] results", border_style="green", show_header=False, padding=(0, 2))
+    table.add_column("Metric", style="dim")
+    table.add_column("Value", justify="right")
+
+    table.add_row("Files processed", str(stats["files_processed"]))
+    if stats["files_failed"]:
+        table.add_row("Files failed", f"[red]{stats['files_failed']}[/red]")
+    total_min = stats["total_audio_seconds"] / 60
+    table.add_row("Audio duration", f"{stats['total_audio_seconds']:.0f}s ({total_min:.0f} min)")
+    table.add_row("Enhance time (GPU)", f"{stats['total_enhance_seconds']:.1f}s")
+    table.add_row("Wall time", f"{stats['wall_time_seconds']:.1f}s")
+    if stats["total_audio_seconds"] > 0:
+        e_rtf = stats["total_enhance_seconds"] / stats["total_audio_seconds"]
+        w_rtf = stats["wall_time_seconds"] / stats["total_audio_seconds"]
+        table.add_row("Enhance RTF", f"{e_rtf:.4f}  ({1 / e_rtf:.0f}× real-time)")
+        table.add_row("Effective RTF", f"{w_rtf:.4f}  ({1 / w_rtf:.0f}× real-time)")
+    console.print(table)
+    console.print()
+
+
+def _comparison_table(console: "Console", all_stats: Dict[str, dict]) -> None:
+    """Print a comparison table across all checkpoint runs."""
+    if len(all_stats) < 2:
+        return
+    table = Table(title="[bold]Checkpoint Comparison[/bold]", border_style="cyan")
+    table.add_column("Checkpoint", style="bold")
+    table.add_column("Files", justify="right")
+    table.add_column("Audio", justify="right")
+    table.add_column("GPU Time", justify="right")
+    table.add_column("Wall Time", justify="right")
+    table.add_column("Eff. RTF", justify="right")
+
+    for name, s in all_stats.items():
+        audio_min = s["total_audio_seconds"] / 60
+        w_rtf = s["wall_time_seconds"] / s["total_audio_seconds"] if s["total_audio_seconds"] > 0 else 0
+        speed = 1 / w_rtf if w_rtf > 0 else 0
+        table.add_row(
+            name,
+            str(s["files_processed"]),
+            f"{audio_min:.0f} min",
+            f"{s['total_enhance_seconds']:.1f}s",
+            f"{s['wall_time_seconds']:.1f}s",
+            f"{w_rtf:.4f} ({speed:.0f}×)",
+        )
+    console.print(table)
+
+
+def _final_totals(console: "Console", grand: dict) -> None:
+    """Print grand totals panel."""
+    lines = []
+    lines.append(f"Checkpoints processed: [bold]{grand['checkpoints']}[/bold]")
+    lines.append(f"Total files enhanced:  [bold]{grand['files']}[/bold]")
+    total_min = grand["audio_seconds"] / 60
+    lines.append(f"Total audio:           [bold]{total_min:.0f} min[/bold]")
+    lines.append(f"Total wall time:       [bold]{grand['wall_seconds']:.0f}s[/bold]")
+    console.print(Panel("\n".join(lines), title="[bold green]Complete[/bold green]", border_style="green"))
 
 
 class AudioItem(NamedTuple):
@@ -164,29 +277,30 @@ def find_latest_checkpoint(checkpoint_dir: str) -> Optional[str]:
     return None
 
 
+def _load_train_config(checkpoint_path: str) -> dict:
+    """Load training config from the checkpoint's state file."""
+    ckpt = Path(checkpoint_path)
+    for suffix in (".state.json", ".json"):
+        state_path = ckpt.with_suffix(suffix)
+        if state_path.exists():
+            with open(state_path) as f:
+                state = json.load(f)
+            return state.get("config", {})
+    return {}
+
+
 def init_model(checkpoint_path: str) -> Tuple:
-    """Initialize DFNet4-MLX model with checkpoint. Returns (model, config)."""
+    """Initialize DFNet4-MLX model with checkpoint.
+
+    Returns (model, info_dict) where info_dict has backbone/variant metadata.
+    """
     import mlx.core as mx
     from df_mlx.config import BackboneParams, ModelParams4
     from df_mlx.model import init_model as _init_model
     from df_mlx.train import load_checkpoint
 
     config = ModelParams4()
-
-    # Load training config from state file
-    ckpt = Path(checkpoint_path)
-    for suffix in (".state.json", ".json"):
-        state_path = ckpt.with_suffix(suffix)
-        if state_path.exists():
-            break
-    else:
-        state_path = None
-
-    train_cfg: dict = {}
-    if state_path and state_path.exists():
-        with open(state_path) as f:
-            state = json.load(f)
-        train_cfg = state.get("config", {})
+    train_cfg = _load_train_config(checkpoint_path)
 
     if train_cfg:
         for key, attr_chain in [
@@ -216,18 +330,17 @@ def init_model(checkpoint_path: str) -> Tuple:
     del weights
 
     config.backbone = BackboneParams(backbone_type=backbone_type)
+    variant = train_cfg.get("model_variant", "full")
 
-    model = _init_model(
-        config=config,
-        variant=train_cfg.get("model_variant", "full"),
-    )
+    model = _init_model(config=config, variant=variant)
     load_checkpoint(model, checkpoint_path)
 
-    # Warmup: force Metal shader compilation on a tiny input
+    # Warmup: force Metal shader compilation
     dummy = mx.zeros((1, TARGET_SR))
     mx.eval(model.enhance(dummy))
 
-    return model, config
+    info = {"backbone": backbone_type, "variant": variant}
+    return model, info
 
 
 # ---------------------------------------------------------------------------
@@ -235,37 +348,64 @@ def init_model(checkpoint_path: str) -> Tuple:
 # ---------------------------------------------------------------------------
 
 
-def collect_files(input_dirs: List[str], output_dirs: List[str]) -> List[Tuple[str, str]]:
-    """Collect (input_path, output_path) pairs from matched dir lists."""
-    pairs: List[Tuple[str, str]] = []
-    seen = set()
+def collect_input_files(input_dirs: List[str]) -> List[Tuple[str, str]]:
+    """Collect (abs_path, relative_subdir) for all audio files.
 
-    for in_dir, out_dir in zip(input_dirs, output_dirs):
-        p = Path(in_dir)
+    ``relative_subdir`` is the path of the file's parent relative to the first
+    input directory (treated as the base).  For files directly in the base this
+    is ``"."``.
+    """
+    if not input_dirs:
+        return []
+
+    base = Path(input_dirs[0]).resolve()
+    results: List[Tuple[str, str]] = []
+    seen: set = set()
+
+    for in_dir in input_dirs:
+        p = Path(in_dir).resolve()
         if not p.is_dir():
-            print(f"WARNING: skipping non-directory {in_dir}")
             continue
         for f in sorted(p.iterdir()):
             if f.is_file() and f.suffix.lower() in AUDIO_EXTENSIONS:
                 abs_path = str(f.resolve())
                 if abs_path not in seen:
                     seen.add(abs_path)
-                    out_name = f"{f.stem}_enhanced.wav"
-                    pairs.append((str(f), str(Path(out_dir) / out_name)))
+                    try:
+                        rel = str(f.resolve().parent.relative_to(base))
+                    except ValueError:
+                        rel = f.resolve().parent.name
+                    results.append((abs_path, rel))
+    return results
+
+
+def make_output_pairs(
+    input_files: List[Tuple[str, str]],
+    output_base: str,
+    ckpt_name: str,
+    model_label: str,
+) -> List[Tuple[str, str]]:
+    """Build (input_path, output_path) pairs for one checkpoint."""
+    pairs: List[Tuple[str, str]] = []
+    for abs_path, rel_subdir in input_files:
+        stem = Path(abs_path).stem
+        out_dir = Path(output_base) / ckpt_name / rel_subdir / model_label
+        pairs.append((abs_path, str(out_dir / f"{stem}_enhanced.wav")))
     return pairs
 
 
 # ---------------------------------------------------------------------------
-# Pipeline
+# Pipeline (with Rich progress)
 # ---------------------------------------------------------------------------
 
 
 def run_pipeline(
     model,
     file_pairs: List[Tuple[str, str]],
+    console: "Console",
     workers: int = 4,
 ) -> dict:
-    """Run the three-stage pipeline: load → enhance → save."""
+    """Run the three-stage pipeline: decode → enhance → save."""
     import mlx.core as mx
 
     n = len(file_pairs)
@@ -276,49 +416,55 @@ def run_pipeline(
 
     t_wall_start = time.time()
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        # Stage 1: submit all load jobs (pool runs them concurrently up to `workers`)
-        load_futures = [pool.submit(_load_item, inp, outp) for inp, outp in file_pairs]
+    with _make_progress(console) as progress:
+        task_id = progress.add_task("Processing", total=n, status="")
 
-        save_futures = []
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            load_futures = [pool.submit(_load_item, inp, outp) for inp, outp in file_pairs]
+            save_futures: List[Future] = []
 
-        for i, future in enumerate(load_futures):
-            try:
-                item = future.result()
-            except Exception as e:
+            for i, future in enumerate(load_futures):
                 fname = Path(file_pairs[i][0]).name
-                print(f"  [{i + 1}/{n}] FAIL (load) {fname}: {e}")
-                failures += 1
-                continue
 
-            # Stage 2: enhance on GPU (main thread — sequential)
-            audio_mx = mx.array(item.audio)
-            t0 = time.time()
-            enhanced = model.enhance(audio_mx)
-            mx.eval(enhanced)
-            t1 = time.time()
+                try:
+                    progress.update(task_id, status=f"[dim]decode {fname}[/dim]")
+                    item = future.result()
+                except Exception as e:
+                    console.print(f"  [red]✗ FAIL (load)[/red] {fname}: {e}")
+                    failures += 1
+                    progress.advance(task_id)
+                    continue
 
-            enhance_time = t1 - t0
-            total_enhance_time += enhance_time
-            total_duration += item.duration
-            successes += 1
+                # Enhance on GPU
+                progress.update(task_id, status=f"[cyan]enhance {fname}[/cyan]")
+                audio_mx = mx.array(item.audio)
+                t0 = time.time()
+                enhanced = model.enhance(audio_mx)
+                mx.eval(enhanced)
+                t1 = time.time()
 
-            rtf = enhance_time / item.duration if item.duration > 0 else 0
-            fname = Path(item.original_path).name
-            print(f"  [{i + 1}/{n}] {fname} ({item.duration:.1f}s) RTF={rtf:.3f}")
+                enhance_time = t1 - t0
+                total_enhance_time += enhance_time
+                total_duration += item.duration
+                successes += 1
 
-            # Stage 3: save asynchronously
-            enhanced_np = np.array(enhanced, dtype=np.float32)
-            save_futures.append(pool.submit(_save_item, enhanced_np, item.output_path))
+                rtf = enhance_time / item.duration if item.duration > 0 else 0
+                progress.update(task_id, status=f"[green]{fname}[/green] RTF={rtf:.3f}")
+                progress.advance(task_id)
 
-        # Wait for all saves
-        for f in save_futures:
-            try:
-                f.result()
-            except Exception as e:
-                print(f"  WARNING: save failed: {e}")
-                failures += 1
-                successes -= 1
+                # Save asynchronously
+                enhanced_np = np.array(enhanced, dtype=np.float32)
+                save_futures.append(pool.submit(_save_item, enhanced_np, item.output_path))
+
+            # Drain saves
+            progress.update(task_id, status="[dim]waiting for saves…[/dim]")
+            for f in save_futures:
+                try:
+                    f.result()
+                except Exception as e:
+                    console.print(f"  [red]✗ save failed:[/red] {e}")
+                    failures += 1
+                    successes -= 1
 
     wall_time = time.time() - t_wall_start
 
@@ -336,13 +482,34 @@ def run_pipeline(
 # ---------------------------------------------------------------------------
 
 
-class PairedDirsAction(argparse.Action):
-    """Accumulate --input/--output into paired lists on the namespace."""
+class AppendAction(argparse.Action):
+    """Accumulate repeated flags into a list."""
 
     def __call__(self, parser, namespace, values, option_string=None):
         lst = getattr(namespace, self.dest) or []
         lst.append(values)
         setattr(namespace, self.dest, lst)
+
+
+def _resolve_checkpoint_dirs(raw_dirs: List[str], fallback_base: str) -> List[Tuple[str, str, str]]:
+    """Resolve checkpoint dirs → list of (display_name, dir_path, ckpt_file).
+
+    Each raw dir is either an absolute path or a name under ``fallback_base``.
+    """
+    resolved: List[Tuple[str, str, str]] = []
+    for raw in raw_dirs:
+        d = Path(raw)
+        if not d.is_dir():
+            candidate = Path(fallback_base) / raw
+            if candidate.is_dir():
+                d = candidate
+            else:
+                raise FileNotFoundError(f"Checkpoint directory not found: {raw} (also tried {candidate})")
+        ckpt_file = find_latest_checkpoint(str(d))
+        if not ckpt_file:
+            raise FileNotFoundError(f"No checkpoint file found in {d}")
+        resolved.append((d.name, str(d), ckpt_file))
+    return resolved
 
 
 def main():
@@ -351,84 +518,127 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Examples:
-    # Single directory
-    python scripts/fast_enhance.py -i noisy/ -o enhanced/ --checkpoint-dir /path/to/ckpts
-
-    # Multiple directories (one model load)
+    # Single checkpoint
     python scripts/fast_enhance.py \\
-        -i /data/to-clean -o /data/enhanced/main \\
-        -i /data/to-clean/news -o /data/enhanced/news \\
-        --checkpoint-dir /path/to/ckpts
+        -i /data/to-clean -i /data/to-clean/news \\
+        --output-base /data/to-listen \\
+        --checkpoint-dir my_checkpoint
+
+    # Multiple checkpoints (processed sequentially, one model at a time)
+    python scripts/fast_enhance.py \\
+        -i /data/to-clean -i /data/to-clean/news \\
+        --output-base /data/to-listen \\
+        --checkpoint-dir ckpt_A --checkpoint-dir ckpt_B
+
+Output structure:
+    {output-base}/{checkpoint-name}/{relative-subdir}/{model-label}/{file}_enhanced.wav
 """,
     )
 
-    parser.add_argument("-i", "--input", dest="inputs", action=PairedDirsAction, required=True, help="Input directory")
     parser.add_argument(
-        "-o", "--output", dest="outputs", action=PairedDirsAction, required=True, help="Output directory"
+        "-i",
+        "--input",
+        dest="inputs",
+        action=AppendAction,
+        required=True,
+        help="Input directory (repeat for multiple)",
     )
-    parser.add_argument("--checkpoint", help="Direct path to .safetensors checkpoint")
+    parser.add_argument(
+        "--output-base",
+        required=True,
+        help="Base output directory (checkpoint name / subdir structure created underneath)",
+    )
     parser.add_argument(
         "--checkpoint-dir",
+        dest="checkpoint_dirs",
+        action=AppendAction,
+        required=True,
+        help="Checkpoint directory or name (repeat for multiple)",
+    )
+    parser.add_argument(
+        "--checkpoint-fallback-base",
         default=os.path.expanduser("~/DataDump/checkpoints"),
-        help="Directory to search for latest checkpoint",
+        help="Fallback base when checkpoint-dir is a bare name (default: ~/DataDump/checkpoints)",
+    )
+    parser.add_argument(
+        "--model-label",
+        default="DeepFilterNet4-MLX",
+        help="Subdirectory name for model outputs (default: DeepFilterNet4-MLX)",
     )
     parser.add_argument("--workers", type=int, default=4, help="I/O thread pool size (default: 4)")
 
     args = parser.parse_args()
 
-    if len(args.inputs) != len(args.outputs):
-        parser.error("Each --input must have a matching --output")
-
-    # Resolve checkpoint
-    checkpoint = args.checkpoint
-    if not checkpoint:
-        checkpoint = find_latest_checkpoint(args.checkpoint_dir)
-    if not checkpoint:
-        print("ERROR: No checkpoint found. Use --checkpoint or --checkpoint-dir")
+    if not _RICH:
+        print("ERROR: rich is required for TUI display.  pip install rich", file=sys.stderr)
         sys.exit(1)
-    print(f"Checkpoint: {Path(checkpoint).name}")
 
-    # Collect files
-    file_pairs = collect_files(args.inputs, args.outputs)
-    if not file_pairs:
-        print("No audio files found")
+    console = _make_console()
+
+    # Resolve all checkpoint dirs
+    try:
+        checkpoints = _resolve_checkpoint_dirs(args.checkpoint_dirs, args.checkpoint_fallback_base)
+    except FileNotFoundError as e:
+        console.print(f"[red bold]ERROR:[/red bold] {e}")
         sys.exit(1)
-    print(
-        f"Found {len(file_pairs)} audio files across {len(args.inputs)} director{'y' if len(args.inputs) == 1 else 'ies'}"
+
+    # Collect input files once (shared across all checkpoints)
+    input_files = collect_input_files(args.inputs)
+    if not input_files:
+        console.print("[red]No audio files found in input directories[/red]")
+        sys.exit(1)
+
+    n_dirs = len(args.inputs)
+    console.print(
+        Panel(
+            f"[bold]{len(input_files)}[/bold] audio files from "
+            f"[bold]{n_dirs}[/bold] director{'y' if n_dirs == 1 else 'ies'}\n"
+            f"[bold]{len(checkpoints)}[/bold] checkpoint{'s' if len(checkpoints) != 1 else ''} to process "
+            f"[dim](sequential — GPU is the scarce resource)[/dim]\n"
+            f"Output base: [cyan]{args.output_base}[/cyan]",
+            title="[bold]Fast Enhance[/bold]",
+            border_style="blue",
+        )
     )
 
-    # Initialize model once
-    print("Initializing model...")
-    t0 = time.time()
-    model, _ = init_model(checkpoint)
-    init_time = time.time() - t0
-    print(f"Model ready in {init_time:.1f}s (backbone detected, shaders compiled)")
-    print()
+    all_stats: Dict[str, dict] = {}
+    grand = {"checkpoints": 0, "files": 0, "audio_seconds": 0.0, "wall_seconds": 0.0}
+    total_ckpts = len(checkpoints)
 
-    # Run pipeline
-    stats = run_pipeline(model, file_pairs, workers=args.workers)
+    for idx, (ckpt_name, ckpt_dir, ckpt_file) in enumerate(checkpoints, 1):
+        # Build output pairs for this checkpoint
+        file_pairs = make_output_pairs(input_files, args.output_base, ckpt_name, args.model_label)
 
-    # Summary
-    print()
-    print("=" * 60)
-    print("SUMMARY")
-    print("=" * 60)
-    print(f"  Files processed: {stats['files_processed']}")
-    if stats["files_failed"]:
-        print(f"  Files failed:    {stats['files_failed']}")
-    total_min = stats["total_audio_seconds"] / 60
-    print(f"  Total audio:     {stats['total_audio_seconds']:.1f}s ({total_min:.1f}min)")
-    print(f"  Enhance time:    {stats['total_enhance_seconds']:.1f}s (GPU only)")
-    print(f"  Wall time:       {stats['wall_time_seconds']:.1f}s (incl. I/O)")
+        # Init model
+        console.print()
+        _checkpoint_header(console, idx, total_ckpts, ckpt_name, Path(ckpt_file).name, {})
 
-    if stats["total_audio_seconds"] > 0:
-        enhance_rtf = stats["total_enhance_seconds"] / stats["total_audio_seconds"]
-        wall_rtf = stats["wall_time_seconds"] / stats["total_audio_seconds"]
-        enhance_speed = 1 / enhance_rtf
-        wall_speed = 1 / wall_rtf
-        print(f"  Enhance RTF:     {enhance_rtf:.4f} ({enhance_speed:.0f}x real-time)")
-        print(f"  Effective RTF:   {wall_rtf:.4f} ({wall_speed:.0f}x real-time, with I/O)")
-    print("=" * 60)
+        console.print("  [dim]Loading model…[/dim]")
+        t0 = time.time()
+        model, info = init_model(ckpt_file)
+        init_time = time.time() - t0
+        console.print(
+            f"  [green]✓[/green] Model ready in {init_time:.1f}s "
+            f"[dim](backbone={info['backbone']}, variant={info['variant']})[/dim]"
+        )
+
+        # Run pipeline
+        stats = run_pipeline(model, file_pairs, console, workers=args.workers)
+        all_stats[ckpt_name] = stats
+
+        _checkpoint_summary(console, ckpt_name, stats)
+
+        grand["checkpoints"] += 1
+        grand["files"] += stats["files_processed"]
+        grand["audio_seconds"] += stats["total_audio_seconds"]
+        grand["wall_seconds"] += stats["wall_time_seconds"] + init_time
+
+        # Release model memory before loading next
+        del model
+
+    # Final comparison + totals
+    _comparison_table(console, all_stats)
+    _final_totals(console, grand)
 
 
 if __name__ == "__main__":

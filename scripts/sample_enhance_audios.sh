@@ -7,20 +7,37 @@ if [[ ! -d $VIRTUAL_ENV ]]; then
   exit 1
 fi
 
-CHECKPOINT_NAME=$1
-if [[ ! -d "$CHECKPOINT_NAME" ]]; then
-  # first try pre-pending my own regular checkpoint dir
-  CHECKPOINT_NAME_UPDATED="$HOME/DataDump/checkpoints/$CHECKPOINT_NAME"
-  if [[ ! -d "$CHECKPOINT_NAME_UPDATED" ]]; then
-    echo "Invalid path to checkpoint or checkpoint name: $CHECKPOINT_NAME"
+if [[ $# -eq 0 ]]; then
+  echo "Usage: $0 <checkpoint_dir_or_name> [checkpoint_dir_or_name ...]"
+  echo ""
+  echo "Enhances audio files in ~/DataDump/to-clean using DFNet4-MLX."
+  echo "Accepts one or more checkpoint directories (absolute paths or names"
+  echo "under ~/DataDump/checkpoints)."
+  echo ""
+  echo "Examples:"
+  echo "  $0 contrastive_awesome_full_vadlite"
+  echo "  $0 ckpt_A ckpt_B ckpt_C"
+  echo "  $0 /absolute/path/to/checkpoint"
+  exit 1
+fi
+
+# Build --checkpoint-dir flags for each argument
+CKPT_FLAGS=()
+for arg in "$@"; do
+  # Validate: must be a directory (absolute) or resolvable under fallback base
+  if [[ -d "$arg" ]]; then
+    CKPT_FLAGS+=(--checkpoint-dir "$arg")
+  elif [[ -d "$HOME/DataDump/checkpoints/$arg" ]]; then
+    CKPT_FLAGS+=(--checkpoint-dir "$arg")
+  else
+    echo "ERROR: Invalid checkpoint directory or name: $arg"
+    echo "  (looked at: $arg, ~/DataDump/checkpoints/$arg)"
     exit 2
   fi
-  CHECKPOINT_NAME="$CHECKPOINT_NAME_UPDATED"
-fi
+done
 
 python scripts/fast_enhance.py \
   -i /Users/andrew/DataDump/to-clean \
-  -o /Users/andrew/DataDump/to-listen/contrastive_awesome_full_vadlite/DeepFilterNet4-MLX \
   -i /Users/andrew/DataDump/to-clean/news \
-  -o /Users/andrew/DataDump/to-listen/contrastive_awesome_full_vadlite/news/DeepFilterNet4-MLX \
-  --checkpoint-dir "$CHECKPOINT_NAME"
+  --output-base /Users/andrew/DataDump/to-listen \
+  "${CKPT_FLAGS[@]}"
