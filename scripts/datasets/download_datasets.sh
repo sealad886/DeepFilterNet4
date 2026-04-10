@@ -1052,7 +1052,7 @@ download_file() {
         --file-allocation="${aria2_file_alloc}" \
         --user-agent="${ARIA2_USER_AGENT}" \
         ${aria2_auth_header} \
-        -d "$(dirname "${out}")" -o "$(basename "${out}")" "${url}" || status=$?
+        -d "$(dirname "${out}")" -o "$(basename "${out}")" "${url}" </dev/null || status=$?
     else
       # shellcheck disable=SC2086  # Intentionally unquoted to allow empty expansion
       aria2c -x "${aria2_conn}" -s "${aria2_split}" -k "${ARIA2_MIN_SPLIT}" \
@@ -1060,7 +1060,7 @@ download_file() {
         --file-allocation="${aria2_file_alloc}" \
         --user-agent="${ARIA2_USER_AGENT}" \
         ${aria2_auth_header} \
-        -d "$(dirname "${out}")" -o "$(basename "${out}")" "${url}" || status=$?
+        -d "$(dirname "${out}")" -o "$(basename "${out}")" "${url}" </dev/null || status=$?
     fi
     if [[ "${status}" -ne 0 ]]; then
       remove_zero_byte_download_artifacts "${out}"
@@ -1187,7 +1187,17 @@ extract_archive() {
       tar -xzf "${archive}" -C "${stage_dir}"
       ;;
     *.zip)
-      unzip -n -q "${archive}" -d "${stage_dir}"
+      # Use Python's zipfile directly — macOS's ancient unzip (2009) chokes
+      # on bzip2-compressed zips (exit 81) and has other limitations.
+      python3 -c "
+import zipfile, sys, os
+z = zipfile.ZipFile(sys.argv[1])
+dest = sys.argv[2]
+for info in z.infolist():
+    out = os.path.join(dest, info.filename)
+    if not os.path.exists(out):
+        z.extract(info, dest)
+" "${archive}" "${stage_dir}"
       ;;
     *)
       echo "Unknown archive format: ${archive}" >&2
@@ -1210,7 +1220,7 @@ verify_archive() {
   fi
   case "${archive}" in
     *.zip)
-      command -v unzip >/dev/null 2>&1 || return 0
+      command -v python3 >/dev/null 2>&1 || return 0
       # Check if this is a split zip (has .z01 sibling) - skip verification
       # since the parts are verified individually and the main .zip alone
       # cannot be verified without the parts present
@@ -1222,7 +1232,14 @@ verify_archive() {
         fi
         return 0
       fi
-      unzip -tqq "${archive}" >/dev/null 2>&1
+      # Use Python's zipfile directly — macOS's ancient unzip (2009) chokes
+      # on bzip2-compressed zips (exit 81) and has other limitations.
+      python3 -c "
+import zipfile, sys
+z = zipfile.ZipFile(sys.argv[1])
+bad = z.testzip()
+sys.exit(1 if bad else 0)
+" "${archive}" >/dev/null 2>&1
       status=$?
       if [[ ${status} -eq 0 && "${VERIFY_CACHE}" == "1" ]]; then
         cache_store "${archive}"
@@ -1402,7 +1419,9 @@ process_extract_queue() {
   if [[ ! -s "${EXTRACT_QUEUE_FILE}" ]]; then
     return 0
   fi
-  while IFS='|' read -r archive dest url; do
+  # Read from fd 3 so child commands (aria2c, unzip, tar) cannot consume
+  # the queue via inherited stdin — a classic bash while-read pitfall.
+  while IFS='|' read -r archive dest url <&3; do
     if [[ -z "${archive}" ]]; then
       continue
     fi
@@ -1416,19 +1435,20 @@ process_extract_queue() {
     if [[ "${KEEP_ARCHIVES}" == "0" ]]; then
       rm -f "${archive}"
     fi
-  done < "${EXTRACT_QUEUE_FILE}"
+  done 3< "${EXTRACT_QUEUE_FILE}"
 }
 
 process_fsd50k_merge_queue() {
   if [[ ! -s "${FSD50K_MERGE_QUEUE_FILE}" ]]; then
     return 0
   fi
-  while IFS='|' read -r prefix out_dir; do
+  # Read from fd 3 to prevent child commands from consuming the queue via stdin.
+  while IFS='|' read -r prefix out_dir <&3; do
     if [[ -z "${prefix}" ]]; then
       continue
     fi
     fsd50k_merge_and_unzip "${prefix}" "${out_dir}"
-  done < "${FSD50K_MERGE_QUEUE_FILE}"
+  done 3< "${FSD50K_MERGE_QUEUE_FILE}"
 }
 
 download_and_extract() {
@@ -1644,14 +1664,16 @@ if [[ "${DOWNLOAD}" == "1" ]]; then
       "https://raw.githubusercontent.com/MTG/mtg-jamendo-dataset/master/data/download/raw_30s_audio-low_sha256_tars.txt" \
       "${DOWNLOAD_DIR}/mtg-jamendo/raw_30s_audio-low_sha256_tars.txt"
 
-    while read -r _sha256 tar_name; do
+    # Read from fd 3 to prevent child commands (aria2c) from consuming the
+    # tar list via inherited stdin.
+    while read -r _sha256 tar_name <&3; do
       if [[ -z "${tar_name:-}" ]]; then
         continue
       fi
       download_and_extract \
         "https://cdn.freesound.org/mtg-jamendo/raw_30s/audio-low/${tar_name}" \
         "${MTG_JAMENDO_DIR}"
-    done < "${DOWNLOAD_DIR}/mtg-jamendo/raw_30s_audio-low_sha256_tars.txt"
+    done 3< "${DOWNLOAD_DIR}/mtg-jamendo/raw_30s_audio-low_sha256_tars.txt"
   fi
 
   # FSD50K
