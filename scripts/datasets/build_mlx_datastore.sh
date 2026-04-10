@@ -179,6 +179,129 @@ phase_elapsed() {
   printf '%dm%02ds' $((s / 60)) $((s % 60))
 }
 
+# ---------------------------------------------------------------------------
+# Phase-skip verification helpers
+# ---------------------------------------------------------------------------
+# These check actual output files on disk (isfile + size > 0) to decide
+# whether a phase can be skipped.  Lists and indices may be stale after a
+# crash — only the files themselves are trustworthy.
+
+verify_file_list() {
+  local list_file="$1"
+  "${PYTHON_BIN}" - "${list_file}" <<'PY'
+import os, sys, time
+t0 = time.monotonic()
+list_path = sys.argv[1]
+if not os.path.isfile(list_path):
+    sys.exit(2)
+total = 0
+valid = 0
+with open(list_path, encoding="utf-8") as fh:
+    for raw in fh:
+        p = raw.strip()
+        if not p or p.startswith("#"):
+            continue
+        total += 1
+        if os.path.isfile(p) and os.path.getsize(p) > 0:
+            valid += 1
+if total == 0:
+    sys.exit(2)
+elapsed = time.monotonic() - t0
+print(f"{valid} {total} {elapsed:.1f}")
+sys.exit(0 if valid == total else 1)
+PY
+}
+
+check_preprocess_complete() {
+  local input_list="$1"
+  local output_root="$2"
+  local base_dir="$3"
+  "${PYTHON_BIN}" - "${input_list}" "${output_root}" "${base_dir}" <<'PY'
+import os, sys, time
+from pathlib import Path
+
+t0 = time.monotonic()
+input_list = sys.argv[1]
+output_root = Path(sys.argv[2])
+base_dir = Path(sys.argv[3])
+
+if not os.path.isfile(input_list):
+    sys.exit(2)
+
+total = 0
+covered = 0
+with open(input_list, encoding="utf-8") as fh:
+    for raw in fh:
+        p = raw.strip()
+        if not p or p.startswith("#"):
+            continue
+        total += 1
+        inp = Path(p).expanduser().resolve()
+        try:
+            rel = inp.relative_to(base_dir.expanduser().resolve())
+        except ValueError:
+            # Input outside base_dir — can't compute expected output
+            continue
+        expected = output_root / rel.with_suffix(".wav")
+        if expected.is_file() and expected.stat().st_size > 0:
+            covered += 1
+
+if total == 0:
+    sys.exit(2)
+elapsed = time.monotonic() - t0
+print(f"{covered} {total} {elapsed:.1f}")
+sys.exit(0 if covered == total else 1)
+PY
+}
+
+check_music_prep_complete() {
+  local input_list="$1"
+  local output_root="$2"
+  local base_dir="$3"
+  local style="$4"
+  "${PYTHON_BIN}" - "${input_list}" "${output_root}" "${base_dir}" "${style}" <<'PY'
+import os, sys, time
+from pathlib import Path
+
+t0 = time.monotonic()
+input_list = sys.argv[1]
+output_root = Path(sys.argv[2])
+base_dir = Path(sys.argv[3])
+style = sys.argv[4]
+
+if not os.path.isfile(input_list):
+    sys.exit(2)
+
+total = 0
+covered = 0
+with open(input_list, encoding="utf-8") as fh:
+    for raw in fh:
+        p = raw.strip()
+        if not p or p.startswith("#"):
+            continue
+        total += 1
+        inp = Path(p).expanduser().resolve()
+        try:
+            rel = inp.relative_to(base_dir.expanduser().resolve())
+        except ValueError:
+            continue
+        # Check variant_0 exists — if it does, all variants were rendered
+        # (the script processes all variants per source before moving on)
+        # Path mirrors build_output_path(): rel_parent/{stem}__{ext}/{stem}.{style}_v00.wav
+        suffix_label = inp.suffix.lower().lstrip(".") or "audio"
+        variant_dir = output_root / rel.parent / f"{inp.stem}__{suffix_label}"
+        expected = variant_dir / f"{inp.stem}.{style}_v00.wav"
+        if expected.is_file() and expected.stat().st_size > 0:
+            covered += 1
+
+if total == 0:
+    sys.exit(2)
+elapsed = time.monotonic() - t0
+print(f"{covered} {total} {elapsed:.1f}")
+sys.exit(0 if covered == total else 1)
+PY
+}
+
 usage_helptext() {
   cat <<EOF
 Usage:
@@ -260,6 +383,9 @@ Optional background-music preparation:
   --music-prepare-overwrite   Rebuild prepared music files even if they already exist; otherwise resume is automatic
 
 General:
+  --force                     Run all phases regardless of existing outputs
+                              (skips phase-level completion checks; per-file
+                              resume still applies unless --*-overwrite is set)
   -h, --help                  Show this help message and exit
 
 Environment variables remain supported and are used as fallbacks when the
@@ -341,6 +467,7 @@ PREPROCESS_OVERWRITE=0
 PREPARE_BACKGROUND_MUSIC=0
 MUSIC_PREPARE_OVERWRITE=0
 INCLUDE_CHAINS=0
+FORCE_ALL=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -506,6 +633,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --music-prepare-overwrite)
       MUSIC_PREPARE_OVERWRITE=1
+      shift
+      ;;
+    --force)
+      FORCE_ALL=1
       shift
       ;;
     -h|--help)
@@ -730,6 +861,9 @@ if [[ ${PREPROCESS_CLEAN_SPEECH} -eq 1 ]]; then
 else
   echo "Preprocess speech:  disabled"
 fi
+if [[ ${FORCE_ALL} -eq 1 ]]; then
+  echo "Force mode:         enabled (all phase completion checks disabled)"
+fi
 echo "=============================================="
 
 if [[ "${MERGE_SHORT}" != "true" && "${MIN_DURATION}" != "0" && "${MIN_DURATION}" != "0.0" ]]; then
@@ -762,20 +896,35 @@ if [[ ${INCLUDE_CHAINS} -eq 1 ]]; then
     exit 1
   fi
 
-  echo ""
-  echo "Preparing CHAINS clean-speech additions..."
-  chains_cmd=(
-    "${PYTHON_BIN}"
-    "${ROOT_DIR}/scripts/datasets/prepare_chains_speech.py"
-    --chains-dir "${CHAINS_DIR}"
-    --prepared-root "${CHAINS_PREPARED_ROOT}"
-    --output-list "${CHAINS_LIST}"
-  )
-  "${chains_cmd[@]}"
-  if [[ ! -f "${CHAINS_LIST}" ]]; then
-    echo "Error: CHAINS preparation did not produce list ${CHAINS_LIST}" >&2
-    exit 1
+  CHAINS_SKIPPED=0
+  if [[ ${FORCE_ALL} -eq 0 ]]; then
+    if verify_result="$(verify_file_list "${CHAINS_LIST}" 2>/dev/null)"; then
+      read -r vfl_valid vfl_total vfl_time <<< "${verify_result}"
+      printf '[skip] CHAINS preparation: %s files verified on disk (%ss)\n' \
+        "$(printf '%d' "${vfl_valid}")" "${vfl_time}"
+      CHAINS_SKIPPED=1
+    fi
+  elif [[ ${FORCE_ALL} -eq 1 ]]; then
+    echo "[force] CHAINS preparation: --force set, running phase"
   fi
+
+  if [[ ${CHAINS_SKIPPED} -eq 0 ]]; then
+    echo ""
+    echo "Preparing CHAINS clean-speech additions..."
+    chains_cmd=(
+      "${PYTHON_BIN}"
+      "${ROOT_DIR}/scripts/datasets/prepare_chains_speech.py"
+      --chains-dir "${CHAINS_DIR}"
+      --prepared-root "${CHAINS_PREPARED_ROOT}"
+      --output-list "${CHAINS_LIST}"
+    )
+    "${chains_cmd[@]}"
+    if [[ ! -f "${CHAINS_LIST}" ]]; then
+      echo "Error: CHAINS preparation did not produce list ${CHAINS_LIST}" >&2
+      exit 1
+    fi
+  fi
+  # Always regenerate the merged clean list (even when the producer was skipped)
   merge_unique_file_lists "${COMBINED_CLEAN_LIST}" "${CLEAN_LIST}" "${CHAINS_LIST}"
   CLEAN_LIST_TO_USE="${COMBINED_CLEAN_LIST}"
 fi
@@ -787,38 +936,69 @@ if [[ ${PREPROCESS_CLEAN_SPEECH} -eq 1 ]]; then
   if [[ ${INCLUDE_CHAINS} -eq 1 && ${PREPROCESS_BASE_DIR_WAS_SET} -eq 0 ]]; then
     PREPROCESS_BASE_DIR_TO_USE="$(compute_common_base_dir "${CLEAN_LIST_TO_USE}")"
   fi
-  echo ""
-  echo "Running clean-speech preprocessing before cache build..."
-  echo "Only the clean/speech list is eligible; noise and RIR lists are left untouched."
-  if [[ "${PREPROCESS_BASE_DIR_TO_USE}" != "${PREPROCESS_BASE_DIR}" ]]; then
-    echo "Preprocess base auto-adjusted for combined speech roots: ${PREPROCESS_BASE_DIR_TO_USE}"
+
+  PREPROCESS_SKIPPED=0
+  if [[ ${FORCE_ALL} -eq 0 && ${PREPROCESS_OVERWRITE} -eq 0 ]]; then
+    # Two-part check: (1) every input has a valid output file on disk,
+    # AND (2) the output list itself is valid (all referenced files exist).
+    # Both must pass — a crash can leave outputs on disk without a valid list.
+    if pp_result="$(check_preprocess_complete "${CLEAN_LIST_TO_USE}" "${PREPROCESS_OUTPUT_ROOT}" "${PREPROCESS_BASE_DIR_TO_USE}" 2>/dev/null)"; then
+      if verify_file_list "${PREPROCESS_OUTPUT_LIST}" >/dev/null 2>&1; then
+        read -r pp_covered pp_total pp_time <<< "${pp_result}"
+        printf '[skip] Clean-speech preprocessing: %s/%s inputs have valid outputs (%ss)\n' \
+          "$(printf '%d' "${pp_covered}")" "$(printf '%d' "${pp_total}")" "${pp_time}"
+        PREPROCESS_SKIPPED=1
+      else
+        read -r pp_covered pp_total pp_time <<< "${pp_result}"
+        printf '[check] Clean-speech preprocessing: outputs exist but list is stale → running phase to regenerate list\n'
+      fi
+    else
+      if [[ -n "${pp_result:-}" ]]; then
+        read -r pp_covered pp_total pp_time <<< "${pp_result}"
+        printf '[check] Clean-speech preprocessing: %s/%s inputs covered, %d pending → running phase\n' \
+          "$(printf '%d' "${pp_covered}")" "$(printf '%d' "${pp_total}")" "$((pp_total - pp_covered))"
+      fi
+    fi
+  elif [[ ${PREPROCESS_OVERWRITE} -eq 1 ]]; then
+    echo "[force] Clean-speech preprocessing: --preprocess-overwrite set, running phase"
+  elif [[ ${FORCE_ALL} -eq 1 ]]; then
+    echo "[force] Clean-speech preprocessing: --force set, running phase"
   fi
-  preprocess_cmd=(
-    "${PYTHON_BIN}"
-    "${ROOT_DIR}/scripts/datasets/preprocess_clean_speech.py"
-    --file-list "${CLEAN_LIST_TO_USE}"
-    --output-root "${PREPROCESS_OUTPUT_ROOT}"
-    --base-dir "${PREPROCESS_BASE_DIR_TO_USE}"
-    --output-list "${PREPROCESS_OUTPUT_LIST}"
-    --model-base-dir "${PREPROCESS_MODEL}"
-    --num-workers "${PREPROCESS_WORKERS}"
-  )
-  if [[ -n "${PREPROCESS_PROBE_WORKERS}" ]]; then
-    preprocess_cmd+=(--probe-workers "${PREPROCESS_PROBE_WORKERS}")
+
+  if [[ ${PREPROCESS_SKIPPED} -eq 0 ]]; then
+    echo ""
+    echo "Running clean-speech preprocessing before cache build..."
+    echo "Only the clean/speech list is eligible; noise and RIR lists are left untouched."
+    if [[ "${PREPROCESS_BASE_DIR_TO_USE}" != "${PREPROCESS_BASE_DIR}" ]]; then
+      echo "Preprocess base auto-adjusted for combined speech roots: ${PREPROCESS_BASE_DIR_TO_USE}"
+    fi
+    preprocess_cmd=(
+      "${PYTHON_BIN}"
+      "${ROOT_DIR}/scripts/datasets/preprocess_clean_speech.py"
+      --file-list "${CLEAN_LIST_TO_USE}"
+      --output-root "${PREPROCESS_OUTPUT_ROOT}"
+      --base-dir "${PREPROCESS_BASE_DIR_TO_USE}"
+      --output-list "${PREPROCESS_OUTPUT_LIST}"
+      --model-base-dir "${PREPROCESS_MODEL}"
+      --num-workers "${PREPROCESS_WORKERS}"
+    )
+    if [[ -n "${PREPROCESS_PROBE_WORKERS}" ]]; then
+      preprocess_cmd+=(--probe-workers "${PREPROCESS_PROBE_WORKERS}")
+    fi
+    if [[ -n "${PREPROCESS_PROBE_CACHE}" ]]; then
+      preprocess_cmd+=(--probe-cache "${PREPROCESS_PROBE_CACHE}")
+    fi
+    if [[ -n "${PREPROCESS_DEVICE}" ]]; then
+      preprocess_cmd+=(--device "${PREPROCESS_DEVICE}")
+    fi
+    if [[ -n "${PREPROCESS_ENHANCE_BATCH_SIZE}" ]]; then
+      preprocess_cmd+=(--enhance-batch-size "${PREPROCESS_ENHANCE_BATCH_SIZE}")
+    fi
+    if [[ ${PREPROCESS_OVERWRITE} -eq 1 ]]; then
+      preprocess_cmd+=(--overwrite)
+    fi
+    "${preprocess_cmd[@]}"
   fi
-  if [[ -n "${PREPROCESS_PROBE_CACHE}" ]]; then
-    preprocess_cmd+=(--probe-cache "${PREPROCESS_PROBE_CACHE}")
-  fi
-  if [[ -n "${PREPROCESS_DEVICE}" ]]; then
-    preprocess_cmd+=(--device "${PREPROCESS_DEVICE}")
-  fi
-  if [[ -n "${PREPROCESS_ENHANCE_BATCH_SIZE}" ]]; then
-    preprocess_cmd+=(--enhance-batch-size "${PREPROCESS_ENHANCE_BATCH_SIZE}")
-  fi
-  if [[ ${PREPROCESS_OVERWRITE} -eq 1 ]]; then
-    preprocess_cmd+=(--overwrite)
-  fi
-  "${preprocess_cmd[@]}"
   CLEAN_LIST_TO_USE="${PREPROCESS_OUTPUT_LIST}"
   if [[ ! -f "${CLEAN_LIST_TO_USE}" ]]; then
     echo "Error: preprocessing did not produce clean list ${CLEAN_LIST_TO_USE}" >&2
@@ -848,31 +1028,60 @@ if [[ ${PREPARE_BACKGROUND_MUSIC} -eq 1 ]]; then
     echo "Background-music preparation requested, but no usable music list is available."
     echo "Continuing without prepared music variants."
   else
-    echo ""
-    echo "Preparing degraded background-music variants before cache build..."
-    music_prepare_cmd=(
-      "${PYTHON_BIN}"
-      "${ROOT_DIR}/scripts/datasets/prepare_background_music.py"
-      --file-list "${MUSIC_LIST_INPUT}"
-      --output-root "${MUSIC_PREPARE_OUTPUT_ROOT}"
-      --base-dir "${MUSIC_PREPARE_BASE_DIR}"
-      --output-list "${MUSIC_PREPARE_OUTPUT_LIST}"
-      --sample-rate "${SR}"
-      --style "${MUSIC_PREPARE_STYLE}"
-      --variants-per-source "${MUSIC_PREPARE_VARIANTS}"
-      --seed "${MUSIC_PREPARE_SEED}"
-    )
-    if [[ -n "${MUSIC_PREPARE_RIR_LIST}" && -f "${MUSIC_PREPARE_RIR_LIST}" ]]; then
-      music_prepare_cmd+=(--rir-list "${MUSIC_PREPARE_RIR_LIST}")
+    MUSIC_PREP_SKIPPED=0
+    if [[ ${FORCE_ALL} -eq 0 && ${MUSIC_PREPARE_OVERWRITE} -eq 0 ]]; then
+      # Two-part check: (1) every input source has variant_0 on disk,
+      # AND (2) the output list itself is valid.
+      if mp_result="$(check_music_prep_complete "${MUSIC_LIST_INPUT}" "${MUSIC_PREPARE_OUTPUT_ROOT}" "${MUSIC_PREPARE_BASE_DIR}" "${MUSIC_PREPARE_STYLE}" 2>/dev/null)"; then
+        if verify_file_list "${MUSIC_PREPARE_OUTPUT_LIST}" >/dev/null 2>&1; then
+          read -r mp_covered mp_total mp_time <<< "${mp_result}"
+          printf '[skip] Background-music preparation: %s sources fully prepared (%ss)\n' \
+            "$(printf '%d' "${mp_covered}")" "${mp_time}"
+          MUSIC_PREP_SKIPPED=1
+        else
+          printf '[check] Background-music preparation: outputs exist but list is stale → running phase to regenerate list\n'
+        fi
+      else
+        if [[ -n "${mp_result:-}" ]]; then
+          read -r mp_covered mp_total mp_time <<< "${mp_result}"
+          printf '[check] Background-music preparation: %s/%s sources covered, %d pending → running phase\n' \
+            "$(printf '%d' "${mp_covered}")" "$(printf '%d' "${mp_total}")" "$((mp_total - mp_covered))"
+        fi
+      fi
+    elif [[ ${MUSIC_PREPARE_OVERWRITE} -eq 1 ]]; then
+      echo "[force] Background-music preparation: --music-prepare-overwrite set, running phase"
+    elif [[ ${FORCE_ALL} -eq 1 ]]; then
+      echo "[force] Background-music preparation: --force set, running phase"
     fi
-    if [[ ${MUSIC_PREPARE_OVERWRITE} -eq 1 ]]; then
-      music_prepare_cmd+=(--overwrite)
+
+    if [[ ${MUSIC_PREP_SKIPPED} -eq 0 ]]; then
+      echo ""
+      echo "Preparing degraded background-music variants before cache build..."
+      music_prepare_cmd=(
+        "${PYTHON_BIN}"
+        "${ROOT_DIR}/scripts/datasets/prepare_background_music.py"
+        --file-list "${MUSIC_LIST_INPUT}"
+        --output-root "${MUSIC_PREPARE_OUTPUT_ROOT}"
+        --base-dir "${MUSIC_PREPARE_BASE_DIR}"
+        --output-list "${MUSIC_PREPARE_OUTPUT_LIST}"
+        --sample-rate "${SR}"
+        --style "${MUSIC_PREPARE_STYLE}"
+        --variants-per-source "${MUSIC_PREPARE_VARIANTS}"
+        --seed "${MUSIC_PREPARE_SEED}"
+      )
+      if [[ -n "${MUSIC_PREPARE_RIR_LIST}" && -f "${MUSIC_PREPARE_RIR_LIST}" ]]; then
+        music_prepare_cmd+=(--rir-list "${MUSIC_PREPARE_RIR_LIST}")
+      fi
+      if [[ ${MUSIC_PREPARE_OVERWRITE} -eq 1 ]]; then
+        music_prepare_cmd+=(--overwrite)
+      fi
+      "${music_prepare_cmd[@]}"
+      if [[ ! -f "${MUSIC_PREPARE_OUTPUT_LIST}" ]]; then
+        echo "Error: music preparation did not produce list ${MUSIC_PREPARE_OUTPUT_LIST}" >&2
+        exit 1
+      fi
     fi
-    "${music_prepare_cmd[@]}"
-    if [[ ! -f "${MUSIC_PREPARE_OUTPUT_LIST}" ]]; then
-      echo "Error: music preparation did not produce list ${MUSIC_PREPARE_OUTPUT_LIST}" >&2
-      exit 1
-    fi
+    # Always regenerate the merged list (even when the producer was skipped)
     merge_unique_file_lists "${MUSIC_PREPARE_MERGED_LIST}" "${MUSIC_LIST_INPUT}" "${MUSIC_PREPARE_OUTPUT_LIST}"
     MUSIC_LIST_TO_USE="${MUSIC_PREPARE_MERGED_LIST}"
   fi
