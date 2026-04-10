@@ -240,8 +240,7 @@ with open(input_list, encoding="utf-8") as fh:
         try:
             rel = inp.relative_to(base_dir.expanduser().resolve())
         except ValueError:
-            # Input outside base_dir — can't compute expected output
-            continue
+            rel = Path("_external") / inp.name
         expected = output_root / rel.with_suffix(".wav")
         if expected.is_file() and expected.stat().st_size > 0:
             covered += 1
@@ -284,7 +283,7 @@ with open(input_list, encoding="utf-8") as fh:
         try:
             rel = inp.relative_to(base_dir.expanduser().resolve())
         except ValueError:
-            continue
+            rel = Path("_external") / inp.name
         # Check variant_0 exists — if it does, all variants were rendered
         # (the script processes all variants per source before moving on)
         # Path mirrors build_output_path(): rel_parent/{stem}__{ext}/{stem}.{style}_v00.wav
