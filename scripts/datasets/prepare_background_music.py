@@ -31,7 +31,7 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[2] / "DeepFilterNet"
 if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
-from df_mlx._audio_io import load_audio_file, resample_audio  # noqa: E402
+from df_mlx._audio_io import load_audio_file, load_audio_file_safe, resample_audio  # noqa: E402
 from df_mlx.file_lists import read_file_list  # noqa: E402
 from df_mlx.prepare_data import apply_rir  # noqa: E402
 
@@ -476,7 +476,12 @@ def main() -> int:
                     continue
 
                 if audio is None:
-                    audio = load_audio_file(str(source), args.sample_rate)
+                    audio = load_audio_file_safe(str(source), args.sample_rate)
+                    if audio is None:
+                        prepared_paths.pop()  # undo append — file won't be created
+                        remaining = args.variants_per_source - variant_idx
+                        progress.update(remaining)
+                        break
 
                 rng = build_rng(source, variant_idx, args.seed)
                 rir_audio = None
