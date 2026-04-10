@@ -105,7 +105,7 @@ Dataset selection:
   --download-librispeech / --no-download-librispeech         Override LibriSpeech toggle (default: production=1, apple/prototype=0)
   --download-musan / --no-download-musan                     Override MUSAN toggle (default: enabled)
   --download-fma / --no-download-fma                         Override FMA download toggle (default: enabled)
-  --download-mtg-jamendo / --no-download-mtg-jamendo         Override MTG-Jamendo download toggle (default: disabled)
+  --download-mtg-jamendo / --no-download-mtg-jamendo         Override MTG-Jamendo download toggle (default: production=1, apple/prototype=0)
   --download-fsd50k / --no-download-fsd50k                   Override FSD50K toggle (default: enabled)
   --download-air / --no-download-air                         Override AIR toggle (default: enabled)
   --download-openair / --no-download-openair                 Override OpenAIR toggle (default: enabled)
@@ -1577,7 +1577,10 @@ if [[ "${DOWNLOAD}" == "1" ]]; then
     DOWNLOAD_FMA=1
   fi
   if [[ -z "${DOWNLOAD_MTG_JAMENDO}" ]]; then
-    DOWNLOAD_MTG_JAMENDO=0
+    case "${PROFILE}" in
+      production) DOWNLOAD_MTG_JAMENDO=1 ;;
+      apple|prototype|*) DOWNLOAD_MTG_JAMENDO=0 ;;
+    esac
   fi
   if [[ -z "${DOWNLOAD_FSD50K}" ]]; then
     DOWNLOAD_FSD50K=1
