@@ -86,6 +86,14 @@ logic and the `HARDWARE_PROFILES` constant for the full profile table.
 The shell entrypoint `scripts/datasets/build_mlx_datastore.sh` now treats the
 `apple` profile as a chip-aware preset instead of a single fixed worker count.
 
+### Idempotent phase skipping
+
+Re-running the build script automatically skips completed phases (CHAINS
+preparation, clean-speech preprocessing, background-music preparation). Each
+phase verifies its outputs on disk — not just a sentinel — and prints `[skip]`
+when safe. Use `--force` to bypass all checks and rebuild from scratch. The
+config banner now also displays available disk space on the target filesystem.
+
 ### Default builder workers by chip tier
 
 | Apple chip tier | Default `--num-workers` | Default `--preprocess-workers` |

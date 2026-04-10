@@ -56,7 +56,7 @@ There are two training approaches:
 Pre-compute spectral features once, then train:
 
 ```bash
-# Build datastore (one-time)
+# Build datastore (one-time; re-runs resume automatically)
 ./scripts/datasets/build_mlx_datastore.sh
 
 # Optional: synthesize extra speaker-in-room/live-ish background-music variants
@@ -66,6 +66,9 @@ Pre-compute spectral features once, then train:
 ./scripts/datasets/build_mlx_datastore.sh \
     --prepare-background-music \
     --music-prepare-style phone_room
+
+# Force a full rebuild (bypass phase completion checks)
+./scripts/datasets/build_mlx_datastore.sh --force
 
 # Optional: render a small audition pack to listen to original vs prepared
 # before committing to a full cache build

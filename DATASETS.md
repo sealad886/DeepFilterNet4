@@ -160,6 +160,22 @@ You **do** need to rebuild the datastore when any of these change:
 - `--sample-rate` or `--segment-length`,
 - short-speech handling (`--min-duration` / `--merge-short`).
 
+### Idempotent re-runs
+
+Re-running `build_mlx_datastore.sh` automatically skips phases that are already
+complete. The script checks every expected output file on disk (not just a
+sentinel) and prints `[skip]` with a count and elapsed time when a phase can be
+safely skipped. This means you can interrupt a long build and pick up where you
+left off without manually tracking progress.
+
+Use `--force` to bypass all phase completion checks and rebuild everything from
+scratch. Per-phase overwrite flags (`--preprocess-overwrite`,
+`--music-prepare-overwrite`) force individual phases without affecting others.
+
+The config banner also displays available disk space on the output filesystem
+before starting, so you can catch out-of-space issues before a multi-hour
+operation begins.
+
 Recommended build for Apple Silicon / vadlite-style training:
 
 ```
@@ -198,7 +214,9 @@ OUTPUT_DIR=/path/to/cache \
 
 Notes:
 - `--merge-short` is recommended when you want to preserve more short utterances
-  instead of skipping speech clips shorter than `--min-duration`.
+  instead of skipping speech clips shorter than `--min-duration` (default: same
+  as `--segment-length`, typically 5.0s).
+- `--max-pending-gb` controls the async shard writer memory budget (default: 8 GB).
 - `build_mlx_datastore.sh` prefers `lists/background_music.txt` as the
   dedicated `--music-list`, falling back to
   `lists/background_music_expanded.txt` only when the curated list is absent.
@@ -216,6 +234,8 @@ Notes:
   repeated prompt speaker recordings.
 - If you are rebuilding into a new location to avoid duplicate disk usage,
   delete the old cache directory first.
+- Re-running the script resumes automatically — completed phases are skipped.
+  Use `--force` to rebuild everything from scratch.
 
 Validate the datastore before a long run:
 
