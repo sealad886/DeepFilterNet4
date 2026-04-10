@@ -1186,6 +1186,9 @@ extract_archive() {
     *.tar.gz|*.tgz)
       tar -xzf "${archive}" -C "${stage_dir}"
       ;;
+    *.tar)
+      tar -xf "${archive}" -C "${stage_dir}"
+      ;;
     *.zip)
       # Use Python's zipfile directly — macOS's ancient unzip (2009) chokes
       # on bzip2-compressed zips (exit 81) and has other limitations.
@@ -1249,6 +1252,15 @@ sys.exit(1 if bad else 0)
     *.tar.gz|*.tgz)
       command -v tar >/dev/null 2>&1 || return 0
       tar -tzf "${archive}" >/dev/null 2>&1
+      status=$?
+      if [[ ${status} -eq 0 && "${VERIFY_CACHE}" == "1" ]]; then
+        cache_store "${archive}"
+      fi
+      return ${status}
+      ;;
+    *.tar)
+      command -v tar >/dev/null 2>&1 || return 0
+      tar -tf "${archive}" >/dev/null 2>&1
       status=$?
       if [[ ${status} -eq 0 && "${VERIFY_CACHE}" == "1" ]]; then
         cache_store "${archive}"
