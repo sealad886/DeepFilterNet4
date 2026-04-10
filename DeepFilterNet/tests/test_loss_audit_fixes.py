@@ -12,6 +12,8 @@ Tests cover:
 import math
 
 import mlx.core as mx
+import mlx.nn as nn
+from mlx.utils import tree_flatten
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Complex spectral loss — arctan2 gradient fix
@@ -248,6 +250,153 @@ class TestMaskSaturationRemoved:
         assert abs(actual_total - expected_total) < 1e-5, (
             f"Total should NOT include mask saturation: " f"actual={actual_total}, expected={expected_total}"
         )
+
+
+class TestContrastiveAwesomeGradients:
+    """Contrastive AWESOME should backpropagate to outputs and projector params."""
+
+    def _sample_inputs(self):
+        batch, time, freq = 2, 6, 64
+        clean_real = mx.random.normal((batch, time, freq))
+        clean_imag = mx.random.normal((batch, time, freq))
+        interference_real = 0.2 * mx.random.normal((batch, time, freq))
+        interference_imag = 0.2 * mx.random.normal((batch, time, freq))
+        noisy_real = clean_real + interference_real
+        noisy_imag = clean_imag + interference_imag
+        out_real = clean_real + 0.05 * mx.random.normal((batch, time, freq))
+        out_imag = clean_imag + 0.05 * mx.random.normal((batch, time, freq))
+        snr = mx.array([5.0, -2.0], dtype=mx.float32)
+        return (
+            clean_real,
+            clean_imag,
+            interference_real,
+            interference_imag,
+            noisy_real,
+            noisy_imag,
+            out_real,
+            out_imag,
+            snr,
+        )
+
+    def test_gradient_flows_to_prediction_branch(self):
+        from df_mlx.model import ContrastiveFrameProjector
+        from df_mlx.training_losses import _build_speech_band_mask, _compute_contrastive_awesome_losses
+
+        (
+            clean_real,
+            clean_imag,
+            interference_real,
+            interference_imag,
+            noisy_real,
+            noisy_imag,
+            out_real,
+            out_imag,
+            snr,
+        ) = self._sample_inputs()
+        band_mask, band_bins = _build_speech_band_mask(clean_real.shape[-1], 48000, 300.0, 3400.0)
+        projector = ContrastiveFrameProjector(n_freqs=clean_real.shape[-1], hidden_dim=64, embedding_dim=32)
+
+        def compute(pred_real, pred_imag):
+            loss, *_ = _compute_contrastive_awesome_losses(
+                noisy_real,
+                noisy_imag,
+                clean_real,
+                clean_imag,
+                interference_real,
+                interference_imag,
+                pred_real,
+                pred_imag,
+                snr,
+                band_mask,
+                band_bins,
+                6.0,
+                0.0,
+                1.0,
+                -10.0,
+                6.0,
+                True,
+                projector=projector,
+                temperature=0.1,
+                speech_frames_per_sample=3,
+                interference_frames_per_sample=3,
+                speech_mask_min=0.0,
+                interference_mask_max=1.0,
+                quiet_weight=0.5,
+                in_batch_negatives=True,
+            )
+            return loss
+
+        loss, grads = mx.value_and_grad(compute, argnums=(0, 1))(out_real, out_imag)
+        grad_real, grad_imag = grads
+        mx.eval(loss, grad_real, grad_imag)
+        assert math.isfinite(float(loss))
+        assert float(mx.sum(mx.abs(grad_real))) > 0.0
+        assert float(mx.sum(mx.abs(grad_imag))) > 0.0
+
+    def test_gradient_flows_to_projector_parameters(self):
+        from df_mlx.model import ContrastiveFrameProjector
+        from df_mlx.training_losses import _build_speech_band_mask, _compute_contrastive_awesome_losses
+
+        (
+            clean_real,
+            clean_imag,
+            interference_real,
+            interference_imag,
+            noisy_real,
+            noisy_imag,
+            out_real,
+            out_imag,
+            snr,
+        ) = self._sample_inputs()
+        band_mask, band_bins = _build_speech_band_mask(clean_real.shape[-1], 48000, 300.0, 3400.0)
+
+        class Wrapper(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.projector = ContrastiveFrameProjector(
+                    n_freqs=clean_real.shape[-1], hidden_dim=64, embedding_dim=32
+                )
+
+            def __call__(self):
+                loss, *_ = _compute_contrastive_awesome_losses(
+                    noisy_real,
+                    noisy_imag,
+                    clean_real,
+                    clean_imag,
+                    interference_real,
+                    interference_imag,
+                    out_real,
+                    out_imag,
+                    snr,
+                    band_mask,
+                    band_bins,
+                    6.0,
+                    0.0,
+                    1.0,
+                    -10.0,
+                    6.0,
+                    True,
+                    projector=self.projector,
+                    temperature=0.1,
+                    speech_frames_per_sample=3,
+                    interference_frames_per_sample=3,
+                    speech_mask_min=0.0,
+                    interference_mask_max=1.0,
+                    quiet_weight=0.5,
+                    in_batch_negatives=True,
+                )
+                return loss
+
+        wrapper = Wrapper()
+        wrapper.train()
+        loss, grads = nn.value_and_grad(wrapper, wrapper)()
+        mx.eval(loss, grads)
+        grad_leaves = tree_flatten(grads)
+        grad_norm = 0.0
+        for _, grad in grad_leaves:
+            grad_norm += float(mx.sum(mx.abs(grad)))
+        assert math.isfinite(float(loss))
+        assert grad_norm > 0.0, "Contrastive projector parameters should receive gradient"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

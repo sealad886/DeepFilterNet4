@@ -59,6 +59,8 @@ def _fixture_sample_spectrograms():
 
     noisy_real = clean_real + noise_real
     noisy_imag = clean_imag + noise_imag
+    interference_real = noise_real.copy()
+    interference_imag = noise_imag.copy()
 
     # Output spectrogram (enhanced, close to clean)
     out_real = clean_real + 0.1 * noise_real
@@ -69,6 +71,8 @@ def _fixture_sample_spectrograms():
         "clean_imag": mx.array(clean_imag),
         "noisy_real": mx.array(noisy_real),
         "noisy_imag": mx.array(noisy_imag),
+        "interference_real": mx.array(interference_real),
+        "interference_imag": mx.array(interference_imag),
         "out_real": mx.array(out_real),
         "out_imag": mx.array(out_imag),
         "snr": mx.array([10.0, 5.0, 0.0, -5.0]),
@@ -107,6 +111,7 @@ def import_loss_functions():
     from df_mlx.training_losses import (
         _EPS,
         _compute_awesome_losses,
+        _compute_contrastive_awesome_losses,
         _compute_pipeline_awesome_losses,
         _compute_speech_band_logmag_loss,
         _compute_vad_loss,
@@ -115,6 +120,7 @@ def import_loss_functions():
 
     return {
         "compute_awesome_losses": _compute_awesome_losses,
+        "compute_contrastive_awesome_losses": _compute_contrastive_awesome_losses,
         "compute_pipeline_awesome_losses": _compute_pipeline_awesome_losses,
         "compute_speech_band_logmag_loss": _compute_speech_band_logmag_loss,
         "compute_vad_loss": _compute_vad_loss,
@@ -130,6 +136,11 @@ def import_loss_functions():
 
 class TestDimensionalConsistency:
     """Verify loss terms have correct shapes and magnitudes."""
+
+    def _make_projector(self, n_freqs: int):
+        from df_mlx.model import ContrastiveFrameProjector
+
+        return ContrastiveFrameProjector(n_freqs=n_freqs, hidden_dim=96, embedding_dim=48)
 
     def test_awesome_loss_shape(self, sample_spectrograms, band_mask):
         """Awesome loss should return scalar and matching diagnostic shapes."""
@@ -215,6 +226,54 @@ class TestDimensionalConsistency:
         assert total_loss.shape == (), f"Expected scalar, got {total_loss.shape}"
         assert music_suppression_loss.shape == (), f"Expected scalar, got shape {music_suppression_loss.shape}"
         assert mask_saturation_loss.shape == (), f"Expected scalar, got shape {mask_saturation_loss.shape}"
+
+    def test_contrastive_awesome_loss_shape(self, sample_spectrograms, band_mask):
+        """Contrastive AWESOME should return scalar losses and frame-count diagnostics."""
+        loss_fns = import_loss_functions()
+        band_mask_arr, band_bins = band_mask
+        s = sample_spectrograms
+        projector = self._make_projector(s["n_freqs"])
+
+        result = loss_fns["compute_contrastive_awesome_losses"](
+            s["noisy_real"],
+            s["noisy_imag"],
+            s["clean_real"],
+            s["clean_imag"],
+            s["interference_real"],
+            s["interference_imag"],
+            s["out_real"],
+            s["out_imag"],
+            s["snr"],
+            band_mask_arr,
+            band_bins,
+            mask_sharpness=6.0,
+            vad_z_threshold=0.0,
+            vad_z_slope=1.0,
+            vad_snr_gate_db=-10.0,
+            vad_snr_gate_width=6.0,
+            proxy_enabled=True,
+            projector=projector,
+            temperature=0.1,
+            speech_frames_per_sample=8,
+            interference_frames_per_sample=8,
+            speech_mask_min=0.0,
+            interference_mask_max=1.0,
+            quiet_weight=0.5,
+            in_batch_negatives=True,
+        )
+
+        assert len(result) == 15, f"Expected 15 return values, got {len(result)}"
+        assert result[0].shape == (), f"Expected scalar total loss, got {result[0].shape}"
+        assert result[1].shape == (), f"Expected scalar speech loss, got {result[1].shape}"
+        assert result[2].shape == (), f"Expected scalar quiet loss, got {result[2].shape}"
+        assert result[3].shape == (), f"Expected scalar pos similarity, got {result[3].shape}"
+        assert result[4].shape == (), f"Expected scalar neg similarity, got {result[4].shape}"
+        assert result[5].shape == (
+            s["batch_size"],
+            s["n_frames"],
+            s["n_freqs"],
+        ), f"Mask shape mismatch: {result[5].shape}"
+        assert result[6].shape == (s["batch_size"], s["n_frames"]), f"Proxy shape mismatch: {result[6].shape}"
 
 
 class TestNumericalStability:
@@ -335,9 +394,166 @@ class TestNumericalStability:
 
         self._check_finite(result[0], "awesome_loss_extreme")
 
+    def test_contrastive_awesome_loss_finite(self, sample_spectrograms, band_mask):
+        """Contrastive AWESOME should remain finite on normal inputs."""
+        from df_mlx.model import ContrastiveFrameProjector
+
+        loss_fns = import_loss_functions()
+        band_mask_arr, band_bins = band_mask
+        s = sample_spectrograms
+        projector = ContrastiveFrameProjector(n_freqs=s["n_freqs"], hidden_dim=96, embedding_dim=48)
+
+        result = loss_fns["compute_contrastive_awesome_losses"](
+            s["noisy_real"],
+            s["noisy_imag"],
+            s["clean_real"],
+            s["clean_imag"],
+            s["interference_real"],
+            s["interference_imag"],
+            s["out_real"],
+            s["out_imag"],
+            s["snr"],
+            band_mask_arr,
+            band_bins,
+            mask_sharpness=6.0,
+            vad_z_threshold=0.0,
+            vad_z_slope=1.0,
+            vad_snr_gate_db=-10.0,
+            vad_snr_gate_width=6.0,
+            proxy_enabled=True,
+            projector=projector,
+            temperature=0.1,
+            speech_frames_per_sample=8,
+            interference_frames_per_sample=8,
+            speech_mask_min=0.0,
+            interference_mask_max=1.0,
+            quiet_weight=0.5,
+            in_batch_negatives=True,
+        )
+
+        self._check_finite(result[0], "contrastive_loss")
+        self._check_finite(result[1], "contrastive_speech")
+        self._check_finite(result[2], "contrastive_quiet")
+        self._check_finite(result[3], "contrastive_pos_sim")
+        self._check_finite(result[4], "contrastive_neg_sim")
+        self._check_finite(result[5], "contrastive_mask")
+        self._check_finite(result[6], "contrastive_proxy_frame")
+        self._check_finite(result[13], "contrastive_speech_frames")
+        self._check_finite(result[14], "contrastive_interference_frames")
+
+    def test_contrastive_zero_energy_stability(self, band_mask):
+        """Contrastive AWESOME should remain finite for near-silence inputs."""
+        from df_mlx.model import ContrastiveFrameProjector
+
+        loss_fns = import_loss_functions()
+        band_mask_arr, band_bins = band_mask
+
+        batch_size = 2
+        n_frames = 3
+        n_freqs = 481
+        silence_val = 1e-10
+
+        clean_real = mx.full((batch_size, n_frames, n_freqs), silence_val)
+        clean_imag = mx.full((batch_size, n_frames, n_freqs), silence_val)
+        interference_real = mx.full((batch_size, n_frames, n_freqs), 1e-11)
+        interference_imag = mx.full((batch_size, n_frames, n_freqs), 1e-11)
+        noisy_real = clean_real + interference_real
+        noisy_imag = clean_imag + interference_imag
+        out_real = clean_real[:]
+        out_imag = clean_imag[:]
+        snr = mx.array([0.0, -10.0])
+        projector = ContrastiveFrameProjector(n_freqs=n_freqs, hidden_dim=64, embedding_dim=32)
+
+        result = loss_fns["compute_contrastive_awesome_losses"](
+            noisy_real,
+            noisy_imag,
+            clean_real,
+            clean_imag,
+            interference_real,
+            interference_imag,
+            out_real,
+            out_imag,
+            snr,
+            band_mask_arr,
+            band_bins,
+            mask_sharpness=6.0,
+            vad_z_threshold=0.0,
+            vad_z_slope=1.0,
+            vad_snr_gate_db=-10.0,
+            vad_snr_gate_width=6.0,
+            proxy_enabled=True,
+            projector=projector,
+            temperature=0.1,
+            speech_frames_per_sample=2,
+            interference_frames_per_sample=2,
+            speech_mask_min=0.0,
+            interference_mask_max=1.0,
+            quiet_weight=0.5,
+            in_batch_negatives=True,
+        )
+
+        self._check_finite(result[0], "contrastive_loss_silence")
+        self._check_finite(result[6], "contrastive_proxy_frame_silence")
+
 
 class TestEdgeCases:
     """Test edge case handling."""
+
+    def test_contrastive_single_frame(self, band_mask):
+        """Contrastive AWESOME should handle single-frame inputs."""
+        from df_mlx.model import ContrastiveFrameProjector
+
+        loss_fns = import_loss_functions()
+        band_mask_arr, band_bins = band_mask
+
+        batch_size = 2
+        n_frames = 1
+        n_freqs = 481
+
+        np.random.seed(7)
+        clean_real = mx.array(np.random.randn(batch_size, n_frames, n_freqs).astype(np.float32))
+        clean_imag = mx.array(np.random.randn(batch_size, n_frames, n_freqs).astype(np.float32))
+        interference_real = mx.array(np.random.randn(batch_size, n_frames, n_freqs).astype(np.float32) * 0.2)
+        interference_imag = mx.array(np.random.randn(batch_size, n_frames, n_freqs).astype(np.float32) * 0.2)
+        noisy_real = clean_real + interference_real
+        noisy_imag = clean_imag + interference_imag
+        out_real = clean_real[:]
+        out_imag = clean_imag[:]
+        snr = mx.array([10.0, 5.0])
+        projector = ContrastiveFrameProjector(n_freqs=n_freqs, hidden_dim=64, embedding_dim=32)
+
+        result = loss_fns["compute_contrastive_awesome_losses"](
+            noisy_real,
+            noisy_imag,
+            clean_real,
+            clean_imag,
+            interference_real,
+            interference_imag,
+            out_real,
+            out_imag,
+            snr,
+            band_mask_arr,
+            band_bins,
+            mask_sharpness=6.0,
+            vad_z_threshold=0.0,
+            vad_z_slope=1.0,
+            vad_snr_gate_db=-10.0,
+            vad_snr_gate_width=6.0,
+            proxy_enabled=True,
+            projector=projector,
+            temperature=0.1,
+            speech_frames_per_sample=1,
+            interference_frames_per_sample=1,
+            speech_mask_min=0.0,
+            interference_mask_max=1.0,
+            quiet_weight=0.5,
+            in_batch_negatives=True,
+        )
+
+        mx.eval(result[0], result[13], result[14])
+        assert np.all(np.isfinite(np.asarray(result[0]))), "Contrastive single-frame loss not finite"
+        assert float(result[13]) >= 0.0
+        assert float(result[14]) >= 0.0
 
     def test_single_frame(self, band_mask):
         """Test with single time frame."""

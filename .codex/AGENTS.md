@@ -58,10 +58,11 @@ This file is the repo-local Codex entrypoint. Read it together with:
 
 ## Quick command anchors
 
-- Python environment: `poetry -C DeepFilterNet install`
-- Python tests: `python -m pytest` from `DeepFilterNet/`
+- Python environment: `python3 -m pip install -e ./DeepFilterNet[train,eval]`
+- MLX extras: `python3 -m pip install -r DeepFilterNet/requirements_mlx.txt`
+- Python tests: `python3 -m pytest` from `DeepFilterNet/`
 - Rust build/test: `cargo build`, `cargo test`
-- Active MLX training entrypoint: `python -m df_mlx.train_dynamic`
+- Active MLX training entrypoint: `python3 -m df_mlx.train_dynamic`
 - Agentic setup validation: `python3 .codex/scripts/validate_agentic_setup.py`
 
 ## Hard stop rule

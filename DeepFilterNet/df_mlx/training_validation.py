@@ -31,6 +31,8 @@ from tqdm.auto import tqdm
 
 from df_mlx.training_losses import (
     _compute_awesome_losses,
+    _compute_contrastive_awesome_losses,
+    _compute_contrastive_silence_losses,
     _compute_pipeline_awesome_losses,
     _compute_speech_band_logmag_loss,
     _compute_vad_eval_metrics,
@@ -67,6 +69,8 @@ class ValidationContext:
     # Loss flags
     use_awesome_loss: bool
     use_pipeline_awesome_loss: bool
+    use_contrastive_awesome_loss: bool
+    use_contrastive_silence_loss: bool
     use_vad_loss: bool
     use_vad_train_reg: bool
     use_mrstft_loss: bool
@@ -76,6 +80,24 @@ class ValidationContext:
     # Awesome config
     awesome_mask_sharpness: float
     awesome_warmup_steps: int
+    contrastive_loss_weight: float
+    contrastive_warmup_steps: int
+    contrastive_temperature: float
+    contrastive_speech_frames_per_sample: int
+    contrastive_interference_frames_per_sample: int
+    contrastive_speech_mask_min: float
+    contrastive_interference_mask_max: float
+    contrastive_quiet_weight: float
+    contrastive_in_batch_negatives: bool
+    # Contrastive silence config
+    contrastive_silence_frames_per_sample: int
+    contrastive_silence_mask_max: float
+    contrastive_silence_weight: float
+    contrastive_silence_asymmetric_penalty: float
+    contrastive_silence_transition_blend_low: float
+    contrastive_silence_transition_blend_high: float
+    contrastive_silence_low_freq_boost: float
+    contrastive_silence_high_freq_boost: float
     # VAD config
     vad_band_mask: Any  # mx.array
     vad_band_bins: float
@@ -142,6 +164,13 @@ def run_validation(
     valid_awesome_speech = 0.0
     valid_awesome_noise = 0.0
     valid_awesome_smooth = 0.0
+    valid_contrastive_loss = 0.0
+    valid_contrastive_speech = 0.0
+    valid_contrastive_quiet = 0.0
+    valid_contrastive_pos_sim = 0.0
+    valid_contrastive_neg_sim = 0.0
+    valid_contrastive_speech_frames = 0.0
+    valid_contrastive_interference_frames = 0.0
     valid_music_supp_loss = 0.0
     valid_mask_sat_loss = 0.0
     valid_mask_mean = 0.0
@@ -190,8 +219,7 @@ def run_validation(
         )
 
     valid_tqdm_kwargs = dict(ctx.tqdm_kwargs)
-    if ctx.tqdm_panels:
-        valid_tqdm_kwargs["position"] = ctx.tqdm_valid_position
+    valid_tqdm_kwargs["position"] = ctx.tqdm_valid_position
 
     valid_pbar = tqdm(
         valid_loader,
@@ -220,6 +248,8 @@ def run_validation(
         noisy_imag = batch["noisy_imag"]
         clean_real = batch["clean_real"]
         clean_imag = batch["clean_imag"]
+        interference_real = batch["interference_real"]
+        interference_imag = batch["interference_imag"]
         feat_erb = batch["feat_erb"]
         feat_spec = batch["feat_spec"]
         snr = batch["snr"]
@@ -272,6 +302,12 @@ def run_validation(
         awesome_speech = SCALAR_ZERO
         awesome_noise = SCALAR_ZERO
         awesome_smooth = SCALAR_ZERO
+        contrastive_speech = SCALAR_ZERO
+        contrastive_quiet = SCALAR_ZERO
+        contrastive_pos_sim = SCALAR_ZERO
+        contrastive_neg_sim = SCALAR_ZERO
+        contrastive_speech_frames = SCALAR_ZERO
+        contrastive_interference_frames = SCALAR_ZERO
         music_suppression_loss = SCALAR_ZERO
         mask_saturation_loss = SCALAR_ZERO
         mask = SCALAR_ZERO
@@ -355,6 +391,109 @@ def run_validation(
                 debug_ctx=debug_ctx,
             )
 
+        if ctx.use_contrastive_awesome_loss:
+            projector = getattr(ctx.model, "contrastive_projector", None)
+            (
+                awesome_loss,
+                contrastive_speech,
+                contrastive_quiet,
+                contrastive_pos_sim,
+                contrastive_neg_sim,
+                mask,
+                proxy_frame,
+                speech_ratio,
+                music_gate,
+                musicness,
+                mod_energy,
+                energy_boost,
+                snr_boost,
+                contrastive_speech_frames,
+                contrastive_interference_frames,
+            ) = _compute_contrastive_awesome_losses(
+                noisy_real,
+                noisy_imag,
+                clean_real,
+                clean_imag,
+                interference_real,
+                interference_imag,
+                spec_out[0],
+                spec_out[1],
+                snr,
+                ctx.vad_band_mask,
+                ctx.vad_band_bins,
+                ctx.awesome_mask_sharpness,
+                ctx.vad_z_threshold,
+                ctx.vad_z_slope,
+                ctx.vad_snr_gate_db,
+                ctx.vad_snr_gate_width,
+                ctx.vad_proxy_enabled,
+                projector=projector,
+                temperature=ctx.contrastive_temperature,
+                speech_frames_per_sample=ctx.contrastive_speech_frames_per_sample,
+                interference_frames_per_sample=ctx.contrastive_interference_frames_per_sample,
+                speech_mask_min=ctx.contrastive_speech_mask_min,
+                interference_mask_max=ctx.contrastive_interference_mask_max,
+                quiet_weight=ctx.contrastive_quiet_weight,
+                in_batch_negatives=ctx.contrastive_in_batch_negatives,
+                debug=ctx.debugger,
+                debug_ctx=debug_ctx,
+            )
+
+        if ctx.use_contrastive_silence_loss:
+            projector = getattr(ctx.model, "contrastive_projector", None)
+            (
+                awesome_loss,
+                contrastive_speech,
+                contrastive_quiet,
+                contrastive_pos_sim,
+                contrastive_neg_sim,
+                mask,
+                proxy_frame,
+                speech_ratio,
+                music_gate,
+                musicness,
+                mod_energy,
+                energy_boost,
+                snr_boost,
+                contrastive_speech_frames,
+                contrastive_interference_frames,
+            ) = _compute_contrastive_silence_losses(
+                clean_real,
+                clean_imag,
+                noisy_real,
+                noisy_imag,
+                interference_real,
+                interference_imag,
+                spec_out[0],
+                spec_out[1],
+                snr,
+                ctx.vad_band_mask,
+                ctx.vad_band_bins,
+                ctx.awesome_mask_sharpness,
+                ctx.vad_z_threshold,
+                ctx.vad_z_slope,
+                ctx.vad_snr_gate_db,
+                ctx.vad_snr_gate_width,
+                ctx.vad_proxy_enabled,
+                projector=projector,
+                temperature=ctx.contrastive_temperature,
+                speech_frames_per_sample=ctx.contrastive_speech_frames_per_sample,
+                speech_mask_min=ctx.contrastive_speech_mask_min,
+                in_batch_negatives=ctx.contrastive_in_batch_negatives,
+                silence_frames_per_sample=ctx.contrastive_silence_frames_per_sample,
+                silence_mask_max=ctx.contrastive_silence_mask_max,
+                silence_weight=ctx.contrastive_silence_weight,
+                asymmetric_penalty=ctx.contrastive_silence_asymmetric_penalty,
+                transition_blend_low=ctx.contrastive_silence_transition_blend_low,
+                transition_blend_high=ctx.contrastive_silence_transition_blend_high,
+                low_freq_boost=ctx.contrastive_silence_low_freq_boost,
+                high_freq_boost=ctx.contrastive_silence_high_freq_boost,
+                sr=ctx.sample_rate,
+                fft_size=ctx.fft_size,
+                debug=ctx.debugger,
+                debug_ctx=debug_ctx,
+            )
+
         if ctx.use_vad_loss:
             vad_loss, p_ref, p_out, gate = _compute_vad_loss(
                 clean_real,
@@ -418,12 +557,21 @@ def run_validation(
         awesome_weight_val = epoch_awesome_loss_weight
         if (ctx.use_awesome_loss or ctx.use_pipeline_awesome_loss) and ctx.awesome_warmup_steps > 0:
             awesome_weight_val = epoch_awesome_loss_weight * min(1.0, global_step / max(ctx.awesome_warmup_steps, 1))
+        contrastive_weight_val = ctx.contrastive_loss_weight
+        if (ctx.use_contrastive_awesome_loss or ctx.use_contrastive_silence_loss) and ctx.contrastive_warmup_steps > 0:
+            contrastive_weight_val = ctx.contrastive_loss_weight * min(
+                1.0, global_step / max(ctx.contrastive_warmup_steps, 1)
+            )
 
         loss = spec_loss
         if ctx.use_mrstft_loss:
             loss = loss + mrstft_loss
         if ctx.use_awesome_loss or ctx.use_pipeline_awesome_loss:
             loss = loss + awesome_weight_val * awesome_loss
+        if ctx.use_contrastive_awesome_loss:
+            loss = loss + contrastive_weight_val * awesome_loss
+        if ctx.use_contrastive_silence_loss:
+            loss = loss + contrastive_weight_val * awesome_loss
         if ctx.use_vad_loss:
             loss = loss + epoch_vad_loss_weight * vad_loss + epoch_vad_speech_loss_weight * speech_loss
 
@@ -448,6 +596,12 @@ def run_validation(
             awesome_speech_val,
             awesome_noise_val,
             awesome_smooth_val,
+            contrastive_speech_val,
+            contrastive_quiet_val,
+            contrastive_pos_sim_val,
+            contrastive_neg_sim_val,
+            contrastive_speech_frames_val,
+            contrastive_interference_frames_val,
             music_suppression_loss_val,
             mask_saturation_loss_val,
             vad_reg_loss_val,
@@ -462,6 +616,12 @@ def run_validation(
             awesome_speech,
             awesome_noise,
             awesome_smooth,
+            contrastive_speech,
+            contrastive_quiet,
+            contrastive_pos_sim,
+            contrastive_neg_sim,
+            contrastive_speech_frames,
+            contrastive_interference_frames,
             music_suppression_loss,
             mask_saturation_loss,
             vad_reg_loss,
@@ -477,6 +637,15 @@ def run_validation(
         valid_awesome_speech += awesome_speech_val
         valid_awesome_noise += awesome_noise_val
         valid_awesome_smooth += awesome_smooth_val
+        valid_contrastive_loss += (
+            awesome_loss_val if (ctx.use_contrastive_awesome_loss or ctx.use_contrastive_silence_loss) else 0.0
+        )
+        valid_contrastive_speech += contrastive_speech_val
+        valid_contrastive_quiet += contrastive_quiet_val
+        valid_contrastive_pos_sim += contrastive_pos_sim_val
+        valid_contrastive_neg_sim += contrastive_neg_sim_val
+        valid_contrastive_speech_frames += contrastive_speech_frames_val
+        valid_contrastive_interference_frames += contrastive_interference_frames_val
         valid_music_supp_loss += music_suppression_loss_val
         valid_mask_sat_loss += mask_saturation_loss_val
         valid_vad_reg_loss += vad_reg_loss_val
@@ -502,7 +671,12 @@ def run_validation(
                 )
             else:
                 vad_delta_np = np.zeros_like(snr_np, dtype=np.float32)
-            if ctx.use_awesome_loss or ctx.use_pipeline_awesome_loss:
+            if (
+                ctx.use_awesome_loss
+                or ctx.use_pipeline_awesome_loss
+                or ctx.use_contrastive_awesome_loss
+                or ctx.use_contrastive_silence_loss
+            ):
                 if isinstance(musicness, mx.array):
                     musicness_np = np.asarray(musicness, dtype=np.float32).reshape(-1)
                 else:
@@ -528,7 +702,12 @@ def run_validation(
                 metric["vad_delta_sum"] += float(vad_delta_np[i])
                 metric["musicness_sum"] += float(musicness_np[i])
 
-        if ctx.use_awesome_loss and ctx.emit_detailed_metrics:
+        if (
+            ctx.use_awesome_loss
+            or ctx.use_pipeline_awesome_loss
+            or ctx.use_contrastive_awesome_loss
+            or ctx.use_contrastive_silence_loss
+        ) and ctx.emit_detailed_metrics:
             _mask_m = mx.mean(mask)
             _mask_hi = mx.mean(mx.where(mask > 0.8, 1.0, 0.0))
             _mask_lo = mx.mean(mx.where(mask < 0.2, 1.0, 0.0))
@@ -644,6 +823,13 @@ def run_validation(
         avg_awesome_speech = valid_awesome_speech / num_valid_batches
         avg_awesome_noise = valid_awesome_noise / num_valid_batches
         avg_awesome_smooth = valid_awesome_smooth / num_valid_batches
+        avg_contrastive = valid_contrastive_loss / num_valid_batches
+        avg_contrastive_speech = valid_contrastive_speech / num_valid_batches
+        avg_contrastive_quiet = valid_contrastive_quiet / num_valid_batches
+        avg_contrastive_pos_sim = valid_contrastive_pos_sim / num_valid_batches
+        avg_contrastive_neg_sim = valid_contrastive_neg_sim / num_valid_batches
+        avg_contrastive_speech_frames = valid_contrastive_speech_frames / num_valid_batches
+        avg_contrastive_interference_frames = valid_contrastive_interference_frames / num_valid_batches
         avg_music_supp = valid_music_supp_loss / num_valid_batches
         avg_mask_sat = valid_mask_sat_loss / num_valid_batches
         avg_vad_reg = valid_vad_reg_loss / num_valid_batches
@@ -652,7 +838,12 @@ def run_validation(
         avg_p_out = valid_p_out / num_valid_batches if ctx.use_vad_loss else 0.0
         avg_gate = valid_gate_pct / num_valid_batches if ctx.use_vad_loss else 0.0
         avg_sisdr = valid_sisdr / num_valid_batches if ctx.eval_sisdr else None
-        use_awesome_metrics = ctx.use_awesome_loss or ctx.use_pipeline_awesome_loss
+        use_awesome_metrics = (
+            ctx.use_awesome_loss
+            or ctx.use_pipeline_awesome_loss
+            or ctx.use_contrastive_awesome_loss
+            or ctx.use_contrastive_silence_loss
+        )
         avg_mask_mean = valid_mask_mean / num_valid_batches if use_awesome_metrics else 0.0
         avg_mask_high = valid_mask_high / num_valid_batches if use_awesome_metrics else 0.0
         avg_mask_low = valid_mask_low / num_valid_batches if use_awesome_metrics else 0.0
@@ -680,6 +871,8 @@ def run_validation(
             or ctx.eval_sisdr
             or ctx.use_awesome_loss
             or ctx.use_pipeline_awesome_loss
+            or ctx.use_contrastive_awesome_loss
+            or ctx.use_contrastive_silence_loss
             or ctx.use_vad_train_reg
             or do_vad_eval
             or ctx.use_mrstft_loss
@@ -689,13 +882,25 @@ def run_validation(
                 extras.append(f"mrstft={avg_mrstft:.4f}")
             if ctx.use_vad_loss:
                 extras.extend([f"vad={avg_vad:.4f}", f"speech={avg_speech:.4f}"])
-            if use_awesome_metrics:
+            if ctx.use_awesome_loss or ctx.use_pipeline_awesome_loss:
                 extras.extend(
                     [
                         f"awesome={avg_awesome:.4f}",
                         f"aw_s={avg_awesome_speech:.4f}",
                         f"aw_n={avg_awesome_noise:.4f}",
                         f"aw_sm={avg_awesome_smooth:.4f}",
+                    ]
+                )
+            if ctx.use_contrastive_awesome_loss or ctx.use_contrastive_silence_loss:
+                extras.extend(
+                    [
+                        f"ctr={avg_contrastive:.4f}",
+                        f"ctr_s={avg_contrastive_speech:.4f}",
+                        f"ctr_q={avg_contrastive_quiet:.4f}",
+                        f"pos={avg_contrastive_pos_sim:.3f}",
+                        f"neg={avg_contrastive_neg_sim:.3f}",
+                        f"ctr_sf={avg_contrastive_speech_frames:.1f}",
+                        f"ctr_if={avg_contrastive_interference_frames:.1f}",
                     ]
                 )
             if ctx.use_pipeline_awesome_loss:
@@ -767,6 +972,15 @@ def run_validation(
                 "awesome": {
                     "music_suppression": float(avg_music_supp),
                     "mask_saturation": float(avg_mask_sat),
+                },
+                "contrastive": {
+                    "loss": float(avg_contrastive),
+                    "speech": float(avg_contrastive_speech),
+                    "quiet": float(avg_contrastive_quiet),
+                    "pos_sim": float(avg_contrastive_pos_sim),
+                    "neg_sim": float(avg_contrastive_neg_sim),
+                    "speech_frames": float(avg_contrastive_speech_frames),
+                    "interference_frames": float(avg_contrastive_interference_frames),
                 },
                 "buckets": bucket_summary,
             }

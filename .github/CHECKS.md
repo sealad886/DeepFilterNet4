@@ -1,252 +1,123 @@
 # Repository Checks Summary
 
-This document provides an overview of all the checks and quality controls that have been added to the DeepFilterNet repository.
+This document describes the GitHub Actions and related support files that currently exist in `sealad886/DeepFilterNet4`.
+It intentionally reflects the repository as it is today rather than an earlier setup rollout.
 
-## Overview
+## Current workflow inventory
 
-The repository now includes comprehensive automated checks to ensure code quality, security, and maintainability. These checks run automatically on pull requests and pushes to the main branch.
+Only workflows present in `.github/workflows/` are listed here.
 
-## Automated Workflows
+### Python CI (`python_lint.yml`)
 
-### 1. Python Linting (`python_lint.yml`)
-**Triggers:** Push to main, Pull requests to main, Daily at 18:00 UTC
+- **Triggers:** push to `main`, pull requests to `main`, daily at 18:00 UTC
+- **Runner/tooling:** Ubuntu + Python 3.10 + `pre-commit`
+- **Checks:** `flake8`, `black`, and `isort` via the repo's pre-commit hooks
+- **Purpose:** fast Python formatting and lint validation on the main integration path
 
-**Checks:**
-- `black` - Code formatting (line length: 100)
-- `isort` - Import sorting
-- `flake8` - Code linting and style checking
+### Rust CI (`rust_lint.yml`)
 
-**Purpose:** Ensures Python code follows consistent formatting and style guidelines.
+- **Triggers:** push to any branch, daily at 18:00 UTC
+- **Checks:** `cargo fmt --check`, `cargo clippy`, targeted `cargo build`, and `cargo test`
+- **Packages covered:** `df-demo`, `deep_filter`, `DeepFilterLib`, `DeepFilterDataLoader`
+- **Notes:** this workflow currently does **not** run on `pull_request`
 
-### 2. Rust Linting (`rust_lint.yml`)
-**Triggers:** Push to any branch, Daily at 18:00 UTC
+### CodeQL Security Scan (`codeql.yml`)
 
-**Checks:**
-- `rustfmt` - Code formatting
-- `clippy` - Linting and best practices
-- Build tests for various packages
-- Unit tests with coverage
+- **Triggers:** push to `main`, pull requests to `main`, weekly on Mondays at 02:30 UTC
+- **Jobs:** `Analyze Python Code`, `Analyze Rust Code`
+- **Purpose:** GitHub code scanning for security and quality issues
+- **Implementation detail:** the Rust job initializes CodeQL with `cpp` and builds the workspace before analysis
 
-**Purpose:** Ensures Rust code follows standard formatting and best practices.
+### Dependency Review (`dependency-review.yml`)
 
-### 3. CodeQL Security Scan (`codeql.yml`)
-**Triggers:** Push to main, Pull requests to main, Weekly on Mondays at 02:30 UTC
+- **Triggers:** pull requests to `main`
+- **Checks:** dependency vulnerability review and license-policy enforcement
+- **Policy:** fails on `moderate` or higher severity; denies `GPL-3.0` and `AGPL-3.0`
 
-**Checks:**
-- Python security vulnerability scanning
-- Rust security vulnerability scanning (via C++ analysis)
-- Security and quality queries
+### PR Checks (`pr-checks.yml`)
 
-**Purpose:** Automatically detects security vulnerabilities in the codebase.
+- **Triggers:** pull requests to `main`
+- **Checks:**
+  - warns when `Cargo.lock` or `poetry.lock` changed
+  - emits commit-message guidance for conventional commits
+  - writes a PR summary
+- **Purpose:** lightweight PR hygiene checks without duplicating full CI
 
-### 4. Dependency Review (`dependency-review.yml`)
-**Triggers:** Pull requests to main
+### Test DF (`test_df.yml`)
 
-**Checks:**
-- Scans for vulnerable dependencies
-- Checks for license compatibility
-- Fails on moderate or higher severity vulnerabilities
-- Comments summary on PR when issues are found
+- **Triggers:** manual dispatch, push to `main`, pull requests to `main`, weekly on Sundays, and `workflow_run` for `publish-pypi-wheels`
+- **Platform matrix:** Ubuntu on pull requests; Ubuntu + Windows on push/schedule/manual runs
+- **Checks:**
+  - builds `pyDF` with `maturin`
+  - installs DeepFilterNet runtime dependencies
+  - runs `python -m df.scripts.test_df`
+  - exercises the Python and Rust CLIs on sample audio
+  - validates expected DNSMOS outputs
+- **Purpose:** end-to-end smoke coverage for the packaged enhancement paths
 
-**Purpose:** Prevents introduction of vulnerable or incompatible dependencies.
+### CI Status (`ci-status.yml`)
 
-### 5. PR Checks (`pr-checks.yml`)
-**Triggers:** Pull requests to main
+- **Triggers:** push to `main`, pull requests to `main`
+- **Behavior:** writes a human-readable summary to the Actions job output
+- **Important:** this is a summary job only; it does not currently aggregate upstream workflow results via `needs`
 
-**Checks:**
-- Detects modified lockfiles (Cargo.lock, poetry.lock)
-- Validates commit message format (informational)
-- Provides summary of PR status
+## Supporting build and maintenance workflows
 
-**Purpose:** Provides additional context and validation for pull requests.
+These workflows are part of the repository automation, but they are not the primary PR gatekeepers.
 
-### 6. Integration Tests (`test_df.yml`)
-**Triggers:** Workflow dispatch, Push to main, Pull requests to main, Weekly on Sundays
+- **`build_demo.yml`** — builds the `df-demo` UI binary on Ubuntu, macOS, and Windows
+- **`build_wasm.yml`** — builds the `libDF` WebAssembly package
+- **`build_capi.yml`** — produces scheduled/manual C API artifacts across Linux, macOS, and Windows targets
+- **`test_pypi_release.yml`** — validates the published PyPI package on Ubuntu, macOS, and Windows; also listens for `publish-pypi-wheels`
+- **`stale.yml`** — marks and closes stale issues
+- **`combine-prs.yml`** — manual helper for combining compatible PRs into a single branch
 
-**Checks:**
-- Builds and tests DeepFilterNet on multiple platforms (Ubuntu, Windows)
-- Tests Python package functionality
-- Tests Rust binary functionality
-- Validates audio output quality with DNSMOS
+## What is not part of the current setup
 
-**Purpose:** Ensures the software works correctly across different platforms.
+- There is no repository-managed Copilot setup workflow anymore.
+- The former `.github/workflows/copilot-setup-steps.yml` file was template residue and did not match this repository's Python/Rust toolchain.
+- This document does **not** list a `publish.yml` workflow because no such file exists in `.github/workflows/`.
 
-### 7. Existing Workflows
-The repository also maintains these existing workflows:
-- `build_demo.yml` - Builds the demo application
-- `build_wasm.yml` - Builds WebAssembly version
-- `build_capi.yml` - Builds C API (weekly)
-- `publish.yml` - Publishes releases
-- `test_pypi_release.yml` - Tests PyPI releases
-- `stale.yml` - Manages stale issues/PRs
-- `combine-prs.yml` - Combines dependabot PRs
+## Related support files
 
-## Issue and PR Templates
+- `.github/pull_request_template.md` — PR checklist and submission guidance
+- `.github/ISSUE_TEMPLATE/bug_report.yml` — structured bug reports
+- `.github/ISSUE_TEMPLATE/feature_request.yml` — structured feature requests
+- `.github/ISSUE_TEMPLATE/config.yml` — issue creation links and defaults
+- `.github/CODEOWNERS` — code-owner routing for reviews
+- `CONTRIBUTING.md` — contributor workflow and local development guidance
+- `SECURITY.md` — vulnerability reporting and security policy
 
-### Pull Request Template
-**Location:** `.github/pull_request_template.md`
+## Practical local equivalents
 
-**Features:**
-- Type of change checklist
-- Code quality checklist
-- Testing requirements
-- Documentation requirements
+GitHub Actions should mirror checks contributors can run locally.
 
-**Purpose:** Ensures contributors provide necessary information and follow best practices.
+### Python-side
 
-### Issue Templates
+- `pre-commit run flake8 --all-files`
+- `pre-commit run black --all-files`
+- `pre-commit run isort --all-files`
+- `poetry -C DeepFilterNet install`
+- `python -m pytest` from `DeepFilterNet/` when touching Python functionality
 
-#### Bug Report (`bug_report.yml`)
-**Features:**
-- Structured bug report form
-- Required fields: description, component, OS, version, reproduction steps
-- Optional: logs and additional context
-
-#### Feature Request (`feature_request.yml`)
-**Features:**
-- Structured feature request form
-- Required fields: solution description, affected component
-- Optional: problem statement, alternatives, additional context
-
-#### Configuration (`config.yml`)
-**Features:**
-- Links to GitHub Discussions for questions
-- Links to Security Advisories for vulnerabilities
-- Allows blank issues
-
-**Purpose:** Guides users to report issues in a structured way that helps maintainers respond effectively.
-
-## Documentation
-
-### 1. CONTRIBUTING.md
-**Contents:**
-- How to report bugs and suggest features
-- Development setup instructions
-- Coding standards for Python and Rust
-- Testing guidelines
-- Commit message conventions
-- Overview of automated checks
-
-**Purpose:** Provides comprehensive guide for contributors.
+### Rust-side
 
-### 2. SECURITY.md
-**Contents:**
-- Supported versions
-- How to report vulnerabilities
-- Response timeline
-- Security best practices
-- Known security considerations
+- `cargo fmt --all -- --check`
+- `cargo clippy -p df-demo --tests --all-features -- -D warnings`
+- `cargo clippy -p deep_filter --tests --all-features -- -D warnings`
+- `cargo test --all-features -p deep_filter`
 
-**Purpose:** Establishes clear security policy and reporting process.
-
-### 3. CODEOWNERS
-**Location:** `.github/CODEOWNERS`
-
-**Features:**
-- Defines code ownership for different parts of the repository
-- Automatically requests reviews from appropriate owners
-- Covers Rust components, Python components, GitHub workflows, and documentation
-
-**Purpose:** Ensures the right people review changes to critical parts of the codebase.
+## Suggested branch-protection checks
 
-### 4. README.md Updates
-**Added Section:**
-- Contributing guidelines reference
-- Overview of code quality and security checks
-- Instructions for running checks locally
-- Links to issue templates
-- Security policy reference
+If branch protection is enabled for `main`, prefer the concrete job names that actually run on pull requests today:
 
-**Purpose:** Makes checks visible to contributors and users.
+- `lint`
+- `Analyze Python Code`
+- `Analyze Rust Code`
+- `dependency-review`
+- `PR Check Status`
+- optionally `test-df-output` if you want end-to-end smoke coverage required before merge
 
-## How to Use These Checks
+`Rust CI` can still remain a push/scheduled safeguard, but its `test` job should not be marked as a required PR check unless that workflow is later extended to `pull_request`.
 
-### For Contributors
-
-1. **Before Creating a PR:**
-   ```bash
-   # Python formatting
-   black .
-   isort .
-   flake8
-
-   # Rust formatting
-   cargo fmt
-   cargo clippy --all-features -- -D warnings
-   cargo test --all-features
-   ```
-
-2. **When Creating a PR:**
-   - Fill out the PR template completely
-   - Link related issues
-   - Ensure all automated checks pass
-
-3. **If Checks Fail:**
-   - Review the error messages in the GitHub Actions tab
-   - Fix issues locally and push updates
-   - Ask for help in PR comments if needed
-
-### For Maintainers
-
-1. **Review Automated Check Results:**
-   - All PRs must pass linting checks
-   - CodeQL findings should be reviewed
-   - Dependency review warnings should be investigated
-
-2. **Use Issue Templates:**
-   - Guide users to use appropriate templates
-   - Structured information helps with triage
-
-3. **Monitor Security:**
-   - Review CodeQL alerts regularly
-   - Respond to dependency vulnerability notifications
-   - Keep SECURITY.md updated
-
-## Check Status Requirements
-
-### Required for Merge
-- Python linting must pass
-- Rust linting must pass
-- CodeQL analysis must complete (warnings reviewed)
-- Dependency review must pass (no high/critical vulnerabilities)
-
-### Informational
-- PR checks (lockfile changes, commit format)
-- Integration tests (provide confidence but may be run post-merge)
-
-## Future Enhancements
-
-Potential additions to consider:
-
-1. **Branch Protection Rules** - Enforce required checks via GitHub settings
-2. **Code Coverage** - Track test coverage metrics
-3. **Performance Benchmarks** - Detect performance regressions
-4. **Documentation Generation** - Auto-generate API documentation
-5. **Release Automation** - Automate changelog generation
-
-## Troubleshooting
-
-### Common Issues
-
-**"Black/isort formatting failed"**
-- Run `black .` and `isort .` locally and commit changes
-
-**"Clippy warnings"**
-- Run `cargo clippy --all-features -- -D warnings` locally
-- Fix all warnings before pushing
-
-**"Dependency review failed"**
-- Check which dependency has the vulnerability
-- Update to a patched version or find an alternative
-- Document any exceptions with maintainers
-
-**"CodeQL found issues"**
-- Review the security advisory details
-- Fix the vulnerability or mark as false positive with explanation
-- Re-run CodeQL after fixes
-
-## Conclusion
-
-These checks help maintain high code quality and security standards while making it easier for contributors to understand expectations and requirements. All checks are automated and run on GitHub Actions, providing fast feedback to contributors.
-
-For questions about these checks, see [CONTRIBUTING.md](CONTRIBUTING.md) or open a discussion.
+`All Checks Status` can stay informational, but it should not be treated as a substitute for the underlying workflow jobs.

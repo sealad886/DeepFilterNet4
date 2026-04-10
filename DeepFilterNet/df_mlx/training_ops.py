@@ -27,7 +27,7 @@ from typing import Any, Tuple, cast
 
 import mlx.core as mx
 import numpy as np
-from mlx.utils import tree_flatten
+from mlx.utils import tree_flatten, tree_map
 
 from df_mlx.grad_utils import clip_grad_norm_tree
 
@@ -175,6 +175,10 @@ def clip_grad_norm(grads, max_norm: float) -> Tuple[dict, mx.array]:
 def accumulate_grads(accumulated: Any | None, new_grads: Any) -> Any:
     """Accumulate gradients by summing them element-wise.
 
+    Uses ``tree_map`` for efficient tree traversal instead of recursive
+    Python dict/list/tuple rebuilding, reducing per-micro-batch Python
+    overhead.
+
     Args:
         accumulated: Previous accumulated gradients (None for first batch)
         new_grads: New gradients to add
@@ -184,18 +188,7 @@ def accumulate_grads(accumulated: Any | None, new_grads: Any) -> Any:
     """
     if accumulated is None:
         return new_grads
-
-    def add_trees(a: Any, b: Any) -> Any:
-        if isinstance(a, mx.array) and isinstance(b, mx.array):
-            return a + b
-        elif isinstance(a, dict) and isinstance(b, dict):
-            return {k: add_trees(a[k], b[k]) for k in a.keys()}
-        elif isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
-            result = [add_trees(av, bv) for av, bv in zip(a, b)]
-            return type(a)(result)
-        return b  # fallback (shouldn't happen with valid grad trees)
-
-    return add_trees(accumulated, new_grads)
+    return tree_map(lambda a, b: a + b, accumulated, new_grads)
 
 
 _scale_cache: dict[float, mx.array] = {}
@@ -221,6 +214,8 @@ def _get_scale_array(scale: float) -> mx.array:
 def scale_grads(grads: Any, scale: float) -> Any:
     """Scale all gradients by a constant factor.
 
+    Uses ``tree_map`` for efficient tree traversal.
+
     Args:
         grads: Gradient tree
         scale: Scale factor (e.g., 1/grad_accumulation_steps)
@@ -229,16 +224,4 @@ def scale_grads(grads: Any, scale: float) -> Any:
         Scaled gradient tree
     """
     scale_arr = _get_scale_array(scale)
-
-    def apply_scale(x: Any) -> Any:
-        if isinstance(x, mx.array):
-            return x * scale_arr
-        elif isinstance(x, dict):
-            return {k: apply_scale(v) for k, v in x.items()}
-        elif isinstance(x, list):
-            return [apply_scale(v) for v in x]
-        elif isinstance(x, tuple):
-            return tuple(apply_scale(v) for v in x)
-        return x
-
-    return apply_scale(grads)
+    return tree_map(lambda x: x * scale_arr, grads)

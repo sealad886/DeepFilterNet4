@@ -13,6 +13,7 @@ data/
 
 .ruff_cache/
 .fastembed_cache
+.worktrees/
 .codanna/
 .dolt/
 *.db

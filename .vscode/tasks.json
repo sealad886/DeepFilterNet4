@@ -20,6 +20,161 @@
 			"label": "Run Tests",
 			"type": "shell",
 			"command": "cd ${workspaceFolder} && .venv/bin/python -m pytest DeepFilterNet/tests/ -q 2>&1 | tee /tmp/dfn_test_output.txt"
+		},
+		{
+			"label": "Spectral Helper Tests",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && .venv/bin/python -m pytest DeepFilterNet/tests/test_metal_kernels.py -v 2>&1 | tee /tmp/metal_kernel_test_output.txt"
+		},
+		{
+			"label": "Full Test Suite",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && .venv/bin/python -m pytest DeepFilterNet/tests/ -q 2>&1 | tee /tmp/dfn_full_test_output.txt"
+		},
+		{
+			"label": "Full Test Suite v2",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && .venv/bin/python -m pytest DeepFilterNet/tests/ -q 2>&1 | tee /tmp/dfn_full_test_v2.txt"
+		},
+		{
+			"label": "Spectral Helper Tests v2",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && .venv/bin/python -m pytest DeepFilterNet/tests/test_metal_kernels.py -q 2>&1 | tee /tmp/metal_kernel_tests_v2.txt",
+			"isBackground": false
+		},
+		{
+			"label": "Focused Spectral Helper EPS Checks",
+			"type": "shell",
+			"command": "bash",
+			"args": [
+				"-lc",
+				"cd /Users/andrew/zRepos/DeepFilterNet && .venv/bin/python -m pytest DeepFilterNet/tests/test_metal_kernels.py -q 2>&1 | tee /tmp/metal_kernel_eps_checks.txt"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "Repo .venv Python Version",
+			"type": "shell",
+			"command": "bash",
+			"args": [
+				"-lc",
+				"cd /Users/andrew/zRepos/DeepFilterNet && .venv/bin/python -V 2>&1 | tee /tmp/repo_venv_python_version.txt"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "Temp Poetry Spectral Helper Verification",
+			"type": "shell",
+			"command": "bash",
+			"args": [
+				"-lc",
+				"cd /Users/andrew/zRepos/DeepFilterNet && poetry -C DeepFilterNet run python -m pytest tests/test_metal_kernels.py -q 2>&1 | tee /tmp/dfn_poetry_test_metal_kernels.txt"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "Temp Poetry Install Pytest",
+			"type": "shell",
+			"command": "bash",
+			"args": [
+				"-lc",
+				"cd /Users/andrew/zRepos/DeepFilterNet && poetry -C DeepFilterNet run python -V && poetry -C DeepFilterNet run python -m pip install pytest --no-cache-dir 2>&1 | tee /tmp/dfn_poetry_install_pytest.txt"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "Temp Poetry Run test_metal_kernels",
+			"type": "shell",
+			"command": "bash",
+			"args": [
+				"-lc",
+				"cd /Users/andrew/zRepos/DeepFilterNet && poetry -C DeepFilterNet run python -m pytest tests/test_metal_kernels.py -q --maxfail=1 2>&1 | tee /tmp/dfn_poetry_test_metal_kernels_rerun.txt"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "Temp Root Venv Dependency Probe",
+			"type": "shell",
+			"command": "bash",
+			"args": [
+				"-lc",
+				"cd /Users/andrew/zRepos/DeepFilterNet && .venv/bin/python - <<'PY'\nimport sys\nmods = ['torch', 'mlx.core', 'numpy']\nfor name in mods:\n    try:\n        __import__(name)\n        print(f'{name}: OK')\n    except Exception as exc:\n        print(f'{name}: FAIL: {exc.__class__.__name__}: {exc}')\nprint(sys.version)\nPY"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "Temp Root Venv Dependency Probe v2",
+			"type": "shell",
+			"command": "bash",
+			"args": [
+				"-lc",
+				"cd /Users/andrew/zRepos/DeepFilterNet && .venv/bin/python -c \"import importlib,sys; mods=['torch','mlx.core','numpy'];\nfor name in mods:\n    try:\n        importlib.import_module(name); print(f'{name}: OK')\n    except Exception as exc:\n        print(f'{name}: FAIL: {exc.__class__.__name__}: {exc}')\nprint(sys.version)\" 2>&1 | tee /tmp/dfn_root_venv_probe.txt"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "Temp Root Venv Import Smoke",
+			"type": "shell",
+			"command": "bash",
+			"args": [
+				"-lc",
+				"cd /Users/andrew/zRepos/DeepFilterNet && .venv/bin/python -c 'import sys; import torch; import numpy; import mlx.core; print(\"torch: OK\"); print(\"numpy: OK\"); print(\"mlx.core: OK\"); print(sys.version)' 2>&1 | tee /tmp/dfn_root_venv_import_smoke.txt"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "Temp Root Venv Import Smoke Direct",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && .venv/bin/python -c 'import sys; import torch; import numpy; import mlx.core; print(\"torch: OK\"); print(\"numpy: OK\"); print(\"mlx.core: OK\"); print(sys.version)' 2>&1 | tee /tmp/dfn_root_venv_import_smoke_direct.txt",
+			"isBackground": false
+		},
+		{
+			"label": "Temp Root Venv Install Pytest",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && .venv/bin/python -m pip install pytest --no-cache-dir 2>&1 | tee /tmp/dfn_root_venv_install_pytest.txt",
+			"isBackground": false
+		},
+		{
+			"label": "Temp Root Venv Run test_metal_kernels",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && .venv/bin/python -m pytest DeepFilterNet/tests/test_metal_kernels.py -q --maxfail=1 2>&1 | tee /tmp/dfn_root_test_metal_kernels.txt",
+			"isBackground": false
+		},
+		{
+			"label": "Temp Root Venv Downstream Loss Bundle",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && .venv/bin/python -m pytest DeepFilterNet/tests/test_dynamic_loss_numerics.py DeepFilterNet/tests/test_train_dynamic_reexports.py -q --maxfail=1 2>&1 | tee /tmp/dfn_root_downstream_loss_bundle.txt",
+			"isBackground": false
+		},
+		{
+			"label": "TrainingSession Targeted Tests",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && .venv/bin/python -m pytest DeepFilterNet/tests/test_training_session.py -v 2>&1 | tee /tmp/dfn_test_training_session.txt",
+			"isBackground": false
+		},
+		{
+			"label": "Reexport Tests",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && .venv/bin/python -m pytest DeepFilterNet/tests/test_train_dynamic_reexports.py -v 2>&1 | tee /tmp/dfn_test_reexports.txt",
+			"isBackground": false
+		},
+		{
+			"label": "POC value_and_grad Tests",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && .venv/bin/python -m pytest DeepFilterNet/tests/test_training_session_poc.py -v 2>&1 | tee /tmp/dfn_test_poc.txt",
+			"isBackground": false
+		},
+		{
+			"label": "Full Test Suite Final",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && .venv/bin/python -m pytest DeepFilterNet/tests/ -q 2>&1 | tee /tmp/dfn_full_suite.txt",
+			"isBackground": false
+		},
+		{
+			"label": "Full Suite (excl test_dflib)",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && .venv/bin/python -m pytest DeepFilterNet/tests/ -q --ignore=DeepFilterNet/tests/test_dflib.py 2>&1 | tee /tmp/dfn_full_suite_no_dflib.txt",
+			"isBackground": false
 		}
 	]
 }

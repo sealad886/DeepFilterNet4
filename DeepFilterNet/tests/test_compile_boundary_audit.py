@@ -8,6 +8,7 @@ Validates that:
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -127,18 +128,18 @@ class TestCompiledFunctionSignatures:
         assert "def compiled_loss_and_grad_step(" in self.source
 
     def test_compiled_step_arg_count(self):
-        """compiled_step should have 14 explicit parameters (excluding self)."""
+        """compiled_step should have 16 explicit parameters (excluding self)."""
         match = re.search(r"def compiled_step\((.*?)\):", self.source, re.DOTALL)
         assert match is not None
         args = [a.strip() for a in match.group(1).split(",") if a.strip()]
-        assert len(args) == 14, f"Expected 14 args, got {len(args)}: {args}"
+        assert len(args) == 16, f"Expected 16 args, got {len(args)}: {args}"
 
     def test_compiled_loss_and_grad_step_arg_count(self):
-        """compiled_loss_and_grad_step should have 13 explicit parameters."""
+        """compiled_loss_and_grad_step should have 15 explicit parameters."""
         match = re.search(r"def compiled_loss_and_grad_step\((.*?)\):", self.source, re.DOTALL)
         assert match is not None
         args = [a.strip() for a in match.group(1).split(",") if a.strip()]
-        assert len(args) == 13, f"Expected 13 args, got {len(args)}: {args}"
+        assert len(args) == 15, f"Expected 15 args, got {len(args)}: {args}"
 
 
 # ---------------------------------------------------------------------------
@@ -185,3 +186,42 @@ class TestShapeAssertionIntegration:
         assert "use_compiled_step_for_batch" in source
         assert "epoch_use_compiled_step and current_batch_size == batch_size" in source
         assert "falling back to eager for this batch to avoid retrace" in source
+
+
+class TestContrastiveLossCallsiteAudit:
+    """Guard the train_dynamic contrastive loss callsites against tuple drift."""
+
+    def test_contrastive_loss_unpacks_all_return_values(self):
+        source = _TRAIN_DYNAMIC_PATH.read_text()
+        tree = ast.parse(source)
+        unpack_lengths: list[int] = []
+
+        class _Visitor(ast.NodeVisitor):
+            def visit_Assign(self, node: ast.Assign) -> None:
+                if len(node.targets) != 1:
+                    return
+                target = node.targets[0]
+                if not isinstance(target, ast.Tuple):
+                    return
+                call = node.value
+                if not isinstance(call, ast.Call):
+                    return
+                func = call.func
+                if isinstance(func, ast.Name) and func.id == "_compute_contrastive_awesome_losses":
+                    unpack_lengths.append(len(target.elts))
+                self.generic_visit(node)
+
+            def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+                target = node.target
+                call = node.value
+                if not isinstance(target, ast.Tuple) or not isinstance(call, ast.Call):
+                    return
+                func = call.func
+                if isinstance(func, ast.Name) and func.id == "_compute_contrastive_awesome_losses":
+                    unpack_lengths.append(len(target.elts))
+                self.generic_visit(node)
+
+        _Visitor().visit(tree)
+
+        assert unpack_lengths, "Expected train_dynamic.py to call _compute_contrastive_awesome_losses"
+        assert unpack_lengths == [15, 15], f"Unexpected contrastive unpack lengths: {unpack_lengths}"

@@ -17,6 +17,7 @@ class _FakeSample:
         shape = (1, 1)
         self.noisy_spec = np.complex64(idx + np.zeros(shape))
         self.clean_spec = np.complex64(idx + np.zeros(shape))
+        self.interference_spec = np.complex64(np.zeros(shape))
         self.feat_erb = np.float32(idx + np.zeros(shape))
         self.feat_spec = np.float32(idx + np.zeros(shape))
         self.snr = float(idx)

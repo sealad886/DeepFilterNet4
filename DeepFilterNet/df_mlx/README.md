@@ -56,8 +56,27 @@ There are two training approaches:
 Pre-compute spectral features once, then train:
 
 ```bash
-# Build datastore (one-time)
+# Build datastore (one-time; re-runs resume automatically)
 ./scripts/datasets/build_mlx_datastore.sh
+
+# Optional: synthesize extra speaker-in-room/live-ish background-music variants
+./scripts/datasets/build_mlx_datastore.sh --prepare-background-music
+
+# Optional: pick a different preset (default: speaker_room)
+./scripts/datasets/build_mlx_datastore.sh \
+    --prepare-background-music \
+    --music-prepare-style phone_room
+
+# Force a full rebuild (bypass phase completion checks)
+./scripts/datasets/build_mlx_datastore.sh --force
+
+# Optional: render a small audition pack to listen to original vs prepared
+# before committing to a full cache build
+python scripts/datasets/audition_background_music.py \
+    --file-list ./data/lists/background_music.txt \
+    --style speaker_room \
+    --rir-list ./data/lists/rir_all.txt \
+    --output-dir ./data/audition/background_music
 
 # Train
 python -m df_mlx.train_with_data \
@@ -150,6 +169,41 @@ python -m df_mlx.train_dynamic \
     --config ./file_lists/config.json
 ```
 
+Recommended starting point for the strongest general-purpose speech-clarity run:
+
+```bash
+python -m df_mlx.train_dynamic \
+    --run-config DeepFilterNet/df_mlx/configs/run_profiles/pipeline_awesome_gan_curriculum_clear_speech.toml \
+    --config ./file_lists/config.json
+```
+
+That profile keeps the speech-focused curriculum / GAN balance from the
+`speech_only` profile, but also enables explicit loud-background-music exposure
+via `dataset.p_background_music` and `dataset.background_music_gain_range`. For
+raw file-list training, the canonical dedicated music list is now
+`background_music.txt`, which `scripts/datasets/download_datasets.sh` curates
+from FMA plus optional MTG-Jamendo inputs to approximate modern pop / rock /
+dance / country compilation-CD material. MTG-Jamendo remains optional because
+its official dataset terms are more restrictive than the default FMA path; use
+it only when that license profile fits your local research workflow. When
+building the MLX cache, you can additionally pass
+`--prepare-background-music` to synthesize dirtier speaker-in-room/live-ish
+variants from that list before sharding. The cache builder accepts
+`--music-prepare-style` (default: `speaker_room`; also `phone_room`,
+`club_live`, and `muffled_tv`) and passes the same preset into
+`prepare_background_music.py`. To tune the recipe by ear first, use
+`scripts/datasets/audition_background_music.py --style ...` to render a small
+before/after pack with `original.wav`, `prepared_vXX.wav`, and
+`compare_vXX.wav` clips.
+
+For raw file-list training without an explicit `dataset.music_list`, the MLX
+training setup now auto-resolves sibling list files in this order:
+`background_music.prepared_merged.txt` → `background_music.txt` →
+`background_music_expanded.txt`. That means prepared/curated chart-style music
+corpora flow through the same dedicated `music_list` path used by the dynamic
+training stack, with the uncapped expanded pool only used as a fallback when
+the canonical curated list is absent.
+
 Single-file mode (no separate `--train-config` INI): inline train.py-compatible
 INI sections inside the run-config TOML under `train_ini.*`.
 
@@ -217,9 +271,9 @@ Supported sections:
 Unsupported sections (e.g. `[ASRLoss]`, `[MaskLoss]`, `[SpectralLoss]`) are ignored with warnings.
 Use `df/train.py` for ASR loss; GAN training is supported directly in `train_dynamic`.
 
-#### Awesome dynamic loss (speech-preserving)
+#### Awesome dynamic loss (weighted reconstruction)
 
-Enable the speech-preserving contrastive loss and cheap VAD proxy gating:
+Enable the weighted-reconstruction AWESOME loss and cheap VAD proxy gating:
 
 ```bash
 python -m df_mlx.train_dynamic \
@@ -250,6 +304,42 @@ Optional VAD controls (all optional; defaults are safe):
 
 # Disable proxy gating if needed
 --no-vad-proxy
+```
+
+#### Experimental contrastive AWESOME (local InfoNCE)
+
+Enable the experimental `contrastive_awesome` mode to add a train-only frame
+projector and local embedding-space InfoNCE over aligned clean / noisy /
+combined-interference frames. This mode is currently supported **only** in
+`train_dynamic`; it is not wired into `train_with_data`.
+
+```bash
+python -m df_mlx.train_dynamic \
+    --config ./file_lists/config.json \
+    --epochs 100 \
+    --batch-size 8 \
+    --dynamic-loss contrastive_awesome \
+    --contrastive-loss-weight 0.15 \
+    --contrastive-warmup-steps 2500 \
+    --contrastive-temperature 0.1 \
+    --contrastive-embedding-dim 128 \
+    --contrastive-hidden-dim 256 \
+    --contrastive-speech-frames-per-sample 32 \
+    --contrastive-interference-frames-per-sample 32
+```
+
+Useful controls:
+
+```bash
+# Tighten or relax frame-mining thresholds
+--contrastive-speech-mask-min 0.7 \
+--contrastive-interference-mask-max 0.3
+
+# Reweight the quiet/interference branch
+--contrastive-quiet-weight 0.5
+
+# Disable in-batch clean-frame negatives
+--no-contrastive-in-batch-negatives
 ```
 
 #### Multi-res STFT loss (speech clarity)

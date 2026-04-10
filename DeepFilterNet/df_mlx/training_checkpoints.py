@@ -861,16 +861,26 @@ def cleanup_checkpoints(
             marker_path.unlink(missing_ok=True)
 
 
-def find_latest_checkpoint(checkpoint_dir: Path) -> Path | None:
+def find_latest_checkpoint(
+    checkpoint_dir: Path,
+    *,
+    prefer_completed: bool = True,
+) -> Path | None:
     """Find the most recent checkpoint in the checkpoint directory.
 
-    Returns the latest valid checkpoint based on metadata and modification time.
+    When *prefer_completed* is ``True`` (default), completed checkpoints
+    (``epoch_end``, ``best``, ``final``) are preferred over in-progress ones
+    (``interrupted``, ``step``).  Interrupted checkpoints are only selected
+    when no completed checkpoint exists.  This avoids resume failures caused
+    by stale ``data_checkpoint.json`` files that no longer match the
+    interrupted model checkpoint.
 
     Args:
-        checkpoint_dir: Directory to search for checkpoints
+        checkpoint_dir: Directory to search for checkpoints.
+        prefer_completed: If True, prefer epoch-boundary checkpoints.
 
     Returns:
-        Path to most recent checkpoint, or None if no checkpoints found
+        Path to most recent checkpoint, or None if no checkpoints found.
     """
     if not checkpoint_dir.exists():
         return None
@@ -892,6 +902,23 @@ def find_latest_checkpoint(checkpoint_dir: Path) -> Path | None:
         valid_pairs.append(ckpt)
 
     if not valid_pairs:
+        return None
+
+    if prefer_completed:
+        completed: list[Path] = []
+        in_progress: list[Path] = []
+        for p in valid_pairs:
+            expected = manifest.expected_from_name(p)
+            kind = expected.get("kind")
+            kinds = expected.get("kinds", set())
+            if kind in _COMPLETED_KINDS or kinds & _COMPLETED_KINDS:
+                completed.append(p)
+            else:
+                in_progress.append(p)
+        if completed:
+            return max(completed, key=lambda p: p.stat().st_mtime)
+        if in_progress:
+            return max(in_progress, key=lambda p: p.stat().st_mtime)
         return None
 
     # Fast path: use latest mtime without loading large state JSON files.
@@ -1072,18 +1099,21 @@ def reconcile_resume(
                         batch_idx=result.resume_batch_idx,
                     )
                 else:
-                    raise RuntimeError(
-                        "Model checkpoint and data checkpoint disagree on "
-                        "resume position. "
+                    print(
+                        "\u26a0\ufe0f  Model checkpoint and data checkpoint disagree on "
+                        "resume position — falling back to epoch-boundary resume. "
                         f"model=(epoch={result.start_epoch}, "
                         f"micro_batch={result.resume_batch_idx}, "
                         f"kind={result.resume_checkpoint_kind}), "
                         f"data=(epoch={data_epoch}, "
                         f"micro_batch={data_batch}) from "
                         f"{data_resume_source}. "
-                        "Remediation: remove stale data_checkpoint.json "
-                        "or choose matching resume artifacts."
+                        "Restarting epoch from batch 0; some batches may "
+                        "be replayed."
                     )
+                    result.resume_batch_idx = 0
+                    train_stream.set_epoch(result.start_epoch)
+                    result.data_resume_progress = None
         else:
             if data_epoch != result.start_epoch or data_batch > 0:
                 print(

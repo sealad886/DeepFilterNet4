@@ -197,7 +197,8 @@ class SpectralLoss:
                     target_imag_c = target_imag
 
                 complex_loss = (
-                    mx.mean((pred_real_c - target_real_c) ** 2) + mx.mean((pred_imag_c - target_imag_c) ** 2)
+                    mx.mean((pred_real_c - target_real_c) ** 2)
+                    + mx.mean((pred_imag_c - target_imag_c) ** 2)
                 ) * self.factor_complex
                 total_loss = total_loss + complex_loss
 
@@ -252,7 +253,9 @@ class FusedSpectralLoss:
         self._compiled_loss = mx.compile(self._compute_loss)
 
     @staticmethod
-    def _stft_inline(x: mx.array, n_fft: int, hop_length: int, window: mx.array) -> Tuple[mx.array, mx.array]:
+    def _stft_inline(
+        x: mx.array, n_fft: int, hop_length: int, window: mx.array
+    ) -> Tuple[mx.array, mx.array]:
         """Compute STFT inline without function-call overhead."""
         pad_amount = n_fft // 2
         x_padded = mx.pad(x, [(0, 0), (pad_amount, pad_amount)])
@@ -261,7 +264,9 @@ class FusedSpectralLoss:
         frame_starts = mx.arange(num_frames) * hop_length
         offsets = mx.arange(n_fft)
         indices = frame_starts[:, None] + offsets[None, :]
-        frames = mx.take(x_padded, indices.flatten(), axis=1).reshape(x_padded.shape[0], num_frames, n_fft)
+        frames = mx.take(x_padded, indices.flatten(), axis=1).reshape(
+            x_padded.shape[0], num_frames, n_fft
+        )
         frames = frames * window
         fft_out = mx.fft.rfft(frames, axis=-1)
         return mx.real(fft_out), mx.imag(fft_out)
@@ -279,7 +284,9 @@ class FusedSpectralLoss:
             window = self._windows[i]
 
             pred_real, pred_imag = self._stft_inline(pred, fft_size, hop_size, window)
-            target_real, target_imag = self._stft_inline(target, fft_size, hop_size, window)
+            target_real, target_imag = self._stft_inline(
+                target, fft_size, hop_size, window
+            )
 
             pred_mag = mx.sqrt(pred_real**2 + pred_imag**2 + self.eps)
             target_mag = mx.sqrt(target_real**2 + target_imag**2 + self.eps)
@@ -314,7 +321,8 @@ class FusedSpectralLoss:
                     target_imag_c = target_imag
 
                 complex_loss = (
-                    mx.mean((pred_real_c - target_real_c) ** 2) + mx.mean((pred_imag_c - target_imag_c) ** 2)
+                    mx.mean((pred_real_c - target_real_c) ** 2)
+                    + mx.mean((pred_imag_c - target_imag_c) ** 2)
                 ) * self.factor_complex
                 total_loss = total_loss + complex_loss
 
@@ -331,6 +339,119 @@ class FusedSpectralLoss:
             Scalar loss value
         """
         return self._compiled_loss(pred, target)
+
+
+class FusedMultiResSpectralLoss:
+    """Multi-resolution spectral loss with optimized STFT frontend.
+
+    This is an optimized version that uses inlined operations to reduce
+    kernel launch overhead while maintaining numerical accuracy.
+
+    Args:
+        fft_sizes: Tuple of FFT sizes to use
+        hop_sizes: Tuple of hop sizes (defaults to fft_size // 4)
+        gamma: Magnitude compression exponent (1.0 = no compression)
+        factor: Weight for magnitude loss
+        factor_complex: Weight for complex loss (None to disable)
+        eps: Numerical stability constant
+    """
+
+    def __init__(
+        self,
+        fft_sizes: Tuple[int, ...] = (512, 1024, 2048),
+        hop_sizes: Optional[Tuple[int, ...]] = None,
+        gamma: float = 1.0,
+        factor: float = 1.0,
+        factor_complex: Optional[float] = None,
+        eps: float = EPS,
+    ):
+        self.fft_sizes = fft_sizes
+        self.hop_sizes = hop_sizes or tuple(fft // 4 for fft in fft_sizes)
+        self.gamma = gamma
+        self.factor = factor
+        self.factor_complex = factor_complex
+        self.eps = eps
+
+        self._windows = [get_window("sqrt_hann", fft_size) for fft_size in fft_sizes]
+
+        self._compiled_compute = mx.compile(self._compute_loss)
+
+    def _stft_inline(
+        self, x: mx.array, n_fft: int, hop_length: int, window: mx.array
+    ) -> Tuple[mx.array, mx.array]:
+        """Compute STFT inline without function-call overhead."""
+        pad_amount = n_fft // 2
+        x_padded = mx.pad(x, [(0, 0), (pad_amount, pad_amount)])
+        num_samples = x_padded.shape[1]
+        num_frames = (num_samples - n_fft) // hop_length + 1
+        frame_starts = mx.arange(num_frames) * hop_length
+        offsets = mx.arange(n_fft)
+        indices = frame_starts[:, None] + offsets[None, :]
+        frames = mx.take(x_padded, indices.flatten(), axis=1).reshape(
+            x_padded.shape[0], num_frames, n_fft
+        )
+        frames = frames * window
+        fft_out = mx.fft.rfft(frames, axis=-1)
+        return mx.real(fft_out), mx.imag(fft_out)
+
+    def _compute_loss(self, pred: mx.array, target: mx.array) -> mx.array:
+        """Core loss computation with optimized operation ordering."""
+        if pred.ndim == 1:
+            pred = mx.expand_dims(pred, axis=0)
+        if target.ndim == 1:
+            target = mx.expand_dims(target, axis=0)
+
+        losses: list[mx.array] = []
+
+        for i, (fft_size, hop_size) in enumerate(zip(self.fft_sizes, self.hop_sizes)):
+            window = self._windows[i]
+
+            pred_real, pred_imag = self._stft_inline(pred, fft_size, hop_size, window)
+            target_real, target_imag = self._stft_inline(
+                target, fft_size, hop_size, window
+            )
+
+            pred_mag = mx.sqrt(pred_real**2 + pred_imag**2 + self.eps)
+            target_mag = mx.sqrt(target_real**2 + target_imag**2 + self.eps)
+
+            if self.gamma != 1.0:
+                pred_mag_c = mx.power(pred_mag, self.gamma)
+                target_mag_c = mx.power(target_mag, self.gamma)
+            else:
+                pred_mag_c = pred_mag
+                target_mag_c = target_mag
+
+            mag_loss = mx.mean((pred_mag_c - target_mag_c) ** 2) * self.factor
+            losses.append(mag_loss)
+
+            if self.factor_complex is not None and self.factor_complex > 0:
+                if self.gamma != 1.0:
+                    pred_phase = pred_mag_c / pred_mag
+                    target_phase = target_mag_c / target_mag
+                    pred_real_c = pred_phase * pred_real
+                    pred_imag_c = pred_phase * pred_imag
+                    target_real_c = target_phase * target_real
+                    target_imag_c = target_phase * target_imag
+                else:
+                    pred_real_c = pred_real
+                    pred_imag_c = pred_imag
+                    target_real_c = target_real
+                    target_imag_c = target_imag
+
+                complex_loss = (
+                    mx.mean((pred_real_c - target_real_c) ** 2)
+                    + mx.mean((pred_imag_c - target_imag_c) ** 2)
+                ) * self.factor_complex
+                losses.append(complex_loss)
+
+        total = _ZERO
+        for loss_val in losses:
+            total = total + loss_val
+        return total / len(self.fft_sizes)
+
+    def __call__(self, pred: mx.array, target: mx.array) -> mx.array:
+        """Compute multi-resolution spectral loss."""
+        return self._compiled_compute(pred, target)
 
 
 class MaskLoss:
@@ -525,7 +646,9 @@ class SegmentalSiSdrLoss:
         # Vectorized segmentation using mx.take
         segment_starts = mx.arange(n_segments) * self.hop_size  # [n_segments]
         offsets = mx.arange(self.segment_size)  # [segment_size]
-        indices = segment_starts[:, None] + offsets[None, :]  # [n_segments, segment_size]
+        indices = (
+            segment_starts[:, None] + offsets[None, :]
+        )  # [n_segments, segment_size]
 
         # Clip indices to valid range (handles edge cases)
         max_idx = samples - 1
@@ -546,7 +669,9 @@ class SegmentalSiSdrLoss:
 
         # Compute SI-SDR for all segments at once
         # s_target projection: <s_hat, s_target> / ||s_target||^2 * s_target
-        dot = mx.sum(seg_pred * seg_target, axis=-1, keepdims=True)  # [batch, n_segments, 1]
+        dot = mx.sum(
+            seg_pred * seg_target, axis=-1, keepdims=True
+        )  # [batch, n_segments, 1]
         s_target_pow = mx.sum(seg_target**2, axis=-1, keepdims=True) + EPS
         s_target_proj = (dot / s_target_pow) * seg_target
 

@@ -1,239 +1,105 @@
-# Checks Added to DeepFilterNet Repository
+# GitHub Checks Setup Guide
 
-## Overview
+This guide tracks the current GitHub-side setup for `sealad886/DeepFilterNet4`.
+It is a maintenance reference, not a changelog for a one-time rollout.
 
-This document summarizes all the checks and quality controls that have been added to the DeepFilterNet repository to improve code quality, security, and maintainability.
+## Current active workflow set
 
-## What Has Been Added?
+The repository currently ships these workflow files under `.github/workflows/`:
 
-### 1. Security Checks ✅
+- `python_lint.yml`
+- `rust_lint.yml`
+- `codeql.yml`
+- `dependency-review.yml`
+- `pr-checks.yml`
+- `ci-status.yml`
+- `test_df.yml`
+- `build_demo.yml`
+- `build_wasm.yml`
+- `build_capi.yml`
+- `test_pypi_release.yml`
+- `stale.yml`
+- `combine-prs.yml`
 
-#### CodeQL Security Scanning
-- **File:** `.github/workflows/codeql.yml`
-- **Runs on:** Push to main, PRs to main, Weekly on Mondays
-- **Purpose:** Automatically scans Python and Rust code for security vulnerabilities
-- **Detects:** SQL injection, XSS, authentication issues, cryptographic weaknesses, etc.
+There is no separate Copilot setup workflow in the current repository layout. The old `copilot-setup-steps.yml` file was template-only residue and is no longer part of the active setup.
 
-#### Dependency Review
-- **File:** `.github/workflows/dependency-review.yml`
-- **Runs on:** Pull requests to main
-- **Purpose:** Checks for vulnerable or incompatible dependencies
-- **Fails on:** Moderate or higher severity vulnerabilities
-- **Blocks:** GPL-3.0 and AGPL-3.0 licenses
+## What should be enabled in GitHub
 
-#### Security Policy
-- **File:** `SECURITY.md`
-- **Contains:** Vulnerability reporting process, security best practices, contact information
+### Branch protection for `main`
 
-### 2. Pull Request & Issue Templates ✅
+Recommended settings:
 
-#### Pull Request Template
-- **File:** `.github/pull_request_template.md`
-- **Features:**
-  - Type of change checklist
-  - Code quality requirements
-  - Testing checklist
-  - Documentation requirements
+1. Require pull requests before merging
+2. Require status checks to pass before merging
+3. Require branches to be up to date before merging
+4. Optionally require linear history and include administrators
 
-#### Bug Report Template
-- **File:** `.github/ISSUE_TEMPLATE/bug_report.yml`
-- **Features:** Structured form with required fields for component, OS, version, reproduction steps
+When selecting required status checks, use the job names that actually run on pull requests today:
 
-#### Feature Request Template
-- **File:** `.github/ISSUE_TEMPLATE/feature_request.yml`
-- **Features:** Structured form for describing proposed features and use cases
+- `lint`
+- `Analyze Python Code`
+- `Analyze Rust Code`
+- `dependency-review`
+- `PR Check Status`
 
-#### Issue Template Config
-- **File:** `.github/ISSUE_TEMPLATE/config.yml`
-- **Features:** Links to Discussions and Security Advisories
+Optional but useful:
 
-### 3. Code Quality Checks ✅
+- `test-df-output` for end-to-end smoke coverage
 
-#### PR Validation Workflow
-- **File:** `.github/workflows/pr-checks.yml`
-- **Runs on:** Pull requests to main
-- **Checks:**
-  - Modified lockfiles (Cargo.lock, poetry.lock)
-  - Commit message format (informational)
-  - Provides PR status summary
+`Rust CI` currently runs on pushes and its daily schedule, not on pull requests, so its `test` job should stay out of the required PR-check list unless the workflow trigger changes.
 
-#### CI Status Workflow
-- **File:** `.github/workflows/ci-status.yml`
-- **Runs on:** Push to main, PRs to main
-- **Purpose:** Provides single aggregated status for all checks
+`All Checks Status` from `ci-status.yml` is summary-only and should stay informational unless that workflow is later turned into a real aggregator.
 
-### 4. Process & Governance ✅
+### Security and dependency features
 
-#### CODEOWNERS
-- **File:** `.github/CODEOWNERS`
-- **Purpose:** Automatically requests reviews from code owners
-- **Covers:** Rust components, Python components, workflows, documentation
+Under **Settings → Security & analysis**, enable:
 
-#### Contributing Guidelines
-- **File:** `CONTRIBUTING.md`
-- **Contains:**
-  - How to report bugs and suggest features
-  - Development setup instructions
-  - Coding standards (Python and Rust)
-  - Testing guidelines
-  - Commit message conventions
-  - Overview of automated checks
+- Dependency graph
+- Dependabot alerts
+- Dependabot security updates
+- Code scanning
+- Secret scanning
+- Push protection
 
-### 5. Documentation ✅
+`dependabot.yml` is already present in `.github/`.
 
-#### Checks Documentation
-- **File:** `.github/CHECKS.md`
-- **Contains:** Comprehensive documentation of all automated checks
+## Support files tied to the workflow setup
 
-#### Status Badges
-- **File:** `.github/BADGES.md`
-- **Contains:** Examples of GitHub Actions status badges for README
+- `.github/CHECKS.md` — current workflow/tooling reference
+- `.github/BADGES.md` — optional README badge snippets
+- `.github/CODEOWNERS` — review routing
+- `.github/pull_request_template.md` — PR checklist
+- `.github/ISSUE_TEMPLATE/bug_report.yml` — structured bug reports
+- `.github/ISSUE_TEMPLATE/feature_request.yml` — structured feature requests
+- `.github/ISSUE_TEMPLATE/config.yml` — issue creation defaults and links
+- `CONTRIBUTING.md` — contributor workflow
+- `SECURITY.md` — vulnerability reporting policy
 
-#### Updated README
-- **File:** `README.md`
-- **Added:** Contributing section with links to all new documentation
+## Verification checklist
 
-## How to Enable These Checks
+Use this list after changing GitHub workflows or repo support files:
 
-### Already Active
-The following checks are **automatically active** for all pull requests:
-- CodeQL security scanning
-- Dependency review
-- PR validation checks
-- CI status workflow
+- [ ] The Actions tab shows the expected workflow list above
+- [ ] The Actions tab does not show a `Copilot Setup Steps` workflow
+- [ ] A PR to `main` triggers Python CI, CodeQL, Dependency Review, PR Checks, CI Status, and Test DF
+- [ ] Pushes still trigger Rust CI
+- [ ] Issue templates appear in the new-issue flow
+- [ ] The PR template appears when opening a pull request
+- [ ] CODEOWNERS review requests still route as expected
+- [ ] Any README badges referenced from `.github/BADGES.md` still point at real workflows
 
-### Recommended: Enable Branch Protection
+## Maintaining these docs
 
-To enforce these checks, enable branch protection rules in GitHub:
+When workflow files change:
 
-1. Go to **Settings** → **Branches** → **Add branch protection rule**
-2. Branch name pattern: `main`
-3. Enable:
-   - ✅ Require a pull request before merging
-   - ✅ Require status checks to pass before merging
-4. Select these required status checks:
-   - `lint` (Python CI)
-   - `test` (Rust CI)
-   - `Analyze Python Code` (CodeQL)
-   - `Analyze Rust Code` (CodeQL)
-   - `dependency-review` (Dependency Review)
-5. Optional but recommended:
-   - ✅ Require branches to be up to date before merging
-   - ✅ Require linear history
-   - ✅ Include administrators
+1. Update `.github/CHECKS.md` to match the actual workflow inventory and behavior
+2. Update this guide if the recommended GitHub settings or verification steps change
+3. Avoid documenting placeholder or template workflows as if they are part of the real toolchain
 
-### Additional Recommended Settings
+If a workflow is referenced by name from another workflow using `workflow_run`, document that relationship carefully and only if the referenced workflow actually exists in the repository.
 
-#### Enable Dependabot Alerts
-1. Go to **Settings** → **Security & analysis**
-2. Enable:
-   - ✅ Dependency graph
-   - ✅ Dependabot alerts
-   - ✅ Dependabot security updates
+## Where to look next
 
-Dependabot is already configured in `.github/dependabot.yml`.
-
-#### Enable Code Scanning Alerts
-1. Go to **Settings** → **Security & analysis**
-2. Enable:
-   - ✅ Code scanning (uses CodeQL workflow)
-
-#### Enable Secret Scanning
-1. Go to **Settings** → **Security & analysis**
-2. Enable:
-   - ✅ Secret scanning
-   - ✅ Push protection
-
-## Verification Checklist
-
-Use this checklist to verify everything is set up correctly:
-
-- [ ] All YAML files are valid (check Actions tab for any errors)
-- [ ] CodeQL workflow runs successfully
-- [ ] Dependency review appears on PRs
-- [ ] PR template appears when creating new PRs
-- [ ] Issue templates appear when creating new issues
-- [ ] Branch protection rules are configured (if desired)
-- [ ] Dependabot is enabled and creating PRs
-- [ ] CODEOWNERS are receiving review requests
-- [ ] Status badges are visible (if added to README)
-
-## Testing the Checks
-
-### Test PR Template
-1. Create a new branch
-2. Make a small change
-3. Open a PR to main
-4. Verify the PR template appears
-
-### Test Issue Templates
-1. Go to Issues → New Issue
-2. Verify bug report and feature request templates appear
-3. Try filling out each template
-
-### Test Workflows
-1. Check the Actions tab
-2. Verify recent workflow runs completed successfully
-3. Look for any failed checks that need attention
-
-### Test CODEOWNERS
-1. Make a change to a file
-2. Open a PR
-3. Verify appropriate reviewers are automatically assigned
-
-## For Contributors
-
-Contributors should:
-
-1. **Read** `CONTRIBUTING.md` before making changes
-2. **Use** issue templates when reporting bugs or requesting features
-3. **Fill out** the PR template completely
-4. **Run checks locally** before pushing:
-   ```bash
-   # Python
-   black .
-   isort .
-   flake8
-
-   # Rust
-   cargo fmt
-   cargo clippy --all-features -- -D warnings
-   ```
-5. **Respond** to automated check failures promptly
-
-## For Maintainers
-
-Maintainers should:
-
-1. **Review** CodeQL alerts regularly
-2. **Monitor** Dependabot PRs and merge updates
-3. **Enforce** code quality standards through PR reviews
-4. **Update** SECURITY.md when security practices change
-5. **Triage** issues using the structured templates
-6. **Keep** CODEOWNERS file updated as team changes
-
-## Support
-
-For questions or issues with these checks:
-- See detailed documentation in `CONTRIBUTING.md`
-- Review check details in `.github/CHECKS.md`
-- Open a discussion if you need help
-
-## Summary
-
-✅ **14 new files added:**
-- 4 workflow files (CodeQL, dependency review, PR checks, CI status)
-- 3 issue/PR templates
-- 2 major documentation files (CONTRIBUTING.md, SECURITY.md)
-- 3 supporting documentation files (CHECKS.md, BADGES.md, CODEOWNERS)
-- 1 issue template config
-- 1 README update
-
-✅ **Key benefits:**
-- Automated security vulnerability detection
-- Consistent code quality standards
-- Clear contribution guidelines
-- Structured issue and PR process
-- Better code review workflow
-
-All checks are now in place and ready to use! 🎉
+- For exact workflow behavior, start with `.github/CHECKS.md`
+- For contributor-facing expectations, use `CONTRIBUTING.md`
+- For security reporting, use `SECURITY.md`

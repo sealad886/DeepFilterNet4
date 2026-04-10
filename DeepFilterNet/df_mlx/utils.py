@@ -14,6 +14,8 @@ from typing import Dict, Iterator, List, Tuple, Union
 import mlx.core as mx
 import numpy as np
 
+from .metal_kernels import _EPS_F
+
 # ============================================================================
 # Audio I/O
 # ============================================================================
@@ -128,7 +130,7 @@ def extract_features(
     )
 
     # Magnitude for ERB features
-    mag = mx.sqrt(spec_real**2 + spec_imag**2 + 1e-8)
+    mag = mx.sqrt(spec_real**2 + spec_imag**2 + _EPS_F)
 
     # ERB filterbank
     fb = erb_fb(sr=sr, fft_size=fft_size, nb_bands=nb_erb)

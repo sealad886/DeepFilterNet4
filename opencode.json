@@ -1,0 +1,11 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["superpowers@git+https://github.com/obra/superpowers.git"],
+  "mcp": {
+    "codanna": {
+      "type": "local",
+      "command": ["codanna", "-c", ".codanna/settings.toml", "serve", "--watch"],
+      "enabled": true
+    }
+  }
+}

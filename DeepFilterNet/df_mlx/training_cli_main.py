@@ -67,6 +67,14 @@ def main():
         help="Path to file containing noise file paths (one per line)",
     )
     parser.add_argument(
+        "--music-list",
+        type=str,
+        help=(
+            "Path to file containing dedicated background-music file paths (one per line), "
+            "for example lists/background_music.txt or background_music.prepared_merged.txt"
+        ),
+    )
+    parser.add_argument(
         "--rir-list",
         type=str,
         help="Path to file containing RIR file paths (one per line)",
@@ -317,11 +325,28 @@ def main():
         help="Probability of adding interfering speaker (0-1, simulates vocals/competing talker)",
     )
     parser.add_argument(
+        "--p-background-music",
+        type=float,
+        help="Probability that a training sample includes at least one background-music source (0-1)",
+    )
+    parser.add_argument(
         "--curriculum-warmup-epochs",
         type=int,
         default=0,
         help="Number of warmup epochs for curriculum learning (0=disabled). "
         "SNR/interferer probabilities ramp linearly from 0 to target values.",
+    )
+    parser.add_argument(
+        "--music-start-epoch",
+        type=int,
+        default=0,
+        help="Epoch at which background-music injection begins (0=from start).",
+    )
+    parser.add_argument(
+        "--music-ramp-epochs",
+        type=int,
+        default=0,
+        help="Epochs over which p_background_music ramps from 0 to target after music_start_epoch (0=instant).",
     )
     parser.add_argument(
         "--speech-gain-range",
@@ -338,11 +363,23 @@ def main():
         help="Override noise gain range in dB (e.g., --noise-gain-range -12 12)",
     )
     parser.add_argument(
+        "--background-music-gain-range",
+        type=float,
+        nargs=2,
+        metavar=("MIN", "MAX"),
+        help="Override background-music gain range in dB (e.g., --background-music-gain-range 0 12)",
+    )
+    parser.add_argument(
         "--dynamic-loss",
         type=str,
-        choices=["baseline", "awesome", "pipeline_awesome"],
+        choices=["baseline", "awesome", "pipeline_awesome", "contrastive_awesome", "contrastive_silence"],
         default="baseline",
-        help="Dynamic loss: 'baseline' (spectral + legacy VAD), 'awesome' (speech-preserving contrastive), or 'pipeline_awesome' (improved speech preservation + music suppression)",
+        help=(
+            "Dynamic loss: 'baseline' (spectral + legacy VAD), "
+            "'awesome' (weighted reconstruction), "
+            "'pipeline_awesome' (improved speech preservation + music suppression), "
+            "or 'contrastive_awesome' (local InfoNCE with interference negatives)"
+        ),
     )
     parser.add_argument(
         "--pipeline-stages",
@@ -371,6 +408,113 @@ def main():
         type=int,
         default=0,
         help="Warmup steps for ramping awesome loss weight",
+    )
+    parser.add_argument(
+        "--contrastive-loss-weight",
+        type=float,
+        default=0.15,
+        help="Weight for the contrastive_awesome local InfoNCE loss",
+    )
+    parser.add_argument(
+        "--contrastive-warmup-steps",
+        type=int,
+        default=2500,
+        help="Warmup steps for ramping contrastive_awesome loss weight",
+    )
+    parser.add_argument(
+        "--contrastive-temperature",
+        type=float,
+        default=0.1,
+        help="Temperature for contrastive_awesome InfoNCE logits",
+    )
+    parser.add_argument(
+        "--contrastive-embedding-dim",
+        type=int,
+        default=128,
+        help="Embedding dimension for the train-only contrastive projector head",
+    )
+    parser.add_argument(
+        "--contrastive-hidden-dim",
+        type=int,
+        default=256,
+        help="Hidden dimension for the train-only contrastive projector head",
+    )
+    parser.add_argument(
+        "--contrastive-speech-frames-per-sample",
+        type=int,
+        default=32,
+        help="Speech-heavy frames selected per sample for contrastive_awesome",
+    )
+    parser.add_argument(
+        "--contrastive-interference-frames-per-sample",
+        type=int,
+        default=32,
+        help="Interference-heavy frames selected per sample for contrastive_awesome",
+    )
+    parser.add_argument(
+        "--contrastive-speech-mask-min",
+        type=float,
+        default=0.7,
+        help="Minimum mean speech-mask value for contrastive speech-frame mining",
+    )
+    parser.add_argument(
+        "--contrastive-interference-mask-max",
+        type=float,
+        default=0.3,
+        help="Maximum mean speech-mask value for contrastive interference-frame mining",
+    )
+    parser.add_argument(
+        "--contrastive-quiet-weight",
+        type=float,
+        default=0.5,
+        help="Relative weight for interference-selected contrastive loss terms",
+    )
+    parser.add_argument(
+        "--no-contrastive-in-batch-negatives",
+        action="store_true",
+        help="Disable in-batch clean-frame negatives for contrastive_awesome",
+    )
+    parser.add_argument(
+        "--contrastive-silence-frames-per-sample",
+        type=int,
+        default=None,
+        help="Silence frames per sample for contrastive_silence",
+    )
+    parser.add_argument(
+        "--contrastive-silence-mask-max", type=float, default=None, help="Max mean mask for silence-frame mining"
+    )
+    parser.add_argument(
+        "--contrastive-silence-weight", type=float, default=None, help="Weight for silence suppression objective"
+    )
+    parser.add_argument(
+        "--contrastive-silence-asymmetric-penalty",
+        type=float,
+        default=None,
+        help="Penalty multiplier for residual above clean",
+    )
+    parser.add_argument(
+        "--contrastive-silence-transition-blend-low",
+        type=float,
+        default=None,
+        help="Lower mask threshold for transition blending",
+    )
+    parser.add_argument(
+        "--contrastive-silence-transition-blend-high",
+        type=float,
+        default=None,
+        help="Upper mask threshold for transition blending",
+    )
+    parser.add_argument(
+        "--contrastive-silence-low-freq-boost",
+        type=float,
+        default=None,
+        help="Freq-weight boost for low bands (<300 Hz)",
+    )
+    parser.add_argument(
+        "--contrastive-silence-high-freq-boost",
+        type=float,
+        default=None,
+        help="Freq-weight boost for high bands (>7 kHz)",
     )
     parser.add_argument(
         "--mrstft-factor",
@@ -476,6 +620,12 @@ def main():
         type=int,
         default=1,
         help="Update discriminator every N steps",
+    )
+    parser.add_argument(
+        "--gan-freeze-disc-after-epoch",
+        type=int,
+        default=-1,
+        help="Freeze discriminator weights after this epoch (-1 = never). Only FM loss used after freezing.",
     )
     parser.add_argument(
         "--no-vad-proxy",
@@ -679,6 +829,7 @@ def main():
         cache_dir=default_cfg.dataset.cache_dir,
         speech_list=default_cfg.dataset.speech_list,
         noise_list=default_cfg.dataset.noise_list,
+        music_list=default_cfg.dataset.music_list,
         rir_list=default_cfg.dataset.rir_list,
         config=default_cfg.dataset.config,
         train_config=default_cfg.training.train_config,
@@ -713,14 +864,37 @@ def main():
         p_extreme_snr=default_cfg.dataset.p_extreme_snr,
         p_very_low_snr=default_cfg.dataset.p_very_low_snr,
         p_interfer_speech=default_cfg.dataset.p_interfer_speech,
+        p_background_music=default_cfg.dataset.p_background_music,
         curriculum_warmup_epochs=default_cfg.training.curriculum_warmup_epochs,
+        music_start_epoch=default_cfg.training.music_start_epoch,
+        music_ramp_epochs=default_cfg.training.music_ramp_epochs,
         speech_gain_range=default_cfg.dataset.speech_gain_range,
         noise_gain_range=default_cfg.dataset.noise_gain_range,
+        background_music_gain_range=default_cfg.dataset.background_music_gain_range,
         dynamic_loss=default_cfg.loss.dynamic_loss,
         pipeline_stages=list(default_cfg.loss.pipeline_stages),
         awesome_loss_weight=default_cfg.loss.awesome.loss_weight,
         awesome_mask_sharpness=default_cfg.loss.awesome.mask_sharpness,
         awesome_warmup_steps=default_cfg.loss.awesome.warmup_steps,
+        contrastive_loss_weight=default_cfg.loss.contrastive.loss_weight,
+        contrastive_warmup_steps=default_cfg.loss.contrastive.warmup_steps,
+        contrastive_temperature=default_cfg.loss.contrastive.temperature,
+        contrastive_embedding_dim=default_cfg.loss.contrastive.embedding_dim,
+        contrastive_hidden_dim=default_cfg.loss.contrastive.hidden_dim,
+        contrastive_speech_frames_per_sample=default_cfg.loss.contrastive.speech_frames_per_sample,
+        contrastive_interference_frames_per_sample=default_cfg.loss.contrastive.interference_frames_per_sample,
+        contrastive_speech_mask_min=default_cfg.loss.contrastive.speech_mask_min,
+        contrastive_interference_mask_max=default_cfg.loss.contrastive.interference_mask_max,
+        contrastive_quiet_weight=default_cfg.loss.contrastive.quiet_weight,
+        no_contrastive_in_batch_negatives=not default_cfg.loss.contrastive.in_batch_negatives,
+        contrastive_silence_frames_per_sample=default_cfg.loss.contrastive_silence.silence_frames_per_sample,
+        contrastive_silence_mask_max=default_cfg.loss.contrastive_silence.silence_mask_max,
+        contrastive_silence_weight=default_cfg.loss.contrastive_silence.silence_weight,
+        contrastive_silence_asymmetric_penalty=default_cfg.loss.contrastive_silence.asymmetric_penalty,
+        contrastive_silence_transition_blend_low=default_cfg.loss.contrastive_silence.transition_blend_low,
+        contrastive_silence_transition_blend_high=default_cfg.loss.contrastive_silence.transition_blend_high,
+        contrastive_silence_low_freq_boost=default_cfg.loss.contrastive_silence.low_freq_boost,
+        contrastive_silence_high_freq_boost=default_cfg.loss.contrastive_silence.high_freq_boost,
         mrstft_factor=default_cfg.loss.mrstft.factor,
         mrstft_gamma=default_cfg.loss.mrstft.gamma,
         mrstft_f_complex=default_cfg.loss.mrstft.f_complex,
@@ -738,6 +912,7 @@ def main():
         gan_disc_weight_decay=default_cfg.gan.disc_weight_decay,
         gan_disc_grad_clip=default_cfg.gan.disc_grad_clip,
         gan_disc_update_freq=default_cfg.gan.disc_update_freq,
+        gan_freeze_disc_after_epoch=default_cfg.gan.freeze_disc_after_epoch,
         gan_cache_gen_waveforms=default_cfg.gan.cache_gen_waveforms,
         gan_disc_gradient_checkpoint=default_cfg.gan.disc_gradient_checkpoint,
         gan_gen_gradient_checkpoint=default_cfg.gan.gen_gradient_checkpoint,
@@ -854,6 +1029,7 @@ def main():
         cache_dir=run_cfg.dataset.cache_dir,
         speech_list=run_cfg.dataset.speech_list,
         noise_list=run_cfg.dataset.noise_list,
+        music_list=run_cfg.dataset.music_list,
         rir_list=run_cfg.dataset.rir_list,
         config_path=run_cfg.dataset.config,
         epochs=run_cfg.training.epochs,
@@ -889,17 +1065,40 @@ def main():
         p_extreme_snr=run_cfg.dataset.p_extreme_snr,
         p_very_low_snr=run_cfg.dataset.p_very_low_snr,
         p_interfer_speech=run_cfg.dataset.p_interfer_speech,
+        p_background_music=run_cfg.dataset.p_background_music,
         curriculum_warmup_epochs=run_cfg.training.curriculum_warmup_epochs,
+        music_start_epoch=run_cfg.training.music_start_epoch,
+        music_ramp_epochs=run_cfg.training.music_ramp_epochs,
         speech_gain_range=run_cfg.dataset.speech_gain_range,
         noise_gain_range=run_cfg.dataset.noise_gain_range,
+        background_music_gain_range=run_cfg.dataset.background_music_gain_range,
         dynamic_loss=cast(
-            Literal["baseline", "awesome", "pipeline_awesome"],
+            Literal["baseline", "awesome", "pipeline_awesome", "contrastive_awesome", "contrastive_silence"],
             run_cfg.loss.dynamic_loss,
         ),
         pipeline_stages=run_cfg.loss.pipeline_stages,
         awesome_loss_weight=run_cfg.loss.awesome.loss_weight,
         awesome_mask_sharpness=run_cfg.loss.awesome.mask_sharpness,
         awesome_warmup_steps=run_cfg.loss.awesome.warmup_steps,
+        contrastive_loss_weight=run_cfg.loss.contrastive.loss_weight,
+        contrastive_warmup_steps=run_cfg.loss.contrastive.warmup_steps,
+        contrastive_temperature=run_cfg.loss.contrastive.temperature,
+        contrastive_embedding_dim=run_cfg.loss.contrastive.embedding_dim,
+        contrastive_hidden_dim=run_cfg.loss.contrastive.hidden_dim,
+        contrastive_speech_frames_per_sample=run_cfg.loss.contrastive.speech_frames_per_sample,
+        contrastive_interference_frames_per_sample=run_cfg.loss.contrastive.interference_frames_per_sample,
+        contrastive_speech_mask_min=run_cfg.loss.contrastive.speech_mask_min,
+        contrastive_interference_mask_max=run_cfg.loss.contrastive.interference_mask_max,
+        contrastive_quiet_weight=run_cfg.loss.contrastive.quiet_weight,
+        contrastive_in_batch_negatives=run_cfg.loss.contrastive.in_batch_negatives,
+        contrastive_silence_frames_per_sample=run_cfg.loss.contrastive_silence.silence_frames_per_sample,
+        contrastive_silence_mask_max=run_cfg.loss.contrastive_silence.silence_mask_max,
+        contrastive_silence_weight=run_cfg.loss.contrastive_silence.silence_weight,
+        contrastive_silence_asymmetric_penalty=run_cfg.loss.contrastive_silence.asymmetric_penalty,
+        contrastive_silence_transition_blend_low=run_cfg.loss.contrastive_silence.transition_blend_low,
+        contrastive_silence_transition_blend_high=run_cfg.loss.contrastive_silence.transition_blend_high,
+        contrastive_silence_low_freq_boost=run_cfg.loss.contrastive_silence.low_freq_boost,
+        contrastive_silence_high_freq_boost=run_cfg.loss.contrastive_silence.high_freq_boost,
         gan_enabled=run_cfg.gan.enabled,
         gan_start_epoch=run_cfg.gan.start_epoch,
         gan_ramp_epochs=run_cfg.gan.ramp_epochs,
@@ -912,6 +1111,7 @@ def main():
         gan_disc_weight_decay=run_cfg.gan.disc_weight_decay,
         gan_disc_grad_clip=run_cfg.gan.disc_grad_clip,
         gan_disc_update_freq=run_cfg.gan.disc_update_freq,
+        gan_freeze_disc_after_epoch=run_cfg.gan.freeze_disc_after_epoch,
         gan_disc_max_samples=run_cfg.gan.disc_max_samples,
         gan_mpd_channels=run_cfg.gan.mpd_channels,
         gan_msd_channels=run_cfg.gan.msd_channels,

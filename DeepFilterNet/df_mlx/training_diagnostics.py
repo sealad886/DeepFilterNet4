@@ -55,9 +55,26 @@ class DiagnosticContext:
     clip_gan_scores_fn: Callable
     use_awesome_loss: bool
     use_pipeline_awesome_loss: bool
+    use_contrastive_awesome_loss: bool
+    use_contrastive_silence_loss: bool
     vad_band_mask: mx.array
     vad_band_bins: float
     awesome_mask_sharpness: float
+    contrastive_temperature: float
+    contrastive_speech_frames_per_sample: int
+    contrastive_interference_frames_per_sample: int
+    contrastive_speech_mask_min: float
+    contrastive_interference_mask_max: float
+    contrastive_quiet_weight: float
+    contrastive_in_batch_negatives: bool
+    contrastive_silence_frames_per_sample: int
+    contrastive_silence_mask_max: float
+    contrastive_silence_weight: float
+    contrastive_silence_asymmetric_penalty: float
+    contrastive_silence_transition_blend_low: float
+    contrastive_silence_transition_blend_high: float
+    contrastive_silence_low_freq_boost: float
+    contrastive_silence_high_freq_boost: float
     vad_z_threshold: float
     vad_z_slope: float
     vad_snr_gate_db: float
@@ -78,6 +95,8 @@ def diagnose_nonfinite(
     feat_spec: mx.array,
     clean_real: mx.array,
     clean_imag: mx.array,
+    interference_real: mx.array,
+    interference_imag: mx.array,
     snr: mx.array,
     debug_ctx: dict[str, Any],
     *,
@@ -95,6 +114,7 @@ def diagnose_nonfinite(
 
     from df_mlx.training_losses import (
         _compute_awesome_losses,
+        _compute_contrastive_awesome_losses,
         _compute_pipeline_awesome_losses,
         _compute_speech_band_logmag_loss,
         _compute_vad_loss,
@@ -198,6 +218,38 @@ def diagnose_nonfinite(
             ctx.vad_snr_gate_db,
             ctx.vad_snr_gate_width,
             ctx.vad_proxy_enabled,
+            debug=diag,
+            debug_ctx=debug_ctx,
+        )
+
+    if ctx.use_contrastive_awesome_loss:
+        projector = getattr(ctx.model, "contrastive_projector", None)
+        _compute_contrastive_awesome_losses(
+            noisy_real,
+            noisy_imag,
+            clean_real,
+            clean_imag,
+            interference_real,
+            interference_imag,
+            spec_out[0],
+            spec_out[1],
+            snr,
+            ctx.vad_band_mask,
+            ctx.vad_band_bins,
+            ctx.awesome_mask_sharpness,
+            ctx.vad_z_threshold,
+            ctx.vad_z_slope,
+            ctx.vad_snr_gate_db,
+            ctx.vad_snr_gate_width,
+            ctx.vad_proxy_enabled,
+            projector=projector,
+            temperature=ctx.contrastive_temperature,
+            speech_frames_per_sample=ctx.contrastive_speech_frames_per_sample,
+            interference_frames_per_sample=ctx.contrastive_interference_frames_per_sample,
+            speech_mask_min=ctx.contrastive_speech_mask_min,
+            interference_mask_max=ctx.contrastive_interference_mask_max,
+            quiet_weight=ctx.contrastive_quiet_weight,
+            in_batch_negatives=ctx.contrastive_in_batch_negatives,
             debug=diag,
             debug_ctx=debug_ctx,
         )

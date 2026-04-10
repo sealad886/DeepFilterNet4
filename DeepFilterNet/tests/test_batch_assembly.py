@@ -21,11 +21,15 @@ def _make_sample(
     clean_spec = np.random.randn(time_frames, n_freqs).astype(np.float32) + 1j * np.random.randn(
         time_frames, n_freqs
     ).astype(np.float32)
+    interference_spec = np.random.randn(time_frames, n_freqs).astype(np.float32) + 1j * np.random.randn(
+        time_frames, n_freqs
+    ).astype(np.float32)
     feat_erb = np.random.randn(time_frames, n_erb).astype(np.float32)
     feat_spec = np.random.randn(time_frames, n_df, 2).astype(np.float32)
     return Sample(
         noisy_spec=spec,
         clean_spec=clean_spec,
+        interference_spec=interference_spec,
         feat_erb=feat_erb,
         feat_spec=feat_spec,
         snr=snr,
@@ -45,6 +49,7 @@ class TestAssembleBatch:
         batch = _assemble_batch(samples)
         assert batch["noisy_real"].shape == (4, 100, 481)
         assert batch["clean_imag"].shape == (4, 100, 481)
+        assert batch["interference_real"].shape == (4, 100, 481)
         assert batch["feat_erb"].shape == (4, 100, 32)
         assert batch["feat_spec"].shape == (4, 100, 96, 2)
         assert batch["snr"].shape == (4,)
@@ -53,6 +58,7 @@ class TestAssembleBatch:
         s = _make_sample(snr=42.0)
         batch = _assemble_batch([s])
         np.testing.assert_allclose(np.array(batch["noisy_real"]), s.noisy_spec.real[None], atol=1e-6)
+        np.testing.assert_allclose(np.array(batch["interference_imag"]), s.interference_spec.imag[None], atol=1e-6)
         np.testing.assert_allclose(np.array(batch["snr"]), [42.0], atol=1e-6)
 
     def test_empty_raises(self):
@@ -66,6 +72,8 @@ class TestAssembleBatch:
             "noisy_imag",
             "clean_real",
             "clean_imag",
+            "interference_real",
+            "interference_imag",
             "feat_erb",
             "feat_spec",
             "snr",

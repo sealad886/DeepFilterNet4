@@ -34,6 +34,30 @@ BEST_CHECKPOINT = "best_checkpoint.safetensors"
 PATIENCE_FILE = "patience.json"
 
 
+def _filter_checkpoint_weights_for_model(
+    model: nn.Module,
+    weights: Dict[str, mx.array],
+) -> tuple[Dict[str, mx.array], tuple[str, ...]]:
+    """Drop known train-only checkpoint weights that the target model omits.
+
+    Contrastive AWESOME training checkpoints may contain the optional
+    ``contrastive_projector.*`` parameters, but inference models intentionally do
+    not instantiate that train-only head. Those keys should be ignored when the
+    target model lacks matching parameters, while all other unexpected keys
+    remain strict errors.
+    """
+    model_keys = {str(name) for name, _ in tree_flatten(model.parameters())}
+    dropped = tuple(
+        str(name)
+        for name in weights
+        if str(name).startswith("contrastive_projector.") and str(name) not in model_keys
+    )
+    if not dropped:
+        return weights, ()
+    filtered = {name: value for name, value in weights.items() if str(name) not in dropped}
+    return filtered, dropped
+
+
 # ============================================================================
 # Patience Tracking
 # ============================================================================
@@ -323,6 +347,9 @@ def load_checkpoint(
 
     # Load model weights
     weights: Dict[str, mx.array] = mx.load(str(checkpoint_path))  # type: ignore
+    weights, dropped = _filter_checkpoint_weights_for_model(model, weights)
+    if dropped:
+        logger.info("Ignoring {} train-only checkpoint weights absent from target model", len(dropped))
     model.load_weights(list(weights.items()))
 
     # Load state
@@ -439,6 +466,9 @@ def load_model(
     """
     checkpoint_path = Path(checkpoint_path)
     weights: Dict[str, mx.array] = mx.load(str(checkpoint_path))  # type: ignore
+    weights, dropped = _filter_checkpoint_weights_for_model(model, weights)
+    if dropped:
+        logger.info("Ignoring {} train-only checkpoint weights absent from target model", len(dropped))
     model.load_weights(list(weights.items()), strict=strict)
     return model
 

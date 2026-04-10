@@ -162,6 +162,7 @@ def _dfop_vjp(primals, cotangents, _outputs):
     output_time = coef_real.shape[1]
     batch_size = coef_real.shape[0]
     nb_df = coef_real.shape[2]
+    n_freqs = spec_real_pad.shape[2]  # Full spectrum size
 
     # Gather spec frames — same indexing as the forward path
     frame_starts = mx.arange(output_time)
@@ -169,11 +170,16 @@ def _dfop_vjp(primals, cotangents, _outputs):
     indices = frame_starts[:, None] + offsets[None, :]  # (T, df_order)
     flat_idx = indices.flatten()
 
-    in_real = mx.take(spec_real_pad, flat_idx, axis=1).reshape(batch_size, output_time, df_order, nb_df)
-    in_imag = mx.take(spec_imag_pad, flat_idx, axis=1).reshape(batch_size, output_time, df_order, nb_df)
-    # (B, T, df_order, nb_df) -> (B, T, nb_df, df_order)
+    # Take and reshape to match full spectrum, then we'll extract only nb_df
+    in_real = mx.take(spec_real_pad, flat_idx, axis=1).reshape(batch_size, output_time, df_order, n_freqs)
+    in_imag = mx.take(spec_imag_pad, flat_idx, axis=1).reshape(batch_size, output_time, df_order, n_freqs)
+    # (B, T, df_order, n_freqs) -> (B, T, n_freqs, df_order)
     in_real = mx.transpose(in_real, (0, 1, 3, 2))
     in_imag = mx.transpose(in_imag, (0, 1, 3, 2))
+
+    # Extract only nb_df frequencies for gradient computation
+    in_real = in_real[:, :, :nb_df, :]
+    in_imag = in_imag[:, :, :nb_df, :]
 
     # Expand d_out for broadcasting over taps: (B, T, nb_df, 1)
     d_out_r = mx.expand_dims(d_out_real, axis=-1)
@@ -188,17 +194,18 @@ def _dfop_vjp(primals, cotangents, _outputs):
     # --- Gradient w.r.t. spec_pad ---
     # d_spec_pad[b, t+k, f] += conj(coef[b,t,f,k]) * d_out[b,t,f]
     # conj(c)(d) = (c_r*d_r + c_i*d_i) + (c_r*d_i - c_i*d_r)*i
-    # Loop over df_order taps (typically 5) — each tap shifts by 1
+    # Vectorized: compute all tap gradients at once (B, T, nb_df, df_order)
+    # Then scatter each tap's contribution to its offset position
     d_spec_real_pad = mx.zeros_like(spec_real_pad)
     d_spec_imag_pad = mx.zeros_like(spec_imag_pad)
 
+    # Gradients only affect nb_df portion
+    grad_r_all = coef_real * mx.expand_dims(d_out_real, axis=-1) + coef_imag * mx.expand_dims(d_out_imag, axis=-1)
+    grad_i_all = coef_real * mx.expand_dims(d_out_imag, axis=-1) - coef_imag * mx.expand_dims(d_out_real, axis=-1)
+
     for k in range(df_order):
-        cr_k = coef_real[:, :, :, k]  # (B, T, nb_df)
-        ci_k = coef_imag[:, :, :, k]
-        grad_r = cr_k * d_out_real + ci_k * d_out_imag
-        grad_i = cr_k * d_out_imag - ci_k * d_out_real
-        d_spec_real_pad = d_spec_real_pad.at[:, k : k + output_time, :].add(grad_r)
-        d_spec_imag_pad = d_spec_imag_pad.at[:, k : k + output_time, :].add(grad_i)
+        d_spec_real_pad = d_spec_real_pad.at[:, k : k + output_time, :nb_df].add(grad_r_all[:, :, :, k])
+        d_spec_imag_pad = d_spec_imag_pad.at[:, k : k + output_time, :nb_df].add(grad_i_all[:, :, :, k])
 
     return d_spec_real_pad, d_spec_imag_pad, d_coef_real, d_coef_imag
 

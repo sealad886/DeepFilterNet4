@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 from scipy.io import wavfile
 
-from df_mlx.dynamic_dataset import DatasetConfig, DynamicDataset, PrefetchDataLoader
+from df_mlx.dynamic_dataset import HAS_MLX_DATA, DatasetConfig, DynamicDataset, MLXDataStream, PrefetchDataLoader
 
 
 def _write_wav(path, sr: int = 16000, seconds: float = 1.0) -> None:
@@ -27,6 +27,56 @@ def test_dynamic_dataset_initializes_indices_for_immediate_get_sample(tmp_path):
     dataset = DynamicDataset(cfg)
     sample = dataset.get_sample(0)
     assert sample is not None
+
+
+def test_dynamic_dataset_pads_short_speech_instead_of_skipping(tmp_path):
+    speech_path = tmp_path / "short_speech.wav"
+    _write_wav(speech_path, seconds=0.2)
+
+    cfg = DatasetConfig(
+        speech_files=[str(speech_path)],
+        noise_files=[],
+        rir_files=[],
+        sample_rate=16000,
+        segment_length=0.5,
+        train_split=1.0,
+        valid_split=0.0,
+    )
+    dataset = DynamicDataset(cfg)
+    sample = dataset.get_sample(0)
+
+    assert sample is not None
+    assert sample.noisy_spec.shape[0] > 0
+    assert sample.clean_spec.shape == sample.noisy_spec.shape
+
+
+@pytest.mark.skipif(not HAS_MLX_DATA, reason="mlx-data not installed")
+def test_mlx_data_stream_transforms_short_speech_without_fallback_failure(tmp_path):
+    speech_path = tmp_path / "short_speech.wav"
+    _write_wav(speech_path, seconds=0.2)
+
+    cfg = DatasetConfig(
+        speech_files=[str(speech_path)],
+        noise_files=[],
+        rir_files=[],
+        sample_rate=16000,
+        segment_length=0.5,
+        train_split=1.0,
+        valid_split=0.0,
+        p_random_noise=0.0,
+        n_noise_min=1,
+        n_noise_max=1,
+    )
+    dataset = DynamicDataset(cfg)
+    stream = MLXDataStream(dataset, batch_size=1, prefetch_size=1, num_workers=1, drop_last=False)
+
+    transformed = stream._sample_transform(
+        {"idx": np.array(0, dtype=np.int32), "fallbacks": np.array([], dtype=np.int32)}
+    )
+
+    assert transformed["noisy_real"].ndim == 2
+    assert transformed["clean_real"].shape == transformed["noisy_real"].shape
+    assert transformed["feat_erb"].ndim == 2
 
 
 def test_prefetch_loader_raises_when_no_samples_can_be_loaded(tmp_path):

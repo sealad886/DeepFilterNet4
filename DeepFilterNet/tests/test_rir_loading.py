@@ -91,8 +91,9 @@ class TestRIRLoading:
         config.cache_dir = str(path)
         ds = DynamicDataset(config)
 
-        # rir_cache was created (dir exists) but has 0 files
-        assert ds.rir_cache is not None
+        # _load_optional_cache returns None when index has no entries,
+        # but prints a warning because the rir/ directory has shard files.
+        assert ds.rir_cache is None
         assert len(config.rir_files) == 0
 
         captured = capsys.readouterr()

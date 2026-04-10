@@ -437,26 +437,28 @@
     "loss": {
       "type": "object",
       "title": "Loss Function Configuration",
-      "description": "Configuration for loss functions including basic MSE, AWESOME, Multi-resolution STFT, and auxiliary losses.",
+      "description": "Configuration for loss functions including baseline reconstruction, AWESOME weighted reconstruction, local contrastive InfoNCE, contrastive silence suppression, Multi-resolution STFT, and auxiliary losses.",
       "x-taplo": {
         "docs": {
-          "main": "Multi-component loss function combining reconstruction loss, AWESOME perceptual loss, Multi-resolution STFT loss, and optional GAN adversarial signal. Choose dynamic_loss strategy: 'baseline' (MSE), 'awesome' (AWESOME + MSE), or 'pipeline_awesome' (pipeline integration)."
+          "main": "Multi-component loss function combining reconstruction loss, AWESOME weighted reconstruction, optional contrastive InfoNCE or silence-suppression regularization, Multi-resolution STFT loss, and optional GAN adversarial signal. Choose dynamic_loss strategy: 'baseline', 'awesome', 'pipeline_awesome', 'contrastive_awesome', or 'contrastive_silence'."
         },
-        "initKeys": ["dynamic_loss", "awesome"]
+        "initKeys": ["dynamic_loss", "awesome", "contrastive", "contrastive_silence"]
       },
       "properties": {
         "dynamic_loss": {
           "type": "string",
           "title": "Dynamic Loss Strategy",
-          "description": "Loss function strategy: 'baseline' (MSE only), 'awesome' (AWESOME + MSE), or 'pipeline_awesome' (pipeline integrated).",
-          "enum": ["baseline", "awesome", "pipeline_awesome"],
+          "description": "Loss function strategy: 'baseline' (reconstruction only), 'awesome' (weighted reconstruction), 'pipeline_awesome' (heuristic pipeline variant), 'contrastive_awesome' (local InfoNCE with aligned clean/noisy/interference frames), or 'contrastive_silence' (InfoNCE speech + direct silence suppression with pre-cleaned references).",
+          "enum": ["baseline", "awesome", "pipeline_awesome", "contrastive_awesome", "contrastive_silence"],
           "default": "baseline",
           "x-taplo": {
             "docs": {
               "enumValues": [
                 "Baseline MSE loss - simple reconstruction error",
-                "AWESOME + MSE - adds perceptual quality loss",
-                "Pipeline AWESOME - integrated into data pipeline"
+                "AWESOME + MSE - adds weighted reconstruction loss",
+                "Pipeline AWESOME - heuristic pipeline integration",
+                "Contrastive AWESOME - local InfoNCE with combined-interference negatives",
+                "Contrastive Silence - InfoNCE speech + direct silence suppression via pre-cleaned references"
               ]
             }
           }
@@ -498,6 +500,178 @@
               "title": "Enable VAD Proxy Gating",
               "description": "Enable cheap VAD proxy gating for speech/silence decision.",
               "default": true
+            }
+          },
+          "additionalProperties": false
+        },
+        "contrastive": {
+          "type": "object",
+          "title": "Contrastive AWESOME Configuration",
+          "description": "Local InfoNCE configuration used when dynamic_loss is 'contrastive_awesome'. Mines aligned speech-heavy and interference-heavy frames using the legacy AWESOME teacher mask/proxy, then contrasts enhanced frames against clean/noisy/interference embeddings.",
+          "x-taplo": {
+            "docs": {
+              "main": "Contrastive AWESOME is experimental and train_dynamic-only. It adds a train-only frame projector and local embedding-space InfoNCE over aligned clean, noisy-mixture, and combined-interference frames."
+            },
+            "initKeys": [
+              "loss_weight",
+              "warmup_steps",
+              "temperature",
+              "embedding_dim",
+              "hidden_dim"
+            ]
+          },
+          "properties": {
+            "loss_weight": {
+              "type": "number",
+              "title": "Contrastive Loss Weight",
+              "description": "Weight of the local contrastive InfoNCE loss relative to the base reconstruction loss.",
+              "default": 0.15,
+              "minimum": 0.0
+            },
+            "warmup_steps": {
+              "type": "integer",
+              "title": "Contrastive Warmup Steps",
+              "description": "Number of training steps over which to ramp the contrastive loss weight from 0 to its configured value.",
+              "default": 2500,
+              "minimum": 0
+            },
+            "temperature": {
+              "type": "number",
+              "title": "InfoNCE Temperature",
+              "description": "Temperature divisor used for cosine-similarity logits in the local InfoNCE loss.",
+              "default": 0.1,
+              "exclusiveMinimum": 0.0
+            },
+            "embedding_dim": {
+              "type": "integer",
+              "title": "Embedding Dimension",
+              "description": "Output embedding dimension of the train-only frame projector head.",
+              "default": 128,
+              "minimum": 1
+            },
+            "hidden_dim": {
+              "type": "integer",
+              "title": "Projector Hidden Dimension",
+              "description": "Hidden dimension of the train-only frame projector head.",
+              "default": 256,
+              "minimum": 1
+            },
+            "speech_frames_per_sample": {
+              "type": "integer",
+              "title": "Speech Frames per Sample",
+              "description": "Number of speech-heavy frames selected per sample for the speech-side contrastive term.",
+              "default": 32,
+              "minimum": 1
+            },
+            "interference_frames_per_sample": {
+              "type": "integer",
+              "title": "Interference Frames per Sample",
+              "description": "Number of interference-heavy frames selected per sample for the quiet/interference contrastive term.",
+              "default": 32,
+              "minimum": 1
+            },
+            "speech_mask_min": {
+              "type": "number",
+              "title": "Speech Mask Minimum",
+              "description": "Minimum mean speech-mask value required for a frame to be eligible for speech-side contrastive mining.",
+              "default": 0.7,
+              "minimum": 0.0,
+              "maximum": 1.0
+            },
+            "interference_mask_max": {
+              "type": "number",
+              "title": "Interference Mask Maximum",
+              "description": "Maximum mean speech-mask value required for a frame to be eligible for interference-side contrastive mining.",
+              "default": 0.3,
+              "minimum": 0.0,
+              "maximum": 1.0
+            },
+            "quiet_weight": {
+              "type": "number",
+              "title": "Quiet/Interference Weight",
+              "description": "Relative weight applied to the interference-selected contrastive term.",
+              "default": 0.5,
+              "minimum": 0.0
+            },
+            "in_batch_negatives": {
+              "type": "boolean",
+              "title": "Use In-batch Negatives",
+              "description": "Whether to use other samples' selected clean frames as additional negatives.",
+              "default": true
+            }
+          },
+          "additionalProperties": false
+        },
+        "contrastive_silence": {
+          "type": "object",
+          "title": "Contrastive Silence Configuration",
+          "description": "Silence-specific settings used when dynamic_loss is 'contrastive_silence'. Shares [loss.contrastive] settings for the speech InfoNCE branch; these settings control the direct silence suppression branch.",
+          "x-taplo": {
+            "docs": {
+              "main": "Contrastive Silence replaces the quiet/interference contrastive branch with a direct log-magnitude L1 regression toward pre-cleaned (DFN3) silence targets. Assumes clean speech files have been pre-processed to minimize residual background noise."
+            },
+            "initKeys": [
+              "silence_weight",
+              "asymmetric_penalty",
+              "silence_frames_per_sample"
+            ]
+          },
+          "properties": {
+            "silence_frames_per_sample": {
+              "type": "integer",
+              "title": "Silence Frames per Sample",
+              "description": "Number of silence-heavy frames selected per sample for the direct suppression term.",
+              "default": 32,
+              "minimum": 1
+            },
+            "silence_mask_max": {
+              "type": "number",
+              "title": "Silence Mask Maximum",
+              "description": "Maximum mean speech-mask value for a frame to be eligible for silence-side suppression mining.",
+              "default": 0.3,
+              "minimum": 0.0,
+              "maximum": 1.0
+            },
+            "silence_weight": {
+              "type": "number",
+              "title": "Silence Suppression Weight",
+              "description": "Relative weight of the silence suppression term vs the speech contrastive term.",
+              "default": 0.8,
+              "minimum": 0.0
+            },
+            "asymmetric_penalty": {
+              "type": "number",
+              "title": "Asymmetric Penalty",
+              "description": "Extra penalty multiplier for residual energy above the clean reference. Values > 1.0 make the model more aggressive about removing noise while conservative about over-suppression.",
+              "default": 2.5,
+              "minimum": 1.0
+            },
+            "transition_blend_range": {
+              "type": "array",
+              "title": "Transition Blend Range",
+              "description": "VAD mask range [low, high] for soft blending between silence suppression and speech contrastive objectives in the transition zone.",
+              "items": {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0
+              },
+              "minItems": 2,
+              "maxItems": 2,
+              "default": [0.3, 0.7]
+            },
+            "low_freq_boost": {
+              "type": "number",
+              "title": "Low-Frequency Boost",
+              "description": "Extra silence suppression weight factor for frequencies below 300 Hz (mic hum, HVAC, room tone).",
+              "default": 1.5,
+              "minimum": 0.0
+            },
+            "high_freq_boost": {
+              "type": "number",
+              "title": "High-Frequency Boost",
+              "description": "Extra silence suppression weight factor for frequencies above 7 kHz (pre-amp hiss, electrical noise).",
+              "default": 1.3,
+              "minimum": 0.0
             }
           },
           "additionalProperties": false

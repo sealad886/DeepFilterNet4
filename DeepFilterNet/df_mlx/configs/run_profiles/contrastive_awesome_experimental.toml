@@ -1,0 +1,94 @@
+# Experimental local-contrastive AWESOME profile.
+#
+# This profile keeps the existing spectral + MRSTFT + VAD stack and adds the
+# train-only local InfoNCE auxiliary loss exposed by
+# `dynamic_loss = "contrastive_awesome"`.
+#
+# Supported only in `python -m df_mlx.train_dynamic`.
+
+[dataset]
+cache_dir = "./datasets/mlx_datastore"
+
+[training]
+epochs = 120
+batch_size = 12
+learning_rate = 1e-4
+weight_decay = 0.0
+warmup_epochs = 5
+patience = 10
+grad_accumulation_steps = 1
+max_grad_norm = 0.8
+fp16 = true
+seed = 42
+
+[dataloader]
+num_workers = 4
+prefetch_size = 8
+use_mlx_data = true
+
+[checkpoint]
+checkpoint_dir = "./checkpoints/contrastive_awesome_experimental"
+save_strategy = "epoch"
+save_total_limit = 3
+validate_every = 1
+resume = true
+resume_data = true
+
+[model]
+backbone_type = "attention"
+variant = "full"
+
+[loss]
+dynamic_loss = "contrastive_awesome"
+
+[loss.contrastive]
+loss_weight = 0.15
+warmup_steps = 2500
+temperature = 0.1
+embedding_dim = 128
+hidden_dim = 256
+speech_frames_per_sample = 32
+interference_frames_per_sample = 32
+speech_mask_min = 0.7
+interference_mask_max = 0.3
+quiet_weight = 0.5
+in_batch_negatives = true
+
+[loss.mrstft]
+factor = 0.2
+gamma = 0.7
+f_complex = 0.15
+fft_sizes = [512, 1024, 2048]
+hop_sizes = [128, 256, 512]
+
+[vad]
+loss_weight = 0.05
+threshold = 0.6
+margin = 0.05
+speech_loss_weight = 0.2
+warmup_epochs = 5
+snr_gate_db = -12.0
+snr_gate_width = 6.0
+band_low_hz = 300.0
+band_high_hz = 3400.0
+z_threshold = 0.0
+z_slope = 1.0
+
+[vad.eval]
+mode = "auto"
+every = 1
+batches = 8
+
+[metrics]
+eval_sisdr = false
+
+[debug]
+verbose = false
+sync_mode = "fast"
+debug_numerics = false
+debug_numerics_fail_fast = true
+debug_numerics_every = 1
+debug_numerics_dump_dir = ""
+debug_numerics_dump_arrays = false
+debug_numerics_max_dumps = 5
+nan_skip_batch = false

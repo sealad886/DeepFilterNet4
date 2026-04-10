@@ -10,7 +10,9 @@ The MLX training pipeline (`df_mlx/train_dynamic.py`) computes a composite loss 
 
 The total generator loss is:
 
-$$L_{total} = L_{spec} + L_{mrstft} + w_{gan} \cdot L_{gen} + w_{fm} \cdot L_{fm} + w_{awesome} \cdot L_{awesome} + w_{vad} \cdot L_{vad\_proxy} + w_{vad} \cdot L_{vad\_head} + w_{speech} \cdot L_{speech} + w_{vad\_reg} \cdot L_{vad\_reg}$$
+$$L_{total} = L_{spec} + L_{mrstft} + w_{gan} \cdot L_{gen} + w_{fm} \cdot L_{fm} + w_{awesome} \cdot L_{awesome} + w_{ctr} \cdot L_{contrastive} + w_{vad} \cdot L_{vad\_proxy} + w_{vad} \cdot L_{vad\_head} + w_{speech} \cdot L_{speech} + w_{vad\_reg} \cdot L_{vad\_reg}$$
+
+where $L_{contrastive}$ is one of the contrastive variants — `contrastive_awesome` (§2.7) or `contrastive_silence` (§2.7a) — depending on the `dynamic_loss` config. Only one is active at a time.
 
 Each component is optionally enabled by config flags. The discriminator has a separate loss and optimizer (§2.5, §3.6).
 
@@ -38,7 +40,7 @@ where $\alpha = 0.5$ by default, $\hat{M}$ = predicted magnitude, $M$ = target m
 	- **What:** scalar in $[0,1]$.
 	- **Why relevant:** balances “sounds right in energy” (magnitude) vs “phase/coherence also right” (complex).
 	- **How chosen:** fixed hyperparameter; typically tuned by validation listening/metrics.
-- $\hat{M}, M$: predicted vs reference magnitudes, computed as $\sqrt{R^2 + I^2 + \varepsilon}$.
+- $\hat{M}, M$: predicted vs reference magnitudes, computed as $\sqrt{R^2 + I^2 + \varepsilon_{mag}}$.
 	- **Why relevant:** magnitude errors strongly track perceived loudness and masking behavior.
 - $\hat{R}, \hat{I}, R, I$: predicted/reference real/imaginary STFT parts.
 	- **Why relevant:** preserves fine waveform structure after iSTFT, reducing chirps/phasiness.
@@ -50,7 +52,9 @@ Magnitude-only losses can produce "right energy, wrong texture" audio. Adding co
 
 **Details:**
 - Casts all inputs to FP32 internally for numerical stability.
-- $\varepsilon = 10^{-8}$ inside `mx.sqrt` prevents zero gradients on silence.
+- The active MLX path now uses a split epsilon policy:
+	- $\varepsilon_{mag} = 10^{-10}$ inside complex-magnitude and `log1p`-magnitude paths (`complex_mag`, `log1p_mag`) to reduce artificial floors on very quiet bins.
+	- $\varepsilon_{red} = 10^{-8}$ stays in band-energy, ratio, and log-energy reductions where denominator protection is the real concern.
 - Valid for all data including silence.
 
 **Effect of weight change:** Increasing emphasises spectral fidelity; decreasing makes room for perceptual losses (GAN, awesome).
@@ -63,7 +67,7 @@ Magnitude-only losses can produce "right energy, wrong texture" audio. Adding co
 |---|---|
 | **Source** | [df_mlx/train.py](../DeepFilterNet/df_mlx/train.py#L416-L575) — `MultiResolutionSTFTLoss` class |
 | **Measures** | Spectral fidelity at multiple frequency resolutions simultaneously. |
-| **Operates on** | Waveforms (requires iSTFT conversion from spectrogram domain first; see §2.11). |
+| **Operates on** | Waveforms (requires iSTFT conversion from spectrogram domain first; see §2.12). |
 
 **Formula:**
 
@@ -229,7 +233,7 @@ Hinge GAN objectives often train more stably than vanilla BCE GANs in speech/aud
 | | |
 |---|---|
 | **Source** | [df_mlx/training_losses.py](../DeepFilterNet/df_mlx/training_losses.py#L398-L499) — `_compute_awesome_losses()` |
-| **Measures** | Speech-preserving contrastive quality via three sub-components. |
+| **Measures** | Speech-preserving weighted reconstruction quality via three sub-components. |
 
 **Sub-components:**
 
@@ -259,7 +263,7 @@ $$L_{awesome} = L_{speech} + L_{noise} + 0.2 \cdot L_{smooth}$$
 	- **How chosen:** empirical compromise; enough to reduce musical noise without over-smoothing consonants.
 
 **Real-world connection:**
-This is effectively a hand-crafted multi-objective balancing intelligibility (speech term), comfort (noise term), and artifact control (smoothness).
+This is effectively a hand-crafted multi-objective balancing intelligibility (speech term), comfort (noise term), and artifact control (smoothness). Despite the name, it is **not** a modern contrastive objective; it is a weighted reconstruction loss.
 
 **Mask computation:** $m = \sigma\!\bigl(\text{sharpness} \cdot (\text{clean\_log} - \text{noise\_log})\bigr)$, clamped to $\pm 30$ logits, then `stop_gradient`.
 
@@ -275,14 +279,195 @@ This is effectively a hand-crafted multi-objective balancing intelligibility (sp
 
 **Edge cases:**
 - Single-frame input: `smooth_loss = 0` (no temporal derivative).
-- Silence: $\varepsilon = 10^{-8}$ in `_log1p_mag` prevents log-of-zero.
+- Silence: `_log1p_mag` uses the magnitude epsilon $\varepsilon_{mag} = 10^{-10}$, while VAD/band-energy reductions keep $\varepsilon_{red} = 10^{-8}$ for log/denominator guards.
 - Music: musicness gate (spectral flatness + temporal flux) downweights music-like content.
 
 **Effect of weight change:** Increasing preserves speech better and suppresses noise harder; too high can over-constrain the model against spectral loss.
 
 ---
 
-### 2.7 Pipeline Awesome Loss
+### 2.7 Contrastive Awesome Loss
+
+| | |
+|---|---|
+| **Source** | [df_mlx/training_losses.py](../DeepFilterNet/df_mlx/training_losses.py#L788-L989) — `_compute_contrastive_awesome_losses()` |
+| **Measures** | Local embedding-space InfoNCE on aligned enhanced/clean/noisy/interference frames. |
+
+`contrastive_awesome` is an **experimental, train_dynamic-only** auxiliary loss. It reuses the legacy AWESOME teacher mask and proxy gates only for **frame mining and weighting**, then applies a true contrastive objective in a learned frame-embedding space.
+
+**Frame feature construction:**
+
+For each frame, the projector consumes the full-frequency concatenation of real, imaginary, and log-magnitude channels:
+
+$$x_t = [R_t \;\|\; I_t \;\|\; \log(1 + |S_t|)]$$
+
+The train-only `ContrastiveFrameProjector` maps this feature to a normalized embedding:
+
+$$z_t = \frac{P(x_t)}{\|P(x_t)\|_2}$$
+
+with the implemented MLP:
+
+$$P(x) = W_2 \cdot \mathrm{LayerNorm}(\mathrm{GELU}(W_1 x + b_1)) + b_2$$
+
+**Frame mining:**
+
+- Speech-heavy frames: top-k by `mean(mask_t) * proxy_frame_t`
+- Interference-heavy frames: top-k by `mean(1 - mask_t)`
+- `mask` and `proxy_frame` are wrapped in `stop_gradient`, so they act as non-learned teacher signals
+
+**Per-frame contrastive objective:**
+
+For each selected frame:
+- **query** = enhanced embedding
+- **positive** = aligned clean embedding
+- **negatives** = aligned noisy-mixture embedding, aligned combined-interference embedding, and optional in-batch clean embeddings from other samples
+
+The local InfoNCE term is:
+
+$$L_{ctr}(q, p, \mathcal{N}) = -\log \frac{\exp(\mathrm{sim}(q, p) / \tau)}{\exp(\mathrm{sim}(q, p) / \tau) + \sum_{n \in \mathcal{N}} \exp(\mathrm{sim}(q, n) / \tau)}$$
+
+with cosine similarity and temperature $\tau$.
+
+**Sub-components:**
+
+| Sub-loss | Purpose |
+|----------|---------|
+| Speech contrastive | Align enhanced speech-heavy frames with clean speech, repel noisy/interference frames |
+| Quiet/interference contrastive | Keep interference-heavy regions close to clean targets while repelling noisy/interference embeddings |
+
+**Total:**
+
+$$L_{contrastive} = L_{speech\_ctr} + w_{quiet} \cdot L_{quiet\_ctr}$$
+
+**Config options:**
+
+| Parameter | Description |
+|-----------|-------------|
+| `dynamic_loss = "contrastive_awesome"` | Enables the mode |
+| `loss.contrastive.loss_weight` | Multiplier in total loss |
+| `loss.contrastive.warmup_steps` | Linear ramp for the contrastive weight |
+| `loss.contrastive.temperature` | InfoNCE temperature |
+| `loss.contrastive.embedding_dim` / `hidden_dim` | Train-only projector dimensions |
+| `loss.contrastive.speech_frames_per_sample` | Speech-side top-k mining |
+| `loss.contrastive.interference_frames_per_sample` | Interference-side top-k mining |
+| `loss.contrastive.speech_mask_min` / `interference_mask_max` | Eligibility thresholds for frame mining |
+| `loss.contrastive.quiet_weight` | Weight on the quiet/interference branch |
+| `loss.contrastive.in_batch_negatives` | Whether to use other samples' clean frames as extra negatives |
+
+**Important scope note:** V1 contrastive AWESOME is supported only in `train_dynamic.py`. The precomputed datastore path (`train_with_data.py`) does not provide the required `interference_real`/`interference_imag` batch contract.
+
+---
+
+### 2.7a Contrastive Silence Loss
+
+| | |
+|---|---|
+| **Source** | *Not yet implemented — design specification only.* |
+| **Measures** | Hybrid contrastive (speech frames) + direct magnitude suppression (silence frames). |
+| **Prerequisite** | Clean speech files pre-processed with DeepFilterNet3 to minimize residual background noise. |
+
+`contrastive_silence` is a **planned** dynamic loss mode that builds on `contrastive_awesome` (§2.7). It shares the same contrastive InfoNCE objective for speech-heavy frames but **replaces** the quiet/interference contrastive branch with a direct silence regression term. This exploits the fact that the training speech files have been pre-cleaned with DFN3, making the clean reference a strong near-silence target in non-speech regions.
+
+**Motivation:**
+
+The contrastive objective in §2.7 treats silence frames the same as speech frames — comparing embeddings in a learned space. This is suboptimal for silence because:
+
+1. Near-silence embeddings are **degenerate**: all quiet frames project to similar points, so positive similarity saturates and contrastive gradients vanish.
+2. The goal for silence frames is an **absolute target** (suppress toward the clean reference), not a relative similarity ranking.
+3. When dynamic background music is mixed in during training, non-speech frames contain music energy with rich spectral structure that confuses embedding-space comparisons. A direct regression toward the music-free clean reference is a more natural fit.
+
+**Architecture:**
+
+The loss has two branches gated by the VAD-derived mask from §2.7:
+
+$$L_{ctr\_silence} = L_{speech\_ctr} + w_{silence} \cdot L_{silence\_suppress}$$
+
+**Speech branch** (unchanged from §2.7):
+
+InfoNCE contrastive objective on speech-heavy frames ($\text{mean}(m_t) \ge \theta_{speech}$):
+
+$$L_{speech\_ctr} = \mathbb{E}_{t \in \mathcal{S}}\!\left[-\log \frac{\exp(\text{sim}(q_t, p_t) / \tau)}{\exp(\text{sim}(q_t, p_t) / \tau) + \sum_{n} \exp(\text{sim}(q_t, n_t) / \tau)}\right]$$
+
+**Silence suppression branch** (new):
+
+Direct log-magnitude L1 regression on interference-heavy frames ($\text{mean}(m_t) \le \theta_{quiet}$):
+
+$$L_{silence\_suppress} = \frac{1}{|\mathcal{Q}|} \sum_{t \in \mathcal{Q}} w_t \cdot \bigl|\log(1 + |\hat{S}_t|) - \log(1 + |S^{clean}_t|)\bigr|$$
+
+where $\hat{S}_t$ is the enhanced frame, $S^{clean}_t$ is the DFN3-pre-cleaned reference, and $w_t$ incorporates both frame-mining score and optional frequency-band weighting.
+
+**Asymmetric penalty:**
+
+Residual energy above the clean reference is penalised more heavily than over-suppression, to make the model aggressive about noise removal while conservative about introducing artefacts:
+
+$$w_{asym}(t, f) = \begin{cases} \alpha_{asym} & \text{if } \log(1 + |\hat{S}_{t,f}|) > \log(1 + |S^{clean}_{t,f}|) \\ 1.0 & \text{otherwise} \end{cases}$$
+
+with default $\alpha_{asym} = 2.5$.
+
+**Transition blending:**
+
+Instead of hard mask thresholds, a continuous blend avoids pumping artefacts at speech boundaries:
+
+$$\lambda_t = \text{clamp}\!\left(\frac{\text{mean}(m_t) - \theta_{quiet}}{\theta_{speech} - \theta_{quiet}},\; 0,\; 1\right)$$
+
+Frames in the transition zone $(\theta_{quiet}, \theta_{speech})$ receive:
+
+$$L_t = \lambda_t \cdot L_{speech\_ctr}(t) + (1 - \lambda_t) \cdot L_{silence\_suppress}(t)$$
+
+**Optional frequency-band weighting:**
+
+Additional emphasis on bands where common residual noise concentrates:
+
+| Band | Frequency range | Boost | Rationale |
+|------|----------------|-------|-----------|
+| Low-frequency hum | < 300 Hz | $\beta_{low}$ (default 1.5) | Mic hum, HVAC, room tone |
+| Mid-band (speech) | 300–7000 Hz | 1.0 (VAD-gated) | Contains breaths, whispers — use VAD confidence |
+| High-frequency hiss | > 7000 Hz | $\beta_{high}$ (default 1.3) | Pre-amp hiss, electrical noise |
+
+**Why this design:**
+
+| Aspect | §2.7 quiet contrastive | §2.7a silence suppression |
+|--------|------------------------|--------------------------|
+| Speech preservation | InfoNCE (good) | InfoNCE (same) |
+| Silence suppression | Weak (degenerate embeddings) | Strong (direct regression) |
+| Music interaction | Confused by structured spectra | Natural: suppress toward music-free clean |
+| Boundary behaviour | Hard threshold, potential pumping | Soft VAD blend, smooth transitions |
+| Gradient stability | Vanishes near silence | Constant, well-conditioned |
+| Implementation | Projector needed for both branches | Projector only for speech; silence branch is projector-free |
+
+**Frame mining:**
+
+The same `_select_topk_frames` mechanism from §2.7 is used for both branches. Silence frames are selected by top-k `mean(1 - mask)` scores, ensuring the suppression loss focuses on the most interference-dominated frames rather than applying uniformly and washing out the speech signal.
+
+**Interaction with dynamic background music:**
+
+When the data loader mixes background music into the noise channel (§data pipeline), non-speech frames will contain music energy in `interference_spec`. The clean reference contains no music, so the silence suppression term naturally learns to remove it. This is more effective than the embedding comparison in §2.7, which would need to distinguish "music structure" from "speech structure" in the same contrastive space.
+
+**Config options (planned):**
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `dynamic_loss = "contrastive_silence"` | Enables the mode | — |
+| `loss.contrastive.loss_weight` | Multiplier in total loss (shared with §2.7) | 0.15 |
+| `loss.contrastive.warmup_steps` | Linear ramp (shared) | 2500 |
+| `loss.contrastive.temperature` | InfoNCE temperature for speech branch (shared) | 0.1 |
+| `loss.contrastive.embedding_dim` / `hidden_dim` | Projector dims for speech branch (shared) | 128 / 256 |
+| `loss.contrastive.speech_frames_per_sample` | Speech-side top-k mining (shared) | 32 |
+| `loss.contrastive.speech_mask_min` | Speech frame eligibility threshold | 0.7 |
+| `loss.contrastive_silence.silence_frames_per_sample` | Silence-side top-k mining | 32 |
+| `loss.contrastive_silence.silence_mask_max` | Silence frame eligibility threshold | 0.3 |
+| `loss.contrastive_silence.silence_weight` | Relative weight of silence suppression vs speech contrastive | 0.8 |
+| `loss.contrastive_silence.asymmetric_penalty` | Extra weight for residual-above-clean | 2.5 |
+| `loss.contrastive_silence.transition_blend_range` | VAD mask range for soft blending | [0.3, 0.7] |
+| `loss.contrastive_silence.low_freq_boost` | Extra silence weight below 300 Hz | 1.5 |
+| `loss.contrastive_silence.high_freq_boost` | Extra silence weight above 7 kHz | 1.3 |
+| `loss.contrastive.in_batch_negatives` | In-batch neg for speech branch (shared) | true |
+
+**Scope note:** Like §2.7, this mode requires the `interference_real`/`interference_imag` batch contract and is therefore `train_dynamic.py`-only. The silence suppression branch does not use the contrastive projector, so the projector parameter count is halved compared to §2.7 (speech branch only).
+
+---
+
+### 2.8 Pipeline Awesome Loss
 
 | | |
 |---|---|
@@ -335,7 +520,7 @@ Useful in mixed-content audio (speech + background media/music), where naive den
 
 ---
 
-### 2.8 VAD Losses (Proxy + Multi-task Head)
+### 2.9 VAD Losses (Proxy + Multi-task Head)
 
 | | |
 |---|---|
@@ -389,7 +574,7 @@ Proxy term protects speech regions from being erased; head term learns deployabl
 
 ---
 
-### 2.9 Speech Band Log-Magnitude Loss
+### 2.10 Speech Band Log-Magnitude Loss
 
 | | |
 |---|---|
@@ -420,7 +605,7 @@ Directly protects intelligibility-critical telephone band cues (vowels/formants/
 
 ---
 
-### 2.10 VAD Regulariser
+### 2.11 VAD Regulariser
 
 | | |
 |---|---|
@@ -455,13 +640,13 @@ Acts like a targeted safety regularizer: it is not always-on, but periodically n
 | `vad_train_every_steps` | Deterministic step cadence for applying the regularizer |
 | `vad_loss_weight` | Base coefficient reused as `vad_reg_weight` when the sparse gate fires |
 
-**Effect of weight change:** Complements VAD loss (§2.8) with finer-grained speech-ratio–aware control. Increasing adds stronger regularisation pressure on speech-present frames.
+**Effect of weight change:** Complements VAD loss (§2.9) with finer-grained speech-ratio–aware control. Increasing adds stronger regularisation pressure on speech-present frames.
 
 **Objective note:** This term is applied sparsely during training. Validation logs `vad_reg` as a separate metric but does not include it in the early-stopping validation objective.
 
 ---
 
-### 2.11 MRSTFT Helper (Waveform Wrapper)
+### 2.12 MRSTFT Helper (Waveform Wrapper)
 
 | | |
 |---|---|

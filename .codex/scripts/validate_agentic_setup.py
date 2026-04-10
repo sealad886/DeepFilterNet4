@@ -90,9 +90,9 @@ def validate_config(errors: list[str]) -> None:
     if not model_instructions:
         errors.append("config.toml is missing model_instructions_file")
     else:
-        model_path = (ROOT / model_instructions).resolve()
+        model_path = (CONFIG_PATH.parent / model_instructions).resolve()
         if not model_path.exists():
-            errors.append(f"Missing model instructions file: {model_instructions}")
+            errors.append("Missing model instructions file relative to .codex/config.toml: " f"{model_instructions}")
 
     fallback_paths = config.get("project_doc_fallback_filenames", [])
     if not isinstance(fallback_paths, list):

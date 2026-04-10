@@ -245,6 +245,15 @@ class DatasetRunConfig:
         normalize=_normalize_optional_str,
         none_sentinel="",
     )
+    music_list: str | None = cfg_field(
+        None,
+        help=(
+            "Path to file containing dedicated background-music file paths (one per line), "
+            "for example lists/background_music.txt or background_music.prepared_merged.txt"
+        ),
+        normalize=_normalize_optional_str,
+        none_sentinel="",
+    )
     rir_list: str | None = cfg_field(
         None,
         help="Path to file containing RIR file paths (one per line)",
@@ -293,6 +302,12 @@ class DatasetRunConfig:
         normalize=lambda v: _normalize_optional_float(v, none_sentinel=-1.0, min_value=0.0, max_value=1.0),
         none_sentinel=-1.0,
     )
+    p_background_music: float | None = cfg_field(
+        None,
+        help="Probability that a training sample includes at least one background-music source (0-1)",
+        normalize=lambda v: _normalize_optional_float(v, none_sentinel=-1.0, min_value=0.0, max_value=1.0),
+        none_sentinel=-1.0,
+    )
     speech_gain_range: tuple[float, float] | None = cfg_field(
         None,
         help="Override speech gain range in dB (e.g., [-12, 12])",
@@ -302,6 +317,12 @@ class DatasetRunConfig:
     noise_gain_range: tuple[float, float] | None = cfg_field(
         None,
         help="Override noise gain range in dB (e.g., [-12, 12])",
+        normalize=_normalize_range,
+        none_sentinel=[],
+    )
+    background_music_gain_range: tuple[float, float] | None = cfg_field(
+        None,
+        help="Override background-music source gain range in dB (e.g., [0, 12])",
         normalize=_normalize_range,
         none_sentinel=[],
     )
@@ -351,6 +372,16 @@ class TrainingConfig:
     curriculum_warmup_epochs: int = cfg_field(
         0,
         help="Curriculum learning warmup epochs (0=disabled). SNR/interferer probabilities ramp from 0 to target.",
+        normalize=lambda v: _normalize_int(v, min_value=0),
+    )
+    music_start_epoch: int = cfg_field(
+        0,
+        help="Epoch at which background-music injection begins ramping (0=from start, requires p_background_music>0).",
+        normalize=lambda v: _normalize_int(v, min_value=0),
+    )
+    music_ramp_epochs: int = cfg_field(
+        0,
+        help="Epochs over which p_background_music ramps from 0 to target after music_start_epoch (0=instant).",
         normalize=lambda v: _normalize_int(v, min_value=0),
     )
     patience: int = cfg_field(10, help="Early stopping patience", normalize=lambda v: _normalize_int(v, min_value=0))
@@ -562,6 +593,131 @@ class AwesomeLossConfig:
 
 
 @dataclass
+class ContrastiveLossConfig:
+    loss_weight: float = cfg_field(
+        0.15,
+        help="Contrastive awesome loss weight",
+        normalize=lambda v: _normalize_float(v, min_value=0.0),
+        min=0.0,
+    )
+    warmup_steps: int = cfg_field(
+        2500,
+        help="Warmup steps for contrastive awesome loss",
+        normalize=lambda v: _normalize_int(v, min_value=0),
+    )
+    temperature: float = cfg_field(
+        0.1,
+        help="InfoNCE temperature",
+        normalize=lambda v: _normalize_float(v, min_value=1e-6),
+        min=0.0,
+    )
+    embedding_dim: int = cfg_field(
+        128,
+        help="Contrastive projector embedding dimension",
+        normalize=lambda v: _normalize_int(v, min_value=1),
+        min=1,
+    )
+    hidden_dim: int = cfg_field(
+        256,
+        help="Contrastive projector hidden dimension",
+        normalize=lambda v: _normalize_int(v, min_value=1),
+        min=1,
+    )
+    speech_frames_per_sample: int = cfg_field(
+        32,
+        help="Speech-heavy frames sampled per utterance",
+        normalize=lambda v: _normalize_int(v, min_value=1),
+        min=1,
+    )
+    interference_frames_per_sample: int = cfg_field(
+        32,
+        help="Interference-heavy frames sampled per utterance",
+        normalize=lambda v: _normalize_int(v, min_value=1),
+        min=1,
+    )
+    speech_mask_min: float = cfg_field(
+        0.7,
+        help="Minimum mean speech mask value for speech-frame selection",
+        normalize=_normalize_probability,
+        min=0.0,
+        max=1.0,
+    )
+    interference_mask_max: float = cfg_field(
+        0.3,
+        help="Maximum mean speech mask value for interference-frame selection",
+        normalize=_normalize_probability,
+        min=0.0,
+        max=1.0,
+    )
+    quiet_weight: float = cfg_field(
+        0.5,
+        help="Relative weight for interference-selected contrastive loss",
+        normalize=lambda v: _normalize_float(v, min_value=0.0),
+        min=0.0,
+    )
+    in_batch_negatives: bool = cfg_field(
+        True,
+        help="Use other samples' selected clean frames as extra negatives",
+        normalize=_normalize_bool,
+    )
+
+
+@dataclass
+class ContrastiveSilenceConfig:
+    silence_frames_per_sample: int = cfg_field(
+        32,
+        help="Silence-heavy frames sampled per utterance for direct suppression",
+        normalize=lambda v: _normalize_int(v, min_value=1),
+        min=1,
+    )
+    silence_mask_max: float = cfg_field(
+        0.3,
+        help="Maximum mean speech mask value for silence-frame selection",
+        normalize=_normalize_probability,
+        min=0.0,
+        max=1.0,
+    )
+    silence_weight: float = cfg_field(
+        0.8,
+        help="Relative weight of silence suppression vs speech contrastive",
+        normalize=lambda v: _normalize_float(v, min_value=0.0),
+        min=0.0,
+    )
+    asymmetric_penalty: float = cfg_field(
+        2.5,
+        help="Extra penalty for residual energy above clean reference",
+        normalize=lambda v: _normalize_float(v, min_value=1.0),
+        min=1.0,
+    )
+    transition_blend_low: float = cfg_field(
+        0.3,
+        help="Lower VAD mask threshold for transition blending",
+        normalize=_normalize_probability,
+        min=0.0,
+        max=1.0,
+    )
+    transition_blend_high: float = cfg_field(
+        0.7,
+        help="Upper VAD mask threshold for transition blending",
+        normalize=_normalize_probability,
+        min=0.0,
+        max=1.0,
+    )
+    low_freq_boost: float = cfg_field(
+        1.5,
+        help="Extra silence weight for frequencies below 300 Hz",
+        normalize=lambda v: _normalize_float(v, min_value=0.0),
+        min=0.0,
+    )
+    high_freq_boost: float = cfg_field(
+        1.3,
+        help="Extra silence weight for frequencies above 7 kHz",
+        normalize=lambda v: _normalize_float(v, min_value=0.0),
+        min=0.0,
+    )
+
+
+@dataclass
 class MultiResSpecLossConfig:
     factor: float = cfg_field(
         0.0,
@@ -597,10 +753,14 @@ class MultiResSpecLossConfig:
 class LossConfig:
     dynamic_loss: str = cfg_field(
         "baseline",
-        help="Dynamic loss: baseline | awesome | pipeline_awesome",
-        choices=["baseline", "awesome", "pipeline_awesome"],
+        help="Dynamic loss: baseline | awesome | pipeline_awesome | contrastive_awesome | contrastive_silence",
+        choices=["baseline", "awesome", "pipeline_awesome", "contrastive_awesome", "contrastive_silence"],
         normalize=lambda v: str(v),
-        notes="If not 'awesome' or 'pipeline_awesome', the [loss.awesome] block is ignored.",
+        notes=(
+            "If not 'awesome' or 'pipeline_awesome', the [loss.awesome] block is ignored. "
+            "If not 'contrastive_awesome' or 'contrastive_silence', the [loss.contrastive] block is ignored. "
+            "If not 'contrastive_silence', the [loss.contrastive_silence] block is ignored."
+        ),
     )
     pipeline_stages: list[dict[str, Any]] = field(
         default_factory=list,
@@ -620,6 +780,8 @@ class LossConfig:
         },
     )
     awesome: AwesomeLossConfig = field(default_factory=AwesomeLossConfig)
+    contrastive: ContrastiveLossConfig = field(default_factory=ContrastiveLossConfig)
+    contrastive_silence: ContrastiveSilenceConfig = field(default_factory=ContrastiveSilenceConfig)
     mrstft: MultiResSpecLossConfig = field(default_factory=MultiResSpecLossConfig)
 
 
@@ -681,6 +843,11 @@ class GanConfig:
         1,
         help="Update discriminator every N steps",
         normalize=lambda v: _normalize_int(v, min_value=1),
+    )
+    freeze_disc_after_epoch: int = cfg_field(
+        -1,
+        help="Freeze discriminator weights after this epoch (-1 = never). Only FM loss used after freezing.",
+        normalize=lambda v: _normalize_int(v, min_value=-1),
     )
     disc_max_samples: int = cfg_field(
         48000,
@@ -1145,9 +1312,20 @@ def validate_run_config(cfg: RunConfig) -> None:
         )
 
     # Loss-dependent warnings/errors
-    if cfg.loss.dynamic_loss != "awesome":
-        # Awesome settings are ignored unless dynamic_loss=awesome
+    if cfg.loss.dynamic_loss not in {"awesome", "pipeline_awesome"}:
+        # Awesome settings are ignored unless dynamic_loss selects an awesome variant.
         pass
+
+    if cfg.loss.dynamic_loss not in {"contrastive_awesome", "contrastive_silence"}:
+        # Contrastive settings are ignored unless dynamic_loss uses a contrastive variant.
+        pass
+
+    if cfg.loss.dynamic_loss == "contrastive_silence":
+        if cfg.loss.contrastive_silence.transition_blend_low >= cfg.loss.contrastive_silence.transition_blend_high:
+            raise ValueError("loss.contrastive_silence.transition_blend_low must be < transition_blend_high")
+
+    if cfg.loss.contrastive.interference_mask_max > cfg.loss.contrastive.speech_mask_min:
+        raise ValueError("loss.contrastive.interference_mask_max must be <= loss.contrastive.speech_mask_min")
 
     # VAD eval Silero requirements
     if cfg.vad.eval.mode == "silero":
@@ -1316,6 +1494,7 @@ def generate_run_config_example() -> str:
     _emit_section(lines, "model", cfg.model)
     _emit_section(lines, "loss", cfg.loss)
     _emit_section(lines, "loss.awesome", cfg.loss.awesome)
+    _emit_section(lines, "loss.contrastive", cfg.loss.contrastive)
     _emit_section(lines, "loss.mrstft", cfg.loss.mrstft)
     _emit_section(lines, "gan", cfg.gan)
     _emit_section(lines, "vad", cfg.vad)

@@ -44,6 +44,15 @@ from df_mlx.train import load_checkpoint, save_checkpoint  # noqa: E402
 from df_mlx.training_ops import clip_grad_norm  # noqa: E402
 
 
+def _checkpoint_has_contrastive_projector(path: str | Path) -> bool:
+    """Return True if a checkpoint contains contrastive projector weights."""
+    try:
+        weights = mx.load(str(path))
+    except Exception:
+        return False
+    return any(str(key).startswith("contrastive_projector.") for key in weights)
+
+
 def train(
     datastore_dir: str,
     epochs: int = 100,
@@ -87,6 +96,13 @@ def train(
     print(f"Learning rate:  {learning_rate}")
     print(f"Checkpoint dir: {checkpoint_dir}")
     print("=" * 60)
+
+    if resume_from and _checkpoint_has_contrastive_projector(resume_from):
+        raise ValueError(
+            "Contrastive AWESOME checkpoints are only supported in df_mlx.train_dynamic. "
+            "train_with_data uses the legacy datastore path and does not provide "
+            "interference_real/interference_imag or compatible checkpoint loading."
+        )
 
     # Create data loaders
     print("\nInitializing data loaders...")

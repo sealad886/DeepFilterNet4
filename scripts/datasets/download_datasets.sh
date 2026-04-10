@@ -7,6 +7,38 @@ if [[ ! -d "${DEFAULT_DATA_DIR}" ]]; then
   DEFAULT_DATA_DIR="${ROOT_DIR}/data"
 fi
 
+detect_active_virtualenv_python() {
+  if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+    if [[ -x "${VIRTUAL_ENV}/bin/python3" ]]; then
+      echo "${VIRTUAL_ENV}/bin/python3"
+      return 0
+    fi
+    if [[ -x "${VIRTUAL_ENV}/bin/python" ]]; then
+      echo "${VIRTUAL_ENV}/bin/python"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+PYTHON_BIN="${PYTHON_BIN:-}"
+if [[ -z "${PYTHON_BIN}" ]]; then
+  if ACTIVE_VENV_PYTHON="$(detect_active_virtualenv_python)"; then
+    PYTHON_BIN="${ACTIVE_VENV_PYTHON}"
+  elif [[ -x "${ROOT_DIR}/.venv/bin/python3" ]]; then
+    PYTHON_BIN="${ROOT_DIR}/.venv/bin/python3"
+  elif [[ -x "${ROOT_DIR}/.venv/bin/python" ]]; then
+    PYTHON_BIN="${ROOT_DIR}/.venv/bin/python"
+  elif command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v python3)"
+  elif command -v python >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v python)"
+  else
+    echo "Error: could not find python3 or python on PATH" >&2
+    exit 1
+  fi
+fi
+
 INTERRUPTED=0
 on_interrupt() {
   INTERRUPTED=1
@@ -20,9 +52,9 @@ usage_helptext() {
 Usage:
   ./download_datasets.sh [options]
 
-Download/extract the speech, noise, and RIR corpora used for DeepFilterNet
-training, then generate the combined file lists consumed by the datastore and
-HDF5 builders.
+Download/extract the speech, noise, background-music, and RIR corpora used for
+DeepFilterNet training, then generate the file lists consumed by the datastore
+and HDF5 builders.
 
 Core options:
   --data-dir PATH                 Base dataset directory (default: ${DEFAULT_DATA_DIR})
@@ -72,6 +104,8 @@ Dataset selection:
   --download-vctk / --no-download-vctk                       Override VCTK download toggle (default: enabled)
   --download-librispeech / --no-download-librispeech         Override LibriSpeech toggle (default: production=1, apple/prototype=0)
   --download-musan / --no-download-musan                     Override MUSAN toggle (default: enabled)
+  --download-fma / --no-download-fma                         Override FMA download toggle (default: enabled)
+  --download-mtg-jamendo / --no-download-mtg-jamendo         Override MTG-Jamendo download toggle (default: production=1, apple/prototype=0)
   --download-fsd50k / --no-download-fsd50k                   Override FSD50K toggle (default: enabled)
   --download-air / --no-download-air                         Override AIR toggle (default: enabled)
   --download-openair / --no-download-openair                 Override OpenAIR toggle (default: enabled)
@@ -81,14 +115,20 @@ Dataset path overrides:
   --vctk-dir PATH                 Existing VCTK root (default: EXTRACT_DIR/VCTK-Corpus-0.92)
   --librispeech-dir PATH          Existing LibriSpeech root (default: EXTRACT_DIR/LibriSpeech)
   --musan-dir PATH                Existing MUSAN root (default: EXTRACT_DIR/musan)
+  --fma-dir PATH                  Existing FMA root (default: EXTRACT_DIR/FMA)
+  --mtg-jamendo-dir PATH          Existing MTG-Jamendo root (default: EXTRACT_DIR/mtg-jamendo)
   --fsd50k-dir PATH               Existing FSD50K root (default: EXTRACT_DIR/FSD50K)
   --air-rir-dir PATH              Existing AIR RIR root (default: AUDB_DIR/data)
   --openair-dir PATH              Existing OpenAIR root (default: AUDB_DIR/wav)
   --acousticrooms-dir PATH        Existing AcousticRooms root (default: EXTRACT_DIR/AcousticRooms)
 
 Source overrides:
-  --vctk-url URL                  VCTK archive URL (default: official VCTK 0.92 zip)
+  --vctk-url URL                  VCTK archive URL (default: Zenodo mirror of VCTK 0.92 zip; matches official MD5)
   --librispeech-parts STRING      Space-separated LibriSpeech parts (default: profile-specific)
+  --fma-subset NAME               FMA audio subset: medium | large | full (default: profile-specific)
+  --background-music-target-count N
+                                  Curated chart-style song target count (default: 2000)
+  --background-music-min-count N  Minimum acceptable curated song count (default: 500)
   --fsd50k-base-url URL           FSD50K base URL (default: https://zenodo.org/records/4060432/files)
 
 General:
@@ -135,6 +175,8 @@ CLI_OPENAIR_VERSION=""
 CLI_DOWNLOAD_VCTK=""
 CLI_DOWNLOAD_LIBRISPEECH=""
 CLI_DOWNLOAD_MUSAN=""
+CLI_DOWNLOAD_FMA=""
+CLI_DOWNLOAD_MTG_JAMENDO=""
 CLI_DOWNLOAD_FSD50K=""
 CLI_DOWNLOAD_AIR=""
 CLI_DOWNLOAD_OPENAIR=""
@@ -142,12 +184,17 @@ CLI_DOWNLOAD_ACOUSTICROOMS=""
 CLI_VCTK_DIR=""
 CLI_LIBRISPEECH_DIR=""
 CLI_MUSAN_DIR=""
+CLI_FMA_DIR=""
+CLI_MTG_JAMENDO_DIR=""
 CLI_FSD50K_DIR=""
 CLI_AIR_RIR_DIR=""
 CLI_OPENAIR_DIR=""
 CLI_ACOUSTICROOMS_DIR=""
 CLI_VCTK_URL=""
 CLI_LIBRISPEECH_PARTS=""
+CLI_FMA_SUBSET=""
+CLI_BACKGROUND_MUSIC_TARGET_COUNT=""
+CLI_BACKGROUND_MUSIC_MIN_COUNT=""
 CLI_FSD50K_BASE_URL=""
 
 while [[ $# -gt 0 ]]; do
@@ -320,6 +367,22 @@ while [[ $# -gt 0 ]]; do
       CLI_DOWNLOAD_MUSAN="0"
       shift
       ;;
+    --download-fma)
+      CLI_DOWNLOAD_FMA="1"
+      shift
+      ;;
+    --no-download-fma)
+      CLI_DOWNLOAD_FMA="0"
+      shift
+      ;;
+    --download-mtg-jamendo)
+      CLI_DOWNLOAD_MTG_JAMENDO="1"
+      shift
+      ;;
+    --no-download-mtg-jamendo)
+      CLI_DOWNLOAD_MTG_JAMENDO="0"
+      shift
+      ;;
     --download-fsd50k)
       CLI_DOWNLOAD_FSD50K="1"
       shift
@@ -364,6 +427,14 @@ while [[ $# -gt 0 ]]; do
       CLI_MUSAN_DIR="$2"
       shift 2
       ;;
+    --fma-dir)
+      CLI_FMA_DIR="$2"
+      shift 2
+      ;;
+    --mtg-jamendo-dir)
+      CLI_MTG_JAMENDO_DIR="$2"
+      shift 2
+      ;;
     --fsd50k-dir)
       CLI_FSD50K_DIR="$2"
       shift 2
@@ -386,6 +457,18 @@ while [[ $# -gt 0 ]]; do
       ;;
     --librispeech-parts)
       CLI_LIBRISPEECH_PARTS="$2"
+      shift 2
+      ;;
+    --fma-subset)
+      CLI_FMA_SUBSET="$2"
+      shift 2
+      ;;
+    --background-music-target-count)
+      CLI_BACKGROUND_MUSIC_TARGET_COUNT="$2"
+      shift 2
+      ;;
+    --background-music-min-count)
+      CLI_BACKGROUND_MUSIC_MIN_COUNT="$2"
       shift 2
       ;;
     --fsd50k-base-url)
@@ -442,10 +525,15 @@ OPENAIR_VERSION="${CLI_OPENAIR_VERSION:-${OPENAIR_VERSION:-1.0.0}}"
 DOWNLOAD_VCTK="${CLI_DOWNLOAD_VCTK:-${DOWNLOAD_VCTK:-}}"
 DOWNLOAD_LIBRISPEECH="${CLI_DOWNLOAD_LIBRISPEECH:-${DOWNLOAD_LIBRISPEECH:-}}"
 DOWNLOAD_MUSAN="${CLI_DOWNLOAD_MUSAN:-${DOWNLOAD_MUSAN:-}}"
+DOWNLOAD_FMA="${CLI_DOWNLOAD_FMA:-${DOWNLOAD_FMA:-}}"
+DOWNLOAD_MTG_JAMENDO="${CLI_DOWNLOAD_MTG_JAMENDO:-${DOWNLOAD_MTG_JAMENDO:-}}"
 DOWNLOAD_FSD50K="${CLI_DOWNLOAD_FSD50K:-${DOWNLOAD_FSD50K:-}}"
 DOWNLOAD_AIR="${CLI_DOWNLOAD_AIR:-${DOWNLOAD_AIR:-}}"
 DOWNLOAD_OPENAIR="${CLI_DOWNLOAD_OPENAIR:-${DOWNLOAD_OPENAIR:-}}"
 DOWNLOAD_ACOUSTICROOMS="${CLI_DOWNLOAD_ACOUSTICROOMS:-${DOWNLOAD_ACOUSTICROOMS:-}}"
+
+BACKGROUND_MUSIC_TARGET_COUNT="${CLI_BACKGROUND_MUSIC_TARGET_COUNT:-${BACKGROUND_MUSIC_TARGET_COUNT:-2000}}"
+BACKGROUND_MUSIC_MIN_COUNT="${CLI_BACKGROUND_MUSIC_MIN_COUNT:-${BACKGROUND_MUSIC_MIN_COUNT:-500}}"
 
 mkdir -p "${LIST_DIR}"
 
@@ -456,6 +544,8 @@ echo "[config] download_dir=${DOWNLOAD_DIR} extract_dir=${EXTRACT_DIR} list_dir=
 VCTK_DIR="${CLI_VCTK_DIR:-${VCTK_DIR:-${EXTRACT_DIR}/VCTK-Corpus-0.92}}"
 LIBRISPEECH_DIR="${CLI_LIBRISPEECH_DIR:-${LIBRISPEECH_DIR:-${EXTRACT_DIR}/LibriSpeech}}"
 MUSAN_DIR="${CLI_MUSAN_DIR:-${MUSAN_DIR:-${EXTRACT_DIR}/musan}}"
+FMA_DIR="${CLI_FMA_DIR:-${FMA_DIR:-${EXTRACT_DIR}/FMA}}"
+MTG_JAMENDO_DIR="${CLI_MTG_JAMENDO_DIR:-${MTG_JAMENDO_DIR:-${EXTRACT_DIR}/mtg-jamendo}}"
 FSD50K_DIR="${CLI_FSD50K_DIR:-${FSD50K_DIR:-${EXTRACT_DIR}/FSD50K}}"
 # AIR/OpenAIR via audb: AIR goes to data/, OpenAIR goes to wav/
 AIR_RIR_DIR="${CLI_AIR_RIR_DIR:-${AIR_RIR_DIR:-${AUDB_DIR}/data}}"
@@ -463,9 +553,13 @@ OPENAIR_DIR="${CLI_OPENAIR_DIR:-${OPENAIR_DIR:-${AUDB_DIR}/wav}}"
 ACOUSTICROOMS_DIR="${CLI_ACOUSTICROOMS_DIR:-${ACOUSTICROOMS_DIR:-${EXTRACT_DIR}/AcousticRooms}}"
 
 # Source overrides
-VCTK_URL="${CLI_VCTK_URL:-${VCTK_URL:-https://datashare.is.ed.ac.uk/bitstream/handle/10283/3443/VCTK-Corpus-0.92.zip}}"
+VCTK_URL="${CLI_VCTK_URL:-${VCTK_URL:-https://zenodo.org/records/10691876/files/VCTK-Corpus-0.92.zip?download=1}}"
 LIBRISPEECH_PARTS="${CLI_LIBRISPEECH_PARTS:-${LIBRISPEECH_PARTS:-}}"
+FMA_SUBSET="${CLI_FMA_SUBSET:-${FMA_SUBSET:-}}"
 FSD50K_BASE_URL="${CLI_FSD50K_BASE_URL:-${FSD50K_BASE_URL:-https://zenodo.org/records/4060432/files}}"
+
+MTG_JAMENDO_DATASET="${MTG_JAMENDO_DATASET:-raw_30s}"
+MTG_JAMENDO_TYPE="${MTG_JAMENDO_TYPE:-audio-low}"
 
 ARIA2_PARALLEL_ACTIVE=0
 ARIA2_INPUT_FILE="${DOWNLOAD_DIR}/aria2-input.txt"
@@ -480,6 +574,58 @@ require_dir() {
     return 1
   fi
   return 0
+}
+
+detect_fma_audio_dir() {
+  local root="$1"
+  local candidate
+  for candidate in \
+    "${root}/fma_full" \
+    "${root}/fma_large" \
+    "${root}/fma_medium" \
+    "${root}/fma_small"; do
+    if [[ -d "${candidate}" ]]; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+fma_dataset_ready() {
+  local root="$1"
+  local audio_dir
+  [[ -n "${root}" && -d "${root}" ]] || return 1
+  [[ -f "${root}/fma_metadata/tracks.csv" && -f "${root}/fma_metadata/genres.csv" ]] || return 1
+  audio_dir="$(detect_fma_audio_dir "${root}" 2>/dev/null || true)"
+  [[ -n "${audio_dir}" ]] || return 1
+  find "${audio_dir}" -type f -name '*.mp3' -print -quit | grep -q .
+}
+
+detect_mtg_jamendo_audio_dir() {
+  local root="$1"
+  local candidate
+  for candidate in \
+    "${root}/raw_30s/audio-low" \
+    "${root}/raw_30s/audio" \
+    "${root}/audio-low" \
+    "${root}/audio" \
+    "${root}"; do
+    if [[ -d "${candidate}" ]] && \
+      find "${candidate}" -maxdepth 3 -type f \( -name '*.mp3' -o -name '*.low.mp3' \) -print -quit | grep -q .; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+mtg_jamendo_dataset_ready() {
+  local root="$1"
+  [[ -n "${root}" && -d "${root}" ]] || return 1
+  [[ -f "${root}/data/raw.meta.tsv" ]] || return 1
+  [[ -f "${root}/data/autotagging.tsv" || -f "${root}/data/raw_30s_cleantags_50artists.tsv" ]] || return 1
+  detect_mtg_jamendo_audio_dir "${root}" >/dev/null 2>&1
 }
 
 write_list() {
@@ -571,6 +717,16 @@ stat_size() {
   fi
 }
 
+remove_zero_byte_download_artifacts() {
+  local path="$1"
+  if [[ -f "${path}" ]] && [[ "$(stat_size "${path}")" -eq 0 ]]; then
+    rm -f "${path}"
+  fi
+  if [[ -f "${path}.aria2" ]]; then
+    rm -f "${path}.aria2"
+  fi
+}
+
 stat_mtime() {
   local path="$1"
   if stat -f %m "${path}" >/dev/null 2>&1; then
@@ -594,11 +750,131 @@ checksum_file() {
 supports_range_requests() {
   local url="$1"
   local headers
-  headers=$(curl -sI -L --max-time 10 "${url}" 2>/dev/null | grep -Ei '^Accept-Ranges:')
+  headers=$(curl -sI -L --max-time 10 "${url}" 2>/dev/null | tr -d '\r' | grep -Ei '^Accept-Ranges:' || true)
   if [[ "${headers}" =~ [Bb]ytes ]]; then
     return 0
   fi
+  # Zenodo's HEAD responses do not always advertise range support even though
+  # ranged GET requests succeed. Probe a single byte so the downloader can use
+  # multipart range downloads when the mirror actually supports them.
+  if [[ "${url}" == *"zenodo.org"* ]]; then
+    local probe
+    probe=$(curl -L -r 0-0 -o /dev/null -D - -s --max-time 15 "${url}" 2>/dev/null | tr -d '\r')
+    if printf '%s\n' "${probe}" | grep -Eq '^HTTP/[0-9.]+ 206'; then
+      return 0
+    fi
+    if printf '%s\n' "${probe}" | grep -Eiq '^Content-Range:[[:space:]]*bytes[[:space:]]+0-0/'; then
+      return 0
+    fi
+    return 1
+  fi
   return 1
+}
+
+content_length_for_url() {
+  local url="$1"
+  curl -sI -L --max-time 15 "${url}" 2>/dev/null | tr -d '\r' | awk '
+    tolower($1) == "content-length:" {
+      print $2
+      exit
+    }
+  '
+}
+
+should_use_parallel_curl_download() {
+  local url="$1"
+  local out="$2"
+  [[ "$(basename "${out}")" == "VCTK-Corpus-0.92.zip" && "${url}" == *"zenodo.org"* ]] || return 1
+  command -v curl >/dev/null 2>&1 || return 1
+  supports_range_requests "${url}"
+}
+
+download_file_parallel_curl_ranges() {
+  local url="$1"
+  local out="$2"
+  local total_size
+  total_size="$(content_length_for_url "${url}")"
+  if [[ ! "${total_size}" =~ ^[0-9]+$ ]] || [[ "${total_size}" -le 0 ]]; then
+    echo "[warn] could not determine content length for parallel curl download, falling back: ${url}" >&2
+    curl -L --fail -H "Referer: ${ZENODO_REFERER}" -o "${out}" "${url}"
+    return
+  fi
+
+  local parts="${ARIA2_CONN}"
+  if [[ "${ARIA2_SPLIT}" -lt "${parts}" ]]; then
+    parts="${ARIA2_SPLIT}"
+  fi
+  if [[ "${parts}" -lt 2 ]]; then
+    curl -L --fail -H "Referer: ${ZENODO_REFERER}" -o "${out}" "${url}"
+    return
+  fi
+
+  local part_dir="${out}.parts"
+  local tmp_out="${out}.tmp"
+  local chunk_size=$(( (total_size + parts - 1) / parts ))
+  local -a pids=()
+  local part_idx start end expected_size part_file
+
+  if [[ "${RESUME}" != "1" ]]; then
+    rm -rf "${part_dir}"
+    rm -f "${tmp_out}" "${out}"
+  fi
+  mkdir -p "${part_dir}"
+
+  for ((part_idx = 0; part_idx < parts; part_idx++)); do
+    start=$(( part_idx * chunk_size ))
+    if [[ "${start}" -ge "${total_size}" ]]; then
+      break
+    fi
+    end=$(( start + chunk_size - 1 ))
+    if [[ "${end}" -ge "${total_size}" ]]; then
+      end=$(( total_size - 1 ))
+    fi
+    expected_size=$(( end - start + 1 ))
+    part_file="${part_dir}/part.$(printf '%03d' "${part_idx}")"
+
+    if [[ "${RESUME}" == "1" && -f "${part_file}" ]] && [[ "$(stat_size "${part_file}")" -eq "${expected_size}" ]]; then
+      continue
+    fi
+
+    rm -f "${part_file}"
+    curl -L --fail --silent --show-error \
+      --retry 5 --retry-delay 2 \
+      -H "Referer: ${ZENODO_REFERER}" \
+      --range "${start}-${end}" \
+      -o "${part_file}" \
+      "${url}" &
+    pids+=("$!")
+  done
+
+  local failed=0
+  local pid
+  for pid in "${pids[@]}"; do
+    if ! wait "${pid}"; then
+      failed=1
+    fi
+  done
+  if [[ "${failed}" -ne 0 ]]; then
+    echo "[error] parallel curl range download failed: ${url}" >&2
+    return 1
+  fi
+
+  rm -f "${tmp_out}"
+  for ((part_idx = 0; part_idx < parts; part_idx++)); do
+    part_file="${part_dir}/part.$(printf '%03d' "${part_idx}")"
+    if [[ ! -f "${part_file}" ]]; then
+      continue
+    fi
+    cat "${part_file}" >> "${tmp_out}"
+  done
+
+  if [[ "$(stat_size "${tmp_out}")" -ne "${total_size}" ]]; then
+    echo "[error] merged parallel download has wrong size: ${tmp_out}" >&2
+    return 1
+  fi
+
+  mv "${tmp_out}" "${out}"
+  rm -rf "${part_dir}"
 }
 
 get_gh_token() {
@@ -638,10 +914,11 @@ cache_lookup() {
   if [[ ! -f "${VERIFY_CACHE_FILE}" ]]; then
     return 1
   fi
-  # Match on path and size only; mtime is stored but not used for lookup
-  # so that touching a file doesn't invalidate the cache
-  awk -F'\t' -v p="${path}" -v s="${size}" \
-    '$1==p && $2==s {found=1} END {exit(found?0:1)}' \
+  # Match on path, size, AND mtime to detect re-downloads with different content
+  local mtime
+  mtime="$(stat_mtime "${path}")"
+  awk -F'\t' -v p="${path}" -v s="${size}" -v m="${mtime}" \
+    '$1==p && $2==s && $3==m {found=1} END {exit(found?0:1)}' \
     "${VERIFY_CACHE_FILE}" >/dev/null 2>&1
 }
 
@@ -670,15 +947,10 @@ should_download() {
   if [[ "${flag}" == "0" ]]; then
     return 1
   fi
-  # Default by profile
-  case "${PROFILE}" in
-    production)
-      return 0
-      ;;
-    apple|prototype|*)
-      return 0
-      ;;
-  esac
+  # Default by profile (unreachable — profile defaults set all flags at
+  # lines 1591-1620 — but return 1 as safe catch-all in case new datasets
+  # are added without a profile default)
+  return 1
 }
 
 init_parallel_downloads() {
@@ -693,7 +965,8 @@ init_parallel_downloads() {
     return 0
   fi
   mkdir -p "${DOWNLOAD_DIR}"
-  : > "${ARIA2_INPUT_FILE}"
+  rm -f "${ARIA2_INPUT_FILE}"
+  (umask 077 && : > "${ARIA2_INPUT_FILE}")
   : > "${EXTRACT_QUEUE_FILE}"
   : > "${FSD50K_MERGE_QUEUE_FILE}"
   ARIA2_PARALLEL_ACTIVE=1
@@ -718,6 +991,10 @@ download_file() {
   if is_fsd50k_url "${url}"; then
     force_curl=1
   fi
+  if [[ -f "${out}" ]] && [[ "$(stat_size "${out}")" -eq 0 ]]; then
+    echo "[warn] removing zero-byte placeholder before retry: ${out}" >&2
+    remove_zero_byte_download_artifacts "${out}"
+  fi
   if [[ -f "${out}" ]]; then
     if [[ "${RESUME}" != "1" ]]; then
       echo "[skip] exists: ${out}"
@@ -733,6 +1010,10 @@ download_file() {
       echo "[warn] existing file failed verification, attempting resume: ${out}"
     fi
   fi
+  if should_use_parallel_curl_download "${url}" "${out}"; then
+    download_file_parallel_curl_ranges "${url}" "${out}"
+    return $?
+  fi
   if [[ "${force_curl}" != "1" && "${USE_ARIA2}" == "1" ]] && command -v aria2c >/dev/null 2>&1; then
     # Some hosts do not handle multi-range requests well (hardcoded fallbacks).
     if [[ "${url}" == *"datashare.ed.ac.uk"* || "${url}" == *"datashare.is.ed.ac.uk"* ]]; then
@@ -744,10 +1025,6 @@ download_file() {
       if [[ -f "${out}" ]]; then
         rm -f "${out}"
       fi
-    elif [[ "${url}" == *"zenodo.org"* ]]; then
-      aria2_conn=1
-      aria2_split=1
-      aria2_file_alloc="none"
     elif ! supports_range_requests "${url}"; then
       # Server doesn't advertise range support; use single connection
       echo "[info] server does not support range requests, using single connection: ${url}" >&2
@@ -764,6 +1041,7 @@ download_file() {
       aria2_auth_header="--header=Authorization: token ${gh_token}"
       echo "[info] using GitHub authentication for: ${url}" >&2
     fi
+    local status=0
     if [[ "${aria2_continue}" == "1" ]]; then
       # shellcheck disable=SC2086  # Intentionally unquoted to allow empty expansion
       aria2c -x "${aria2_conn}" -s "${aria2_split}" -k "${ARIA2_MIN_SPLIT}" -c \
@@ -771,18 +1049,18 @@ download_file() {
         --file-allocation="${aria2_file_alloc}" \
         --user-agent="${ARIA2_USER_AGENT}" \
         ${aria2_auth_header} \
-        -d "$(dirname "${out}")" -o "$(basename "${out}")" "${url}"
+        -d "$(dirname "${out}")" -o "$(basename "${out}")" "${url}" </dev/null || status=$?
     else
       # shellcheck disable=SC2086  # Intentionally unquoted to allow empty expansion
       aria2c -x "${aria2_conn}" -s "${aria2_split}" -k "${ARIA2_MIN_SPLIT}" \
-      --check-integrity=true \
-      --file-allocation="${aria2_file_alloc}" \
-      --user-agent="${ARIA2_USER_AGENT}" \
-      ${aria2_auth_header} \
-      -d "$(dirname "${out}")" -o "$(basename "${out}")" "${url}"
+        --check-integrity=true \
+        --file-allocation="${aria2_file_alloc}" \
+        --user-agent="${ARIA2_USER_AGENT}" \
+        ${aria2_auth_header} \
+        -d "$(dirname "${out}")" -o "$(basename "${out}")" "${url}" </dev/null || status=$?
     fi
-    status=$?
     if [[ "${status}" -ne 0 ]]; then
+      remove_zero_byte_download_artifacts "${out}"
       if [[ "${INTERRUPTED}" == "1" || "${status}" -eq 130 ]]; then
         echo "[info] download interrupted by user" >&2
         exit 130
@@ -805,22 +1083,36 @@ download_file() {
       if [[ "${RESUME}" == "1" ]]; then
         if [[ -n "${auth_header}" ]]; then
           if ! curl -L -C - --fail -H "Authorization: token ${gh_token}" -o "${out}" "${url}"; then
+            remove_zero_byte_download_artifacts "${out}"
             echo "[warn] curl resume failed, retrying full download: ${url}" >&2
             rm -f "${out}"
-            curl -L --fail -H "Authorization: token ${gh_token}" -o "${out}" "${url}"
+            if ! curl -L --fail -H "Authorization: token ${gh_token}" -o "${out}" "${url}"; then
+              remove_zero_byte_download_artifacts "${out}"
+              return 1
+            fi
           fi
         else
           if ! curl -L -C - --fail -o "${out}" "${url}"; then
+            remove_zero_byte_download_artifacts "${out}"
             echo "[warn] curl resume failed, retrying full download: ${url}" >&2
             rm -f "${out}"
-            curl -L --fail -o "${out}" "${url}"
+            if ! curl -L --fail -o "${out}" "${url}"; then
+              remove_zero_byte_download_artifacts "${out}"
+              return 1
+            fi
           fi
         fi
       else
         if [[ -n "${auth_header}" ]]; then
-          curl -L --fail -H "Authorization: token ${gh_token}" -o "${out}" "${url}"
+          if ! curl -L --fail -H "Authorization: token ${gh_token}" -o "${out}" "${url}"; then
+            remove_zero_byte_download_artifacts "${out}"
+            return 1
+          fi
         else
-          curl -L --fail -o "${out}" "${url}"
+          if ! curl -L --fail -o "${out}" "${url}"; then
+            remove_zero_byte_download_artifacts "${out}"
+            return 1
+          fi
         fi
       fi
     elif [[ "${force_curl}" == "1" ]]; then
@@ -830,22 +1122,36 @@ download_file() {
       if [[ "${RESUME}" == "1" ]]; then
         if [[ -n "${auth_header}" ]]; then
           if ! wget -c --header="Authorization: token ${gh_token}" -O "${out}" "${url}"; then
+            remove_zero_byte_download_artifacts "${out}"
             echo "[warn] wget resume failed, retrying full download: ${url}" >&2
             rm -f "${out}"
-            wget --header="Authorization: token ${gh_token}" -O "${out}" "${url}"
+            if ! wget --header="Authorization: token ${gh_token}" -O "${out}" "${url}"; then
+              remove_zero_byte_download_artifacts "${out}"
+              return 1
+            fi
           fi
         else
           if ! wget -c -O "${out}" "${url}"; then
+            remove_zero_byte_download_artifacts "${out}"
             echo "[warn] wget resume failed, retrying full download: ${url}" >&2
             rm -f "${out}"
-            wget -O "${out}" "${url}"
+            if ! wget -O "${out}" "${url}"; then
+              remove_zero_byte_download_artifacts "${out}"
+              return 1
+            fi
           fi
         fi
       else
         if [[ -n "${auth_header}" ]]; then
-          wget --header="Authorization: token ${gh_token}" -O "${out}" "${url}"
+          if ! wget --header="Authorization: token ${gh_token}" -O "${out}" "${url}"; then
+            remove_zero_byte_download_artifacts "${out}"
+            return 1
+          fi
         else
-          wget -O "${out}" "${url}"
+          if ! wget -O "${out}" "${url}"; then
+            remove_zero_byte_download_artifacts "${out}"
+            return 1
+          fi
         fi
       fi
     else
@@ -877,8 +1183,24 @@ extract_archive() {
     *.tar.gz|*.tgz)
       tar -xzf "${archive}" -C "${stage_dir}"
       ;;
+    *.tar)
+      tar -xf "${archive}" -C "${stage_dir}"
+      ;;
     *.zip)
-      unzip -n -q "${archive}" -d "${stage_dir}"
+      # Use Python's zipfile directly — macOS's ancient unzip (2009) chokes
+      # on bzip2-compressed zips (exit 81) and has other limitations.
+      python3 -c "
+import zipfile, sys, os
+z = zipfile.ZipFile(sys.argv[1])
+dest = os.path.realpath(sys.argv[2])
+for info in z.infolist():
+    target = os.path.realpath(os.path.join(dest, info.filename))
+    if not target.startswith(dest + os.sep) and target != dest:
+        print(f'SECURITY: zip path traversal blocked: {info.filename}', file=sys.stderr)
+        sys.exit(1)
+    if not os.path.exists(target):
+        z.extract(info, dest)
+" "${archive}" "${stage_dir}"
       ;;
     *)
       echo "Unknown archive format: ${archive}" >&2
@@ -901,7 +1223,7 @@ verify_archive() {
   fi
   case "${archive}" in
     *.zip)
-      command -v unzip >/dev/null 2>&1 || return 0
+      command -v python3 >/dev/null 2>&1 || return 0
       # Check if this is a split zip (has .z01 sibling) - skip verification
       # since the parts are verified individually and the main .zip alone
       # cannot be verified without the parts present
@@ -913,7 +1235,14 @@ verify_archive() {
         fi
         return 0
       fi
-      unzip -tqq "${archive}" >/dev/null 2>&1
+      # Use Python's zipfile directly — macOS's ancient unzip (2009) chokes
+      # on bzip2-compressed zips (exit 81) and has other limitations.
+      python3 -c "
+import zipfile, sys
+z = zipfile.ZipFile(sys.argv[1])
+bad = z.testzip()
+sys.exit(1 if bad else 0)
+" "${archive}" >/dev/null 2>&1
       status=$?
       if [[ ${status} -eq 0 && "${VERIFY_CACHE}" == "1" ]]; then
         cache_store "${archive}"
@@ -923,6 +1252,15 @@ verify_archive() {
     *.tar.gz|*.tgz)
       command -v tar >/dev/null 2>&1 || return 0
       tar -tzf "${archive}" >/dev/null 2>&1
+      status=$?
+      if [[ ${status} -eq 0 && "${VERIFY_CACHE}" == "1" ]]; then
+        cache_store "${archive}"
+      fi
+      return ${status}
+      ;;
+    *.tar)
+      command -v tar >/dev/null 2>&1 || return 0
+      tar -tf "${archive}" >/dev/null 2>&1
       status=$?
       if [[ ${status} -eq 0 && "${VERIFY_CACHE}" == "1" ]]; then
         cache_store "${archive}"
@@ -961,6 +1299,11 @@ queue_download() {
   local aria2_max_tries=""
   local aria2_user_agent="${ARIA2_USER_AGENT}"
 
+  if [[ -f "${out}" ]] && [[ "$(stat_size "${out}")" -eq 0 ]]; then
+    echo "[warn] removing zero-byte placeholder before aria2 retry: ${out}" >&2
+    remove_zero_byte_download_artifacts "${out}"
+  fi
+
   if [[ -f "${out}" ]]; then
     if [[ "${RESUME}" != "1" ]]; then
       echo "[skip] exists: ${out}"
@@ -989,17 +1332,14 @@ queue_download() {
     if [[ -f "${out}" && ! -f "${out}.aria2" ]]; then
       rm -f "${out}"
     fi
-  elif [[ "${url}" == *"zenodo.org"* ]]; then
-    aria2_conn=1
-    aria2_split=1
-    aria2_file_alloc="none"
-    aria2_retry_wait="10"
-    aria2_max_tries="10"
   elif ! supports_range_requests "${url}"; then
     # Server doesn't advertise range support; use single connection
     echo "[info] server does not support range requests, using single connection: ${url}" >&2
     aria2_conn=1
     aria2_split=1
+  elif [[ "${url}" == *"zenodo.org"* ]]; then
+    aria2_retry_wait="10"
+    aria2_max_tries="10"
   fi
 
   mkdir -p "${out_dir}"
@@ -1058,11 +1398,26 @@ run_parallel_downloads() {
   if [[ ! -s "${ARIA2_INPUT_FILE}" ]]; then
     return 0
   fi
+  local status=0
   aria2c -i "${ARIA2_INPUT_FILE}" -c --check-integrity=true \
     -j "${ARIA2_MAX_CONCURRENT}" -x "${ARIA2_CONN}" -s "${ARIA2_SPLIT}" \
-    -k "${ARIA2_MIN_SPLIT}" --user-agent="${ARIA2_USER_AGENT}"
-  status=$?
+    -k "${ARIA2_MIN_SPLIT}" --user-agent="${ARIA2_USER_AGENT}" || status=$?
   if [[ "${status}" -ne 0 ]]; then
+    if [[ -f "${ARIA2_INPUT_FILE}" ]]; then
+      awk '
+        /^  dir=/ {dir=substr($0, 7)}
+        /^  out=/ {
+          out=substr($0, 7)
+          if (dir != "" && out != "") {
+            print dir "/" out
+          }
+        }
+      ' "${ARIA2_INPUT_FILE}" | while IFS= read -r path; do
+        if [[ -n "${path}" ]]; then
+          remove_zero_byte_download_artifacts "${path}"
+        fi
+      done
+    fi
     if [[ "${INTERRUPTED}" == "1" || "${status}" -eq 130 ]]; then
       echo "[info] download interrupted by user" >&2
       exit 130
@@ -1076,7 +1431,9 @@ process_extract_queue() {
   if [[ ! -s "${EXTRACT_QUEUE_FILE}" ]]; then
     return 0
   fi
-  while IFS='|' read -r archive dest url; do
+  # Read from fd 3 so child commands (aria2c, unzip, tar) cannot consume
+  # the queue via inherited stdin — a classic bash while-read pitfall.
+  while IFS='|' read -r archive dest url <&3; do
     if [[ -z "${archive}" ]]; then
       continue
     fi
@@ -1084,25 +1441,29 @@ process_extract_queue() {
       echo "[warn] archive failed verification, retrying: ${archive}" >&2
       rm -f "${archive}"
       download_file "${url}" "${archive}"
-      verify_archive "${archive}"
+      if ! verify_archive "${archive}"; then
+        echo "[error] archive still fails verification after re-download, skipping: ${archive}" >&2
+        continue
+      fi
     fi
     extract_archive "${archive}" "${dest}"
     if [[ "${KEEP_ARCHIVES}" == "0" ]]; then
       rm -f "${archive}"
     fi
-  done < "${EXTRACT_QUEUE_FILE}"
+  done 3< "${EXTRACT_QUEUE_FILE}"
 }
 
 process_fsd50k_merge_queue() {
   if [[ ! -s "${FSD50K_MERGE_QUEUE_FILE}" ]]; then
     return 0
   fi
-  while IFS='|' read -r prefix out_dir; do
+  # Read from fd 3 to prevent child commands from consuming the queue via stdin.
+  while IFS='|' read -r prefix out_dir <&3; do
     if [[ -z "${prefix}" ]]; then
       continue
     fi
     fsd50k_merge_and_unzip "${prefix}" "${out_dir}"
-  done < "${FSD50K_MERGE_QUEUE_FILE}"
+  done 3< "${FSD50K_MERGE_QUEUE_FILE}"
 }
 
 download_and_extract() {
@@ -1117,6 +1478,23 @@ download_and_extract() {
   fi
   mkdir -p "${DOWNLOAD_DIR}"
   if [[ "${ARIA2_PARALLEL_ACTIVE}" == "1" && "${force_curl}" != "1" ]]; then
+    if should_use_parallel_curl_download "${url}" "${DOWNLOAD_DIR}/${filename}"; then
+      download_file "${url}" "${DOWNLOAD_DIR}/${filename}" "${force_curl}"
+      if ! verify_archive "${DOWNLOAD_DIR}/${filename}"; then
+        echo "[warn] archive failed verification, retrying: ${filename}" >&2
+        rm -f "${DOWNLOAD_DIR:?}/${filename}"
+        download_file "${url}" "${DOWNLOAD_DIR}/${filename}" "${force_curl}"
+        if ! verify_archive "${DOWNLOAD_DIR}/${filename}"; then
+          echo "[error] archive still fails verification after re-download: ${filename}" >&2
+          return 1
+        fi
+      fi
+      extract_archive "${DOWNLOAD_DIR}/${filename}" "${dest}"
+      if [[ "${KEEP_ARCHIVES}" == "0" ]]; then
+        rm -f "${DOWNLOAD_DIR:?}/${filename}"
+      fi
+      return 0
+    fi
     local archive_path="${DOWNLOAD_DIR}/${filename}"
     queue_download "${url}" "${archive_path}"
     queue_extract "${archive_path}" "${dest}" "${url}"
@@ -1127,7 +1505,10 @@ download_and_extract() {
     echo "[warn] archive failed verification, retrying: ${filename}" >&2
     rm -f "${DOWNLOAD_DIR:?}/${filename}"
     download_file "${url}" "${DOWNLOAD_DIR}/${filename}" "${force_curl}"
-    verify_archive "${DOWNLOAD_DIR}/${filename}"
+    if ! verify_archive "${DOWNLOAD_DIR}/${filename}"; then
+      echo "[error] archive still fails verification after re-download: ${filename}" >&2
+      return 1
+    fi
   fi
   extract_archive "${DOWNLOAD_DIR}/${filename}" "${dest}"
   if [[ "${KEEP_ARCHIVES}" == "0" ]]; then
@@ -1213,6 +1594,15 @@ if [[ "${DOWNLOAD}" == "1" ]]; then
   if [[ -z "${DOWNLOAD_MUSAN}" ]]; then
     DOWNLOAD_MUSAN=1
   fi
+  if [[ -z "${DOWNLOAD_FMA}" ]]; then
+    DOWNLOAD_FMA=1
+  fi
+  if [[ -z "${DOWNLOAD_MTG_JAMENDO}" ]]; then
+    case "${PROFILE}" in
+      production) DOWNLOAD_MTG_JAMENDO=1 ;;
+      apple|prototype|*) DOWNLOAD_MTG_JAMENDO=0 ;;
+    esac
+  fi
   if [[ -z "${DOWNLOAD_FSD50K}" ]]; then
     DOWNLOAD_FSD50K=1
   fi
@@ -1232,6 +1622,12 @@ if [[ "${DOWNLOAD}" == "1" ]]; then
     case "${PROFILE}" in
       production) DOWNLOAD_ACOUSTICROOMS=1 ;;
       apple|prototype|*) DOWNLOAD_ACOUSTICROOMS=0 ;;
+    esac
+  fi
+  if [[ -z "${FMA_SUBSET}" ]]; then
+    case "${PROFILE}" in
+      production) FMA_SUBSET="large" ;;
+      apple|prototype|*) FMA_SUBSET="medium" ;;
     esac
   fi
 
@@ -1258,6 +1654,50 @@ if [[ "${DOWNLOAD}" == "1" ]]; then
   # MUSAN
   if should_download "${DOWNLOAD_MUSAN}"; then
     download_and_extract "https://www.openslr.org/resources/17/musan.tar.gz" "${EXTRACT_DIR}"
+  fi
+
+  # FMA (Creative Commons music corpus; canonical automated background-music base)
+  if should_download "${DOWNLOAD_FMA}"; then
+    mkdir -p "${FMA_DIR}"
+    download_and_extract "https://os.unil.cloud.switch.ch/fma/fma_metadata.zip" "${FMA_DIR}"
+    case "${FMA_SUBSET}" in
+      medium|large|full)
+        download_and_extract "https://os.unil.cloud.switch.ch/fma/fma_${FMA_SUBSET}.zip" "${FMA_DIR}"
+        ;;
+      *)
+        echo "Error: unsupported FMA_SUBSET '${FMA_SUBSET}' (expected medium, large, or full)" >&2
+        exit 1
+        ;;
+    esac
+  fi
+
+  # MTG-Jamendo (optional due size/license profile; downloads the official raw_30s audio-low tar set)
+  if should_download "${DOWNLOAD_MTG_JAMENDO}"; then
+    if [[ "${MTG_JAMENDO_DATASET}" != "raw_30s" || "${MTG_JAMENDO_TYPE}" != "audio-low" ]]; then
+      echo "Error: only MTG-Jamendo raw_30s audio-low is currently supported" >&2
+      exit 1
+    fi
+    mkdir -p "${MTG_JAMENDO_DIR}/data" "${DOWNLOAD_DIR}/mtg-jamendo"
+    download_file \
+      "https://raw.githubusercontent.com/MTG/mtg-jamendo-dataset/master/data/raw.meta.tsv" \
+      "${MTG_JAMENDO_DIR}/data/raw.meta.tsv"
+    download_file \
+      "https://raw.githubusercontent.com/MTG/mtg-jamendo-dataset/master/data/raw_30s_cleantags_50artists.tsv" \
+      "${MTG_JAMENDO_DIR}/data/raw_30s_cleantags_50artists.tsv"
+    download_file \
+      "https://raw.githubusercontent.com/MTG/mtg-jamendo-dataset/master/data/download/raw_30s_audio-low_sha256_tars.txt" \
+      "${DOWNLOAD_DIR}/mtg-jamendo/raw_30s_audio-low_sha256_tars.txt"
+
+    # Read from fd 3 to prevent child commands (aria2c) from consuming the
+    # tar list via inherited stdin.
+    while read -r _sha256 tar_name <&3; do
+      if [[ -z "${tar_name:-}" ]]; then
+        continue
+      fi
+      download_and_extract \
+        "https://cdn.freesound.org/mtg-jamendo/raw_30s/audio-low/${tar_name}" \
+        "${MTG_JAMENDO_DIR}"
+    done 3< "${DOWNLOAD_DIR}/mtg-jamendo/raw_30s_audio-low_sha256_tars.txt"
   fi
 
   # FSD50K
@@ -1352,6 +1792,35 @@ if [[ ! -d "${LIBRISPEECH_DIR}" ]]; then
   shopt -u nullglob
 fi
 
+if ! fma_dataset_ready "${FMA_DIR}"; then
+  extract_if_present "FMA metadata" "${DOWNLOAD_DIR}/fma_metadata.zip" "${FMA_DIR}"
+
+  fma_archives=()
+  for archive_name in fma_full.zip fma_large.zip fma_medium.zip fma_small.zip; do
+    if [[ -f "${DOWNLOAD_DIR}/${archive_name}" ]]; then
+      fma_archives+=("${DOWNLOAD_DIR}/${archive_name}")
+    fi
+  done
+  if (( ${#fma_archives[@]} > 0 )); then
+    echo "[info] extracting FMA archives from ${DOWNLOAD_DIR}"
+    for zip in "${fma_archives[@]}"; do
+      extract_archive "${zip}" "${FMA_DIR}"
+    done
+  fi
+fi
+
+if ! mtg_jamendo_dataset_ready "${MTG_JAMENDO_DIR}"; then
+  shopt -s nullglob
+  mtg_archives=("${DOWNLOAD_DIR}"/mtg-jamendo/*.tar)
+  if (( ${#mtg_archives[@]} > 0 )); then
+    echo "[info] extracting MTG-Jamendo archives from ${DOWNLOAD_DIR}/mtg-jamendo"
+    for archive in "${mtg_archives[@]}"; do
+      extract_archive "${archive}" "${MTG_JAMENDO_DIR}"
+    done
+  fi
+  shopt -u nullglob
+fi
+
 if [[ -d "${FSD50K_DIR}" ]]; then
   # Check for JSON metadata files (the actual format FSD50K uses)
   if [[ ! -f "${FSD50K_DIR}/FSD50K.metadata/dev_clips_info_FSD50K.json" ]]; then
@@ -1368,10 +1837,9 @@ if require_dir "LibriSpeech" "${LIBRISPEECH_DIR}"; then
   write_list "${LIBRISPEECH_DIR}" "${LIST_DIR}/librispeech_clean.txt" "*.flac"
 fi
 
-# Noise + music lists
+# Noise source lists
 if require_dir "MUSAN" "${MUSAN_DIR}"; then
   write_list "${MUSAN_DIR}/noise" "${LIST_DIR}/musan_noise.txt" "*.wav"
-  write_list "${MUSAN_DIR}/music" "${LIST_DIR}/musan_music.txt" "*.wav"
 fi
 
 # FSD50K filtered list (CC0/CC-BY only)
@@ -1382,7 +1850,21 @@ fi
 if require_dir "FSD50K" "${FSD50K_DIR}"; then
   export FSD50K_DIR
   export LIST_DIR
-  python3 "${ROOT_DIR}/scripts/datasets/fsd50k_filter.py"
+  "${PYTHON_BIN}" "${ROOT_DIR}/scripts/datasets/fsd50k_filter.py"
+fi
+
+FMA_PRESENT=0
+if fma_dataset_ready "${FMA_DIR}"; then
+  FMA_PRESENT=1
+else
+  echo "[skip] FMA dataset incomplete or not extracted: ${FMA_DIR}" >&2
+fi
+
+MTG_JAMENDO_PRESENT=0
+if mtg_jamendo_dataset_ready "${MTG_JAMENDO_DIR}"; then
+  MTG_JAMENDO_PRESENT=1
+else
+  echo "[skip] MTG-Jamendo dataset incomplete or not extracted: ${MTG_JAMENDO_DIR}" >&2
 fi
 
 # RIR lists
@@ -1418,16 +1900,50 @@ echo "[info] combining lists for profile=${PROFILE}..."
 } | write_atomic_file "${LIST_DIR}/clean_all.txt"
 echo "[ok] wrote $(wc -l < "${LIST_DIR}/clean_all.txt") entries -> ${LIST_DIR}/clean_all.txt"
 
-# Noise + music: MUSAN noise/music + FSD50K filtered
+# Generic noise only: MUSAN noise + FSD50K filtered
 {
   if [[ -f "${LIST_DIR}/musan_noise.txt" ]]; then
     cat "${LIST_DIR}/musan_noise.txt"
   fi
-  if [[ -f "${LIST_DIR}/musan_music.txt" ]]; then
-    cat "${LIST_DIR}/musan_music.txt"
-  fi
   if [[ -f "${LIST_DIR}/fsd50k_filtered.txt" ]]; then
     cat "${LIST_DIR}/fsd50k_filtered.txt"
+  fi
+} | write_atomic_file "${LIST_DIR}/noise_all.txt"
+echo "[ok] wrote $(wc -l < "${LIST_DIR}/noise_all.txt") entries -> ${LIST_DIR}/noise_all.txt"
+
+# Dedicated background music: chart-style open music curated from FMA plus
+# optional MTG-Jamendo inputs. `background_music.txt` is the canonical capped
+# curated list; `background_music_expanded.txt` contains the full eligible pool.
+if [[ "${FMA_PRESENT}" == "1" || "${MTG_JAMENDO_PRESENT}" == "1" ]]; then
+  music_curator_args=(
+    "${ROOT_DIR}/scripts/datasets/curate_background_music.py"
+    --list-dir "${LIST_DIR}"
+    --target-count "${BACKGROUND_MUSIC_TARGET_COUNT}"
+    --min-count "${BACKGROUND_MUSIC_MIN_COUNT}"
+  )
+  if [[ "${FMA_PRESENT}" == "1" ]]; then
+    music_curator_args+=(--fma-dir "${FMA_DIR}")
+  fi
+  if [[ "${MTG_JAMENDO_PRESENT}" == "1" ]]; then
+    music_curator_args+=(--mtg-jamendo-dir "${MTG_JAMENDO_DIR}")
+  fi
+  "${PYTHON_BIN}" "${music_curator_args[@]}"
+else
+  echo "[warn] no FMA or MTG-Jamendo music corpus present; dedicated background-music lists will be empty" >&2
+  : > "${LIST_DIR}/background_music.txt"
+  : > "${LIST_DIR}/background_music_expanded.txt"
+fi
+
+# Backward-compatible combined noise+music list (deprecated; raw-list and cache
+# builders now prefer noise_all.txt + dedicated background_music.txt).
+{
+  if [[ -f "${LIST_DIR}/noise_all.txt" ]]; then
+    cat "${LIST_DIR}/noise_all.txt"
+  fi
+  if [[ -f "${LIST_DIR}/background_music.txt" ]]; then
+    cat "${LIST_DIR}/background_music.txt"
+  elif [[ -f "${LIST_DIR}/background_music_expanded.txt" ]]; then
+    cat "${LIST_DIR}/background_music_expanded.txt"
   fi
 } | write_atomic_file "${LIST_DIR}/noise_music.txt"
 echo "[ok] wrote $(wc -l < "${LIST_DIR}/noise_music.txt") entries -> ${LIST_DIR}/noise_music.txt"
@@ -1453,7 +1969,11 @@ if [[ ! -s "${LIST_DIR}/clean_all.txt" ]]; then
   errors=1
 fi
 if [[ ! -s "${LIST_DIR}/noise_music.txt" ]]; then
-  echo "[error] noise_music.txt is empty - need MUSAN and/or FSD50K" >&2
+  echo "[error] noise_music.txt is empty - need generic noise and/or curated background music" >&2
+  errors=1
+fi
+if [[ ! -s "${LIST_DIR}/background_music.txt" ]]; then
+  echo "[error] background_music.txt is empty - need FMA and/or MTG-Jamendo chart-style music sources" >&2
   errors=1
 fi
 if [[ ! -s "${LIST_DIR}/rir_all.txt" ]]; then
@@ -1469,7 +1989,12 @@ cat <<'MSG'
 Done.
 Combined lists ready for downstream builders:
   - clean_all.txt (speech)
-  - noise_music.txt (noise + music)
+  - noise_all.txt (generic noise, excludes dedicated music)
+  - background_music.txt (canonical curated chart-style background music; target-count capped)
+  - background_music_expanded.txt (full eligible chart-style pool from FMA + optional MTG-Jamendo)
+  - background_music_fma.txt / background_music_mtg_jamendo.txt (source-specific music subsets)
+  - background_music_catalog.tsv (curation audit table with bucket/source scores)
+  - noise_music.txt (deprecated compatibility mix of generic noise + curated music)
   - rir_all.txt (room impulse responses)
 
 Next steps:

@@ -1,8 +1,9 @@
 import mlx.core as mx
 
 from df_mlx.loss import si_sdr
+from df_mlx.model import ContrastiveFrameProjector
 from df_mlx.train import spectral_loss
-from df_mlx.training_losses import _build_speech_band_mask, _compute_awesome_losses
+from df_mlx.training_losses import _build_speech_band_mask, _compute_awesome_losses, _compute_contrastive_awesome_losses
 
 
 def _finite(x: mx.array) -> bool:
@@ -63,6 +64,71 @@ def test_awesome_loss_fp16_finite():
     )
 
     assert _finite(awesome_loss)
+    assert _finite(mask)
+    assert _finite(proxy_frame)
+
+
+def test_contrastive_awesome_loss_fp16_finite():
+    batch, frames, freqs = 2, 4, 257
+    clean_real = mx.ones((batch, frames, freqs), dtype=mx.float16) * mx.array(600.0, dtype=mx.float16)
+    clean_imag = mx.ones((batch, frames, freqs), dtype=mx.float16) * mx.array(600.0, dtype=mx.float16)
+    interference_real = mx.ones((batch, frames, freqs), dtype=mx.float16) * mx.array(12.0, dtype=mx.float16)
+    interference_imag = mx.ones((batch, frames, freqs), dtype=mx.float16) * mx.array(8.0, dtype=mx.float16)
+    noisy_real = clean_real + interference_real
+    noisy_imag = clean_imag + interference_imag
+    out_real = clean_real * mx.array(0.9, dtype=mx.float16)
+    out_imag = clean_imag * mx.array(0.9, dtype=mx.float16)
+    snr = mx.zeros((batch,), dtype=mx.float32)
+
+    band_mask, band_bins = _build_speech_band_mask(freqs, 48000, 300.0, 3400.0)
+    projector = ContrastiveFrameProjector(
+        n_freqs=freqs,
+        hidden_dim=64,
+        embedding_dim=32,
+    )
+
+    (
+        contrastive_loss,
+        contrastive_speech,
+        contrastive_quiet,
+        pos_sim,
+        neg_sim,
+        mask,
+        proxy_frame,
+        *_,
+    ) = _compute_contrastive_awesome_losses(
+        noisy_real,
+        noisy_imag,
+        clean_real,
+        clean_imag,
+        interference_real,
+        interference_imag,
+        out_real,
+        out_imag,
+        snr,
+        band_mask,
+        band_bins,
+        6.0,
+        0.0,
+        1.0,
+        -10.0,
+        6.0,
+        True,
+        projector=projector,
+        temperature=0.1,
+        speech_frames_per_sample=2,
+        interference_frames_per_sample=2,
+        speech_mask_min=0.0,
+        interference_mask_max=1.0,
+        quiet_weight=0.5,
+        in_batch_negatives=True,
+    )
+
+    assert _finite(contrastive_loss)
+    assert _finite(contrastive_speech)
+    assert _finite(contrastive_quiet)
+    assert _finite(pos_sim)
+    assert _finite(neg_sim)
     assert _finite(mask)
     assert _finite(proxy_frame)
 

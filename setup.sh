@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # One-step builder for DeepFilterNet4 (Python + Cargo + optional maturin bindings).
 # Defaults:
-#   - Python: create .venv with python3.10 and install .[asr-mlx]
+#   - Python: create .venv with python3.10 and install
+#     .[train,eval,dnsmos-local,<platform ASR extra>]
 #   - Cargo:  cargo build --workspace --release --all-features
 # Use flags below to toggle extras or skip parts.
 
@@ -20,6 +21,20 @@ PLATFORM_ARCH="$(uname -m)"
 
 is_darwin_arm64() {
   [[ "$PLATFORM_OS" == "Darwin" && "$PLATFORM_ARCH" == "arm64" ]]
+}
+
+default_asr_extra() {
+  if is_darwin_arm64; then
+    echo "asr-mlx"
+  else
+    echo "asr"
+  fi
+}
+
+default_extras() {
+  local asr_extra
+  asr_extra="$(default_asr_extra)"
+  printf "%s\n" "$asr_extra" "dnsmos-local" "train" "eval"
 }
 
 warn_mlx_platform() {
@@ -44,7 +59,7 @@ EOF
 # ------------------------- defaults ------------------------- #
 PYTHON_BIN="${PYTHON_BIN:-python3.10}"
 VENV_DIR="${VENV_DIR:-$ROOT_DIR/.venv}"
-DEFAULT_EXTRAS=("asr-mlx" "train" "eval")
+mapfile -t DEFAULT_EXTRAS < <(default_extras)
 USER_EXTRAS=()
 BUILD_PYTHON=1
 BUILD_CARGO=1
@@ -75,12 +90,14 @@ usage() {
 Usage: ./setup.sh [options]
 
 Python (default on):
-  --extras LIST             Comma-separated extras to add (dev,train,eval). Default always includes asr-mlx.
+  --extras LIST             Comma-separated extras to add. Defaults include train, eval,
+                            dnsmos-local, and a platform-appropriate ASR extra
+                            (asr-mlx on Darwin arm64, otherwise asr).
   --python-bin PATH         Python interpreter to use (default: python3.10)
   --venv DIR                Virtualenv directory (default: .venv)
   --no-python               Skip Python environment setup
   --(no-)editable           Install Python packages in editable mode (pip install -e .)
-  --all                     Convenience: enables extras dev,train,eval and builds pyDF + pyDF-data + pyDF-augment; also sets editable mode for Python unless --no-editable is given.
+  --all                     Convenience: adds dev on top of the default extras and builds pyDF + pyDF-data + pyDF-augment; also sets editable mode for Python unless --no-editable is given.
 
 Cargo (default on):
   --cargo-flags "FLAGS"     Override cargo flags (default: --workspace --release --all-features)
@@ -193,7 +210,7 @@ done
 
 # Apply --all bundle
 if [[ $USE_ALL -eq 1 ]]; then
-  USER_EXTRAS+=("dev" "train" "eval")
+  USER_EXTRAS+=("${DEFAULT_EXTRAS[@]}")
   BUILD_PYDF=1
   BUILD_PYDF_DATA=1
   BUILD_PYDF_AUGMENT=1

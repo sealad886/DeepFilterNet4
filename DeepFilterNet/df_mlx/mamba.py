@@ -161,8 +161,13 @@ class MambaBlock(nn.Module):
         # Get A from log representation
         A = -mx.exp(self.A_log)  # (d_inner, d_state), negative for stability
 
-        # Selective scan
-        y, final_state = self._selective_scan(x_path, delta, A, B, C, self.D, state)
+        # Selective scan with gradient checkpointing to reduce memory.
+        # The iterative doubling scan creates ~60 intermediate arrays that
+        # autodiff must store for the backward pass.  At batch≥32 this
+        # reaches ~4 GB and causes catastrophic memory pressure.
+        # mx.checkpoint reruns the scan during backprop instead of storing
+        # intermediates, trading ~12% extra backward compute for O(1) memory.
+        y, final_state = mx.checkpoint(self._selective_scan)(x_path, delta, A, B, C, self.D, state)
 
         # Gating with z path
         z = nn.silu(z)

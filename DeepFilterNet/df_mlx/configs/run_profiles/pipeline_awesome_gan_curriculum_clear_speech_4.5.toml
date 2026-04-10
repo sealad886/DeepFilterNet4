@@ -1,0 +1,194 @@
+    # Clear-speech contrastive-silence profile
+#
+# Purpose:
+#   Extend the clear-speech preservation goal by switching from
+#   pipeline_awesome to contrastive_silence -- a hybrid dynamic loss that
+#   uses InfoNCE contrastive learning on speech-dominant frames (preserving
+#   speech quality) and direct L1 log-magnitude regression on silence /
+#   noise-dominant frames (actively suppressing residual noise).
+#
+# Derived from:
+#   - pipeline_awesome_gan_curriculum_clear_speech_3.toml
+#   - docs/LOSSES.md §2.7a (contrastive_silence design)
+#
+# Design rationale:
+#   * contrastive_silence replaces the multi-stage pipeline_awesome ramp
+#     with a single loss that inherently adapts per-frame: speech frames
+#     get the contrastive objective (learn to match clean speech) while
+#     non-speech frames get a suppression objective (push toward silence).
+#   * The pre-cleaned source audio (DeepFilterNet3) means clean references
+#     are reliable, so direct regression toward them is well-grounded.
+#   * Asymmetric penalty (2.5x) aggressively penalises residual noise that
+#     sits above the clean reference while being gentler on slight under-
+#     enhancement -- conservative about introducing artifacts.
+#   * Frequency-band weighting targets common residual artefacts: low-freq
+#     room tone / mic hum (<300 Hz) and high-freq hiss (>7 kHz).
+#   * Since pipeline_stages are cleared automatically when contrastive_silence
+#     is active, the awesome loss_weight is absorbed into the contrastive
+#     loss_weight; the warmup_steps on the contrastive branch let the base
+#     losses stabilise before the contrastive term ramps in.
+#   * GAN phase starts later and is restrained, giving the contrastive
+#     objective time to converge before adversarial pressure arrives.
+#   * Music exposure starts at epoch 30 (slightly earlier than v3) because
+#     the contrastive silence branch explicitly handles non-speech frames,
+#     so the model benefits from diverse noise/music sooner.
+#
+# Usage:
+#   python -m df_mlx.train_dynamic \
+#     --run-config DeepFilterNet/df_mlx/configs/run_profiles/pipeline_awesome_gan_curriculum_clear_speech_4.toml
+
+[dataset]
+cache_dir = "~/DataDump/datasets/new2_mlx_datastore"
+p_background_music = 0.7
+background_music_gain_range = [0, 20]
+
+[training]
+epochs = 220
+batch_size = 10             # Smaller batch: DfOp VJP optimization enables
+learning_rate = 1e-4        # more frequent gradient updates
+learning_rate_min = 1e-7
+weight_decay = 0.0
+warmup_epochs = 20
+patience = 0
+grad_accumulation_steps = 4  # Effective batch: 40 (10 * 4)
+max_grad_norm = 1.0
+fp16 = true
+seed = 42
+# Earlier music exposure: contrastive_silence handles non-speech frames
+# explicitly, so the model benefits from diverse noise/music sooner.
+music_start_epoch = 80
+music_ramp_epochs = 20
+
+[dataloader]
+num_workers = 20
+prefetch_size = 20
+use_mlx_data = true
+
+[checkpoint]
+checkpoint_dir = "/Users/andrew/DataDump/checkpoints/clear_speech_4.5"
+save_strategy = "epoch"
+save_total_limit = 5
+validate_every = 1
+checkpoint_batches = 300
+check_chkpts = false
+resume = true
+resume_data = true
+
+[model]
+backbone_type = "attention"
+variant = "full"
+
+# ── Dynamic loss ─────────────────────────────────────────────────────────
+# contrastive_silence replaces the multi-stage pipeline_awesome ramp.
+# pipeline_stages are automatically cleared when this mode is active.
+[loss]
+dynamic_loss = "contrastive_silence"
+
+# Shared contrastive parameters (used by both the speech-contrastive branch
+# of contrastive_silence and by contrastive_awesome if you ever switch back).
+[loss.contrastive]
+loss_weight = 0.75             # overall contrastive+silence term weight
+warmup_steps = 2000            # let base losses stabilise before ramping in
+temperature = 0.07             # InfoNCE temperature (default)
+embedding_dim = 128            # projector output dimension
+hidden_dim = 256               # projector hidden dimension
+speech_frames_per_sample = 32  # speech-heavy frames mined per sample
+speech_mask_min = 0.3          # minimum VAD mask for speech-frame selection
+in_batch_negatives = true      # cross-sample negatives boost discrimination
+
+# Silence-specific parameters -- the key differentiator from contrastive_awesome.
+[loss.contrastive_silence]
+silence_frames_per_sample = 32 # silence-heavy frames mined per sample
+silence_mask_max = 0.25        # tighter than default 0.3 — mine purer silence
+silence_weight = 0.85          # slightly higher than default 0.8 — lean into suppression
+asymmetric_penalty = 2.5       # 2.5x penalty for residual above clean
+transition_blend_low = 0.25    # start blending earlier for smoother transition
+transition_blend_high = 0.70   # standard upper bound
+low_freq_boost = 1.6           # aggressive on room tone / mic hum (<300 Hz)
+high_freq_boost = 1.4          # aggressive on hiss (>7 kHz)
+
+# Awesome baseline config (still drives the underlying mask/STFT losses).
+[loss.awesome]
+loss_weight = 0.85
+mask_sharpness = 5.5
+warmup_steps = 1800
+proxy_enabled = true
+
+[loss.mrstft]
+factor = 0.35
+gamma = 0.7
+f_complex = 0.15
+fft_sizes = [512, 1024, 2048]
+hop_sizes = [128, 256, 512]
+
+# ── GAN ──────────────────────────────────────────────────────────────────
+# Delayed start: let the contrastive objective converge first.
+[gan]
+enabled = true
+start_epoch = 165
+ramp_epochs = 20
+adv_weight = 0.06              # slightly restrained vs v3 (0.08)
+fm_weight = 0.6
+discriminator = "combined"
+mpd_periods = [2, 3, 5, 7, 11]
+msd_scales = 3
+disc_lr = 2e-5
+disc_weight_decay = 0.01
+disc_grad_clip = 1.0
+disc_update_freq = 2
+disc_max_samples = 24000
+mpd_channels = 16
+msd_channels = 64
+cache_gen_waveforms = true
+disc_gradient_checkpoint = true
+gen_gradient_checkpoint = true
+eval_frequency = 6
+
+# ── VAD ──────────────────────────────────────────────────────────────────
+[vad]
+loss_weight = 0.45
+threshold = 0.08
+margin = 0.05
+speech_loss_weight = 0.35
+warmup_epochs = 10
+snr_gate_db = -14.0
+snr_gate_width = 8.0
+band_low_hz = 300.0
+band_high_hz = 3400.0
+z_threshold = 0.0
+z_slope = 1.0
+
+[vad.eval]
+mode = "silero"
+every = 2
+batches = 24
+max_seconds = 10.0
+silero_sample_rate = 16000
+
+[vad.train]
+prob = 0.5
+every_steps = 2
+
+[metrics]
+eval_sisdr = false
+
+[debug]
+verbose = false
+sync_mode = "fast"
+debug_numerics = false
+debug_numerics_fail_fast = true
+debug_numerics_every = 1
+debug_numerics_dump_dir = ""
+debug_numerics_dump_arrays = false
+debug_numerics_max_dumps = 5
+nan_skip_batch = false
+
+[enhance]
+speech_boost_db = 4.5
+speech_boost_threshold = 0.35
+speech_boost_min_speech_ms = 220
+speech_boost_min_silence_ms = 90
+speech_boost_pad_ms = 40
+speech_boost_ramp_ms = 10.0
+speech_boost_peak_limit = 0.99
+speech_boost_silero_sample_rate = 16000

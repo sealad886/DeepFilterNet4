@@ -56,6 +56,7 @@ Repository = "https://github.com/sealad886/DeepFilterNet4"
 train = [
   "deepfilterdataloader @ file:../pyDF-data",
   "icecream>=2,<3",
+  "silero-vad",
 ]
 eval = [
   "pystoi>=0.3,<0.5",

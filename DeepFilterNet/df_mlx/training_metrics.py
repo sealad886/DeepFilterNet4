@@ -30,6 +30,8 @@ from df_mlx.training_losses import (
     _EPS,
     _VAD_LOGIT_CLAMP,
     _compute_awesome_losses,
+    _compute_contrastive_awesome_losses,
+    _compute_contrastive_silence_losses,
     _compute_pipeline_awesome_losses,
     _compute_speech_band_logmag_loss,
     _compute_vad_loss,
@@ -62,6 +64,14 @@ def create_epoch_accums() -> dict[str, Any]:
         "awesome_speech": 0.0,
         "awesome_noise": 0.0,
         "awesome_smooth": 0.0,
+        "contrastive_loss": 0.0,
+        "contrastive_speech": 0.0,
+        "contrastive_quiet": 0.0,
+        "contrastive_pos_sim": 0.0,
+        "contrastive_neg_sim": 0.0,
+        "contrastive_speech_frames": 0.0,
+        "contrastive_interference_frames": 0.0,
+        "silence_suppression_loss": 0.0,
         "music_supp_loss": 0.0,
         "mask_sat_loss": 0.0,
         "vad_reg_loss": 0.0,
@@ -122,6 +132,14 @@ def compute_epoch_averages(
         "awesome_speech": accums["awesome_speech"] / _n,
         "awesome_noise": accums["awesome_noise"] / _n,
         "awesome_smooth": accums["awesome_smooth"] / _n,
+        "contrastive_loss": accums["contrastive_loss"] / _n,
+        "contrastive_speech": accums["contrastive_speech"] / _n,
+        "contrastive_quiet": accums["contrastive_quiet"] / _n,
+        "contrastive_pos_sim": accums["contrastive_pos_sim"] / _n,
+        "contrastive_neg_sim": accums["contrastive_neg_sim"] / _n,
+        "contrastive_speech_frames": accums["contrastive_speech_frames"] / _n,
+        "contrastive_interference_frames": accums["contrastive_interference_frames"] / _n,
+        "silence_suppression_loss": accums["silence_suppression_loss"] / _n,
         "music_supp": accums["music_supp_loss"] / _n,
         "mask_sat": accums["mask_sat_loss"] / _n,
         "vad_reg_loss": accums["vad_reg_loss"] / _n,
@@ -148,6 +166,8 @@ def collect_sync_metrics(
     noisy_imag: mx.array,
     clean_real: mx.array,
     clean_imag: mx.array,
+    interference_real: mx.array,
+    interference_imag: mx.array,
     snr: mx.array,
     # Model and output
     model: Any,
@@ -163,6 +183,8 @@ def collect_sync_metrics(
     use_vad_loss: bool,
     use_awesome_loss: bool,
     use_pipeline_awesome_loss: bool,
+    use_contrastive_awesome_loss: bool,
+    use_contrastive_silence_loss: bool,
     use_vad_train_reg: bool,
     use_fp16: bool,
     gan_active: bool,
@@ -198,6 +220,22 @@ def collect_sync_metrics(
     # Awesome params
     awesome_mask_sharpness: float,
     vad_proxy_enabled: bool,
+    contrastive_temperature: float,
+    contrastive_speech_frames_per_sample: int,
+    contrastive_interference_frames_per_sample: int,
+    contrastive_speech_mask_min: float,
+    contrastive_interference_mask_max: float,
+    contrastive_quiet_weight: float,
+    contrastive_in_batch_negatives: bool,
+    # Contrastive silence params
+    contrastive_silence_frames_per_sample: int,
+    contrastive_silence_mask_max: float,
+    contrastive_silence_weight: float,
+    contrastive_silence_asymmetric_penalty: float,
+    contrastive_silence_transition_blend_low: float,
+    contrastive_silence_transition_blend_high: float,
+    contrastive_silence_low_freq_boost: float,
+    contrastive_silence_high_freq_boost: float,
     # Debug
     debugger: Any | None,
     debug_ctx: dict[str, Any],
@@ -225,6 +263,13 @@ def collect_sync_metrics(
     awesome_speech_val = 0.0
     awesome_noise_val = 0.0
     awesome_smooth_val = 0.0
+    contrastive_loss_val = 0.0
+    contrastive_speech_val = 0.0
+    contrastive_quiet_val = 0.0
+    contrastive_pos_sim_val = 0.0
+    contrastive_neg_sim_val = 0.0
+    contrastive_speech_frames_val = 0.0
+    contrastive_interference_frames_val = 0.0
     mask_mean = 0.0
     mask_high = 0.0
     mask_low = 0.0
@@ -239,13 +284,25 @@ def collect_sync_metrics(
 
     # ------------------------------------------------------------------
     # Compute model output for any metric block that needs it.
+    # In FAST mode (emit_detailed_metrics=False) skip all per-component
+    # loss recomputation — the composite loss_val is already available
+    # from the training step.  This eliminates redundant forward-pass
+    # work (z-scoring, band energy, musicness, InfoNCE, etc.) that
+    # would otherwise double the compute cost at every sync boundary.
     # ------------------------------------------------------------------
-    needs_model_out = not loss_was_nonfinite and (
-        use_vad_loss
-        or use_awesome_loss
-        or use_pipeline_awesome_loss
-        or use_vad_train_reg
-        or (emit_detailed_metrics and (use_mrstft_loss or gan_active))
+    needs_model_out = (
+        not loss_was_nonfinite
+        and emit_detailed_metrics
+        and (
+            use_vad_loss
+            or use_awesome_loss
+            or use_pipeline_awesome_loss
+            or use_contrastive_awesome_loss
+            or use_contrastive_silence_loss
+            or use_vad_train_reg
+            or use_mrstft_loss
+            or gan_active
+        )
     )
     out: tuple[mx.array, mx.array] | None = None
     spec_out: tuple[mx.array, mx.array] | None = None
@@ -544,6 +601,255 @@ def collect_sync_metrics(
     # ------------------------------------------------------------------
     # Pipeline awesome loss metrics
     # ------------------------------------------------------------------
+    if use_contrastive_awesome_loss and needs_model_out:
+        assert spec_out is not None
+        projector = getattr(model, "contrastive_projector", None)
+        (
+            contrastive_loss,
+            contrastive_speech,
+            contrastive_quiet,
+            contrastive_pos_sim,
+            contrastive_neg_sim,
+            mask,
+            proxy_frame,
+            speech_ratio,
+            music_gate,
+            musicness,
+            mod_energy,
+            energy_boost,
+            snr_boost,
+            contrastive_speech_frames,
+            contrastive_interference_frames,
+        ) = _compute_contrastive_awesome_losses(
+            noisy_real,
+            noisy_imag,
+            clean_real,
+            clean_imag,
+            interference_real,
+            interference_imag,
+            spec_out[0],
+            spec_out[1],
+            snr,
+            vad_band_mask,
+            vad_band_bins,
+            awesome_mask_sharpness,
+            vad_z_threshold,
+            vad_z_slope,
+            vad_snr_gate_db,
+            vad_snr_gate_width,
+            vad_proxy_enabled,
+            projector=projector,
+            temperature=contrastive_temperature,
+            speech_frames_per_sample=contrastive_speech_frames_per_sample,
+            interference_frames_per_sample=contrastive_interference_frames_per_sample,
+            speech_mask_min=contrastive_speech_mask_min,
+            interference_mask_max=contrastive_interference_mask_max,
+            quiet_weight=contrastive_quiet_weight,
+            in_batch_negatives=contrastive_in_batch_negatives,
+            debug=debugger,
+            debug_ctx=debug_ctx,
+        )
+        _mask_m = mx.mean(mask)
+        _mask_hi = mx.mean(mx.where(mask > 0.8, 1.0, 0.0))
+        _mask_lo = mx.mean(mx.where(mask < 0.2, 1.0, 0.0))
+        _proxy_m = mx.mean(proxy_frame)
+        _sr_m = mx.mean(speech_ratio)
+        _mg_m = mx.mean(music_gate)
+        _mu_m = mx.mean(musicness)
+        _me_m = mx.mean(mod_energy)
+        _eb_m = mx.mean(energy_boost)
+        _sb_m = mx.mean(snr_boost)
+        (
+            contrastive_loss_val,
+            contrastive_speech_val,
+            contrastive_quiet_val,
+            contrastive_pos_sim_val,
+            contrastive_neg_sim_val,
+            mask_mean,
+            mask_high,
+            mask_low,
+            proxy_mean,
+            speech_ratio_mean,
+            music_gate_mean,
+            musicness_mean,
+            mod_energy_mean,
+            energy_boost_mean,
+            snr_boost_mean,
+            contrastive_speech_frames_val,
+            contrastive_interference_frames_val,
+        ) = _batch_to_float(
+            contrastive_loss,
+            contrastive_speech,
+            contrastive_quiet,
+            contrastive_pos_sim,
+            contrastive_neg_sim,
+            _mask_m,
+            _mask_hi,
+            _mask_lo,
+            _proxy_m,
+            _sr_m,
+            _mg_m,
+            _mu_m,
+            _me_m,
+            _eb_m,
+            _sb_m,
+            contrastive_speech_frames,
+            contrastive_interference_frames,
+        )
+        mask_high *= 100.0
+        mask_low *= 100.0
+
+        accums["contrastive_loss"] += contrastive_loss_val * epoch_eval_frequency
+        accums["contrastive_speech"] += contrastive_speech_val * epoch_eval_frequency
+        accums["contrastive_quiet"] += contrastive_quiet_val * epoch_eval_frequency
+        accums["contrastive_pos_sim"] += contrastive_pos_sim_val * epoch_eval_frequency
+        accums["contrastive_neg_sim"] += contrastive_neg_sim_val * epoch_eval_frequency
+        accums["contrastive_speech_frames"] += contrastive_speech_frames_val * epoch_eval_frequency
+        accums["contrastive_interference_frames"] += contrastive_interference_frames_val * epoch_eval_frequency
+        accums["mask_mean"] += mask_mean
+        accums["mask_high"] += mask_high
+        accums["mask_low"] += mask_low
+        accums["proxy_mean"] += proxy_mean
+        accums["speech_ratio"] += speech_ratio_mean
+        accums["music_gate"] += music_gate_mean
+        accums["musicness"] += musicness_mean
+        accums["mod_energy"] += mod_energy_mean
+        accums["energy_boost"] += energy_boost_mean
+        accums["snr_boost"] += snr_boost_mean
+        accums["num_awesome_logs"] += 1
+
+    # ------------------------------------------------------------------
+    # Contrastive silence loss metrics
+    # ------------------------------------------------------------------
+    if use_contrastive_silence_loss and needs_model_out:
+        assert spec_out is not None
+        projector = getattr(model, "contrastive_projector", None)
+        (
+            contrastive_loss,
+            contrastive_speech,
+            silence_suppression,
+            contrastive_pos_sim,
+            contrastive_neg_sim,
+            mask,
+            proxy_frame,
+            speech_ratio,
+            music_gate,
+            musicness,
+            mod_energy,
+            energy_boost,
+            snr_boost,
+            contrastive_speech_frames,
+            silence_valid_count,
+        ) = _compute_contrastive_silence_losses(
+            clean_real,
+            clean_imag,
+            noisy_real,
+            noisy_imag,
+            interference_real,
+            interference_imag,
+            spec_out[0],
+            spec_out[1],
+            snr,
+            vad_band_mask,
+            vad_band_bins,
+            awesome_mask_sharpness,
+            vad_z_threshold,
+            vad_z_slope,
+            vad_snr_gate_db,
+            vad_snr_gate_width,
+            vad_proxy_enabled,
+            projector,
+            temperature=contrastive_temperature,
+            speech_frames_per_sample=contrastive_speech_frames_per_sample,
+            speech_mask_min=contrastive_speech_mask_min,
+            in_batch_negatives=contrastive_in_batch_negatives,
+            silence_frames_per_sample=contrastive_silence_frames_per_sample,
+            silence_mask_max=contrastive_silence_mask_max,
+            silence_weight=contrastive_silence_weight,
+            asymmetric_penalty=contrastive_silence_asymmetric_penalty,
+            transition_blend_low=contrastive_silence_transition_blend_low,
+            transition_blend_high=contrastive_silence_transition_blend_high,
+            low_freq_boost=contrastive_silence_low_freq_boost,
+            high_freq_boost=contrastive_silence_high_freq_boost,
+            sr=config_sample_rate,
+            fft_size=config_fft_size,
+            eps=_EPS,
+            debug=debugger,
+            debug_ctx=debug_ctx,
+        )
+        _mask_m = mx.mean(mask)
+        _mask_hi = mx.mean(mx.where(mask > 0.8, 1.0, 0.0))
+        _mask_lo = mx.mean(mx.where(mask < 0.2, 1.0, 0.0))
+        _proxy_m = mx.mean(proxy_frame)
+        _sr_m = mx.mean(speech_ratio)
+        _mg_m = mx.mean(music_gate)
+        _mu_m = mx.mean(musicness)
+        _me_m = mx.mean(mod_energy)
+        _eb_m = mx.mean(energy_boost)
+        _sb_m = mx.mean(snr_boost)
+        (
+            contrastive_loss_val,
+            contrastive_speech_val,
+            contrastive_quiet_val,
+            contrastive_pos_sim_val,
+            contrastive_neg_sim_val,
+            mask_mean,
+            mask_high,
+            mask_low,
+            proxy_mean,
+            speech_ratio_mean,
+            music_gate_mean,
+            musicness_mean,
+            mod_energy_mean,
+            energy_boost_mean,
+            snr_boost_mean,
+            contrastive_speech_frames_val,
+            contrastive_interference_frames_val,
+        ) = _batch_to_float(
+            contrastive_loss,
+            contrastive_speech,
+            silence_suppression,
+            contrastive_pos_sim,
+            contrastive_neg_sim,
+            _mask_m,
+            _mask_hi,
+            _mask_lo,
+            _proxy_m,
+            _sr_m,
+            _mg_m,
+            _mu_m,
+            _me_m,
+            _eb_m,
+            _sb_m,
+            contrastive_speech_frames,
+            silence_valid_count,
+        )
+        mask_high *= 100.0
+        mask_low *= 100.0
+
+        accums["contrastive_loss"] += contrastive_loss_val * epoch_eval_frequency
+        accums["contrastive_speech"] += contrastive_speech_val * epoch_eval_frequency
+        accums["contrastive_quiet"] += contrastive_quiet_val * epoch_eval_frequency
+        accums["silence_suppression_loss"] += contrastive_quiet_val * epoch_eval_frequency
+        accums["contrastive_pos_sim"] += contrastive_pos_sim_val * epoch_eval_frequency
+        accums["contrastive_neg_sim"] += contrastive_neg_sim_val * epoch_eval_frequency
+        accums["contrastive_speech_frames"] += contrastive_speech_frames_val * epoch_eval_frequency
+        accums["contrastive_interference_frames"] += contrastive_interference_frames_val * epoch_eval_frequency
+        accums["mask_mean"] += mask_mean
+        accums["mask_high"] += mask_high
+        accums["mask_low"] += mask_low
+        accums["proxy_mean"] += proxy_mean
+        accums["speech_ratio"] += speech_ratio_mean
+        accums["music_gate"] += music_gate_mean
+        accums["musicness"] += musicness_mean
+        accums["mod_energy"] += mod_energy_mean
+        accums["energy_boost"] += energy_boost_mean
+        accums["snr_boost"] += snr_boost_mean
+        accums["num_awesome_logs"] += 1
+
+    # ------------------------------------------------------------------
+    # Pipeline awesome loss metrics
+    # ------------------------------------------------------------------
     if use_pipeline_awesome_loss and needs_model_out:
         assert out is not None
         (
@@ -692,6 +998,11 @@ def collect_sync_metrics(
         "awesome_speech_val": awesome_speech_val,
         "awesome_noise_val": awesome_noise_val,
         "awesome_smooth_val": awesome_smooth_val,
+        "contrastive_loss_val": contrastive_loss_val,
+        "contrastive_speech_val": contrastive_speech_val,
+        "contrastive_quiet_val": contrastive_quiet_val,
+        "contrastive_pos_sim_val": contrastive_pos_sim_val,
+        "contrastive_neg_sim_val": contrastive_neg_sim_val,
         "mask_mean": mask_mean,
         "mask_high": mask_high,
         "mask_low": mask_low,
@@ -725,10 +1036,13 @@ def update_progress_bar(
     use_vad_loss: bool,
     use_awesome_loss: bool,
     use_pipeline_awesome_loss: bool,
+    use_contrastive_awesome_loss: bool,
+    use_contrastive_silence_loss: bool,
     use_vad_train_reg: bool,
     gan_active: bool,
 ) -> None:
     """Update the tqdm progress bar with current metrics."""
+    _any_contrastive = use_contrastive_awesome_loss or use_contrastive_silence_loss
     spec_loss_val = display["spec_loss_val"]
     mrstft_loss_val = display["mrstft_loss_val"]
     gan_g_loss_val = display["gan_g_loss_val"]
@@ -736,6 +1050,9 @@ def update_progress_bar(
     vad_loss_val = display["vad_loss_val"]
     speech_loss_val = display["speech_loss_val"]
     awesome_loss_val = display["awesome_loss_val"]
+    contrastive_loss_val = display["contrastive_loss_val"]
+    contrastive_pos_sim_val = display["contrastive_pos_sim_val"]
+    contrastive_neg_sim_val = display["contrastive_neg_sim_val"]
     mask_mean = display["mask_mean"]
     p_ref_mean = display["p_ref_mean"]
     p_out_mean = display["p_out_mean"]
@@ -747,7 +1064,13 @@ def update_progress_bar(
             loss=f"{loss_val:.4f}",
             spec=(
                 f"{spec_loss_val:.4f}"
-                if (use_vad_loss or use_awesome_loss or use_pipeline_awesome_loss or use_vad_train_reg)
+                if (
+                    use_vad_loss
+                    or use_awesome_loss
+                    or use_pipeline_awesome_loss
+                    or _any_contrastive
+                    or use_vad_train_reg
+                )
                 else f"{loss_val:.4f}"
             ),
             mrstft=f"{mrstft_loss_val:.4f}" if use_mrstft_loss else "0.0000",
@@ -757,7 +1080,12 @@ def update_progress_bar(
             vad=f"{vad_loss_val:.4f}" if use_vad_loss else "0.0000",
             speech=f"{speech_loss_val:.4f}" if use_vad_loss else "0.0000",
             awesome=(f"{awesome_loss_val:.4f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.0000"),
-            mask=(f"{mask_mean:.2f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.00"),
+            ctr=(f"{contrastive_loss_val:.4f}" if _any_contrastive else "0.0000"),
+            mask=(
+                f"{mask_mean:.2f}" if (use_awesome_loss or use_pipeline_awesome_loss or _any_contrastive) else "0.00"
+            ),
+            pos=(f"{contrastive_pos_sim_val:.3f}" if _any_contrastive else "0.000"),
+            neg=(f"{contrastive_neg_sim_val:.3f}" if _any_contrastive else "0.000"),
             lr=f"{lr:.1e}",
             data=f"{data_time * 1000:.0f}ms",
             fwd=f"{fwd_time * 1000:.0f}ms",
@@ -775,7 +1103,12 @@ def update_progress_bar(
             vad=f"{vad_loss_val:.4f}" if use_vad_loss else "0.0000",
             speech=f"{speech_loss_val:.4f}" if use_vad_loss else "0.0000",
             awesome=(f"{awesome_loss_val:.4f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.0000"),
-            mask=(f"{mask_mean:.2f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.00"),
+            ctr=(f"{contrastive_loss_val:.4f}" if _any_contrastive else "0.0000"),
+            mask=(
+                f"{mask_mean:.2f}" if (use_awesome_loss or use_pipeline_awesome_loss or _any_contrastive) else "0.00"
+            ),
+            pos=(f"{contrastive_pos_sim_val:.3f}" if _any_contrastive else "0.000"),
+            neg=(f"{contrastive_neg_sim_val:.3f}" if _any_contrastive else "0.000"),
             p_ref=f"{p_ref_mean:.2f}" if use_vad_loss else "0.00",
             p_out=f"{p_out_mean:.2f}" if use_vad_loss else "0.00",
             gate=f"{gate_pct:.0f}%" if use_vad_loss else "0%",

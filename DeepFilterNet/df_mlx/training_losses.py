@@ -31,10 +31,15 @@ from typing import TYPE_CHECKING, Any
 import mlx.core as mx
 import numpy as np
 
+from df_mlx.metal_kernels import _EPS_F as _MAG_EPS
+from df_mlx.metal_kernels import band_energy, log1p_mag
+from df_mlx.model import ContrastiveFrameProjector
+
 if TYPE_CHECKING:
     from df_mlx.training_ops import NumericDebugger
 
 __all__ = [
+    "ContrastiveFrameProjector",
     "_AWESOME_ENERGY_BOOST_DB",
     "_AWESOME_ENERGY_BOOST_WIDTH",
     "_AWESOME_LOW_ENERGY_WEIGHT",
@@ -61,6 +66,8 @@ __all__ = [
     "_VAD_LOGIT_CLAMP",
     "_build_speech_band_mask",
     "_compute_awesome_losses",
+    "_compute_contrastive_awesome_losses",
+    "_compute_contrastive_silence_losses",
     "_compute_harmonic_ratio",
     "_compute_improved_musicness",
     "_compute_musicness",
@@ -74,6 +81,7 @@ __all__ = [
     "_compute_vad_reg_loss",
     "_log1p_mag",
     "_snr_bucket_name",
+    "_z_score_clean_energy",
 ]
 
 # =============================================================================
@@ -143,17 +151,19 @@ def _z_score_clean_energy(
 ) -> tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array]:
     """Shared z-scored clean energy computation used by VAD and proxy gates.
 
+    Computes power → masked reduction → log10 using standard MLX ops.
+
     Returns:
-        clean_power: (B, T, F) power spectrum
+        clean_power: Scalar placeholder (no caller uses this value)
         clean_band: (B, T) band energy
         log_clean: (B, T) log10 band energy
         z_ref_raw: (B, T) raw z-scored energy (before clipping)
         z_ref: (B, T) clipped z-scored energy
         p_ref: (B, T) sigmoid VAD probability
     """
-    clean_power = clean_real**2 + clean_imag**2
-    clean_band = mx.sum(clean_power * band_mask, axis=-1) / (band_bins + eps)
-    log_clean = mx.log10(clean_band + eps)
+    clean_band, log_clean = band_energy(clean_real, clean_imag, band_mask, band_bins, eps)
+    # Backward-compat placeholder: no downstream caller reads clean_power.
+    clean_power = mx.array(0.0)
     mu = mx.mean(log_clean, axis=1, keepdims=True)
     variance = mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True)
     sigma = mx.sqrt(mx.maximum(variance, _MIN_VARIANCE) + eps)
@@ -199,7 +209,13 @@ def _compute_vad_probs(
         _, clean_band, log_clean, z_ref_raw, z_ref, p_ref = _precomputed_z
     else:
         _, clean_band, log_clean, z_ref_raw, z_ref, p_ref = _z_score_clean_energy(
-            clean_real, clean_imag, band_mask, band_bins, vad_z_threshold, vad_z_slope, eps
+            clean_real,
+            clean_imag,
+            band_mask,
+            band_bins,
+            vad_z_threshold,
+            vad_z_slope,
+            eps,
         )
 
     out_power = out_real**2 + out_imag**2
@@ -241,6 +257,7 @@ def _compute_vad_loss(
     vad_z_slope: float,
     debug: NumericDebugger | None = None,
     debug_ctx: dict[str, Any] | None = None,
+    _precomputed_z: tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array] | None = None,
 ) -> tuple[mx.array, mx.array, mx.array, mx.array]:
     """Compute soft VAD loss and diagnostics.
 
@@ -257,6 +274,7 @@ def _compute_vad_loss(
         vad_z_slope,
         debug=debug,
         debug_ctx=debug_ctx,
+        _precomputed_z=_precomputed_z,
     )
 
     speech_gate = mx.clip((p_ref - vad_threshold) / (1.0 - vad_threshold + _EPS), 0.0, 1.0)
@@ -296,11 +314,11 @@ def _compute_speech_band_logmag_loss(
             out_real = out_real.astype(mx.float32)
         if out_imag.dtype != mx.float32:
             out_imag = out_imag.astype(mx.float32)
-    clean_mag = mx.sqrt(clean_real**2 + clean_imag**2 + eps)
-    out_mag = mx.sqrt(out_real**2 + out_imag**2 + eps)
+    clean_mag = mx.sqrt(clean_real**2 + clean_imag**2 + _MAG_EPS)
+    out_mag = mx.sqrt(out_real**2 + out_imag**2 + _MAG_EPS)
 
-    clean_log = mx.log10(clean_mag + eps)
-    out_log = mx.log10(out_mag + eps)
+    clean_log = mx.log10(clean_mag + _MAG_EPS)
+    out_log = mx.log10(out_mag + _MAG_EPS)
 
     clean_band = mx.sum(clean_log * band_mask, axis=-1) / (band_bins + eps)
     out_band = mx.sum(out_log * band_mask, axis=-1) / (band_bins + eps)
@@ -316,17 +334,19 @@ def _compute_speech_band_logmag_loss(
 def _log1p_mag(
     real: mx.array,
     imag: mx.array,
-    eps: float = _EPS,
+    eps: float = _MAG_EPS,
     _assume_float32: bool = False,
 ) -> mx.array:
-    """Compute log1p magnitude for complex STFT."""
+    """Compute log1p magnitude for complex STFT.
+
+    Computes ``log1p(sqrt(r² + i² + eps))`` using standard MLX ops.
+    """
     if not _assume_float32:
         if real.dtype != mx.float32:
             real = real.astype(mx.float32)
         if imag.dtype != mx.float32:
             imag = imag.astype(mx.float32)
-    mag = mx.sqrt(real**2 + imag**2 + eps)
-    return mx.log1p(mag)
+    return log1p_mag(real, imag, eps=eps)
 
 
 def _compute_musicness(
@@ -346,7 +366,7 @@ def _compute_musicness(
     # Spectral flatness over speech band
     if not _assume_float32 and mag.dtype != mx.float32:
         mag = mag.astype(mx.float32)
-    log_mag = mx.log(mag + eps)
+    log_mag = mx.log(mag + _MAG_EPS)
     mean_log = mx.sum(log_mag * band_mask, axis=-1) / (band_bins + eps)
     geom_mean = mx.exp(mean_log)
     arith_mean = mx.sum(mag * band_mask, axis=-1) / (band_bins + eps)
@@ -425,11 +445,9 @@ def _compute_proxy_gates(
             noisy_imag = noisy_imag.astype(mx.float32)
 
     if _precomputed_z is not None:
-        clean_power, clean_band, log_clean, z_ref_raw, z_ref, p_ref = _precomputed_z
+        _unused, clean_band, log_clean, z_ref_raw, z_ref, p_ref = _precomputed_z
     else:
-        clean_power = clean_real**2 + clean_imag**2
-        clean_band = mx.sum(clean_power * band_mask, axis=-1) / (band_bins + eps)
-        log_clean = mx.log10(clean_band + eps)
+        clean_band, log_clean = band_energy(clean_real, clean_imag, band_mask, band_bins, eps)
         mu = mx.mean(log_clean, axis=1, keepdims=True)
         variance = mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True)
         sigma = mx.sqrt(mx.maximum(variance, _MIN_VARIANCE) + eps)
@@ -462,7 +480,7 @@ def _compute_proxy_gates(
     snr_boost = mx.sigmoid((vad_snr_gate_db - snr[:, None]) / snr_scale)
 
     # Musicness gate from noisy magnitude
-    noisy_mag = mx.sqrt(noisy_real**2 + noisy_imag**2 + eps)
+    noisy_mag = mx.sqrt(noisy_real**2 + noisy_imag**2 + _MAG_EPS)
     musicness, music_gate = _compute_musicness(
         noisy_mag,
         band_mask,
@@ -493,16 +511,22 @@ def _compute_proxy_gates(
         debug.check("proxy.energy_boost", energy_boost, debug_ctx)
         debug.check("proxy.snr_boost", snr_boost, debug_ctx)
         debug.check("proxy.frame", proxy_frame, debug_ctx)
-    return proxy_frame, speech_ratio, music_gate, musicness, mod_energy, energy_boost, snr_boost
+    return (
+        proxy_frame,
+        speech_ratio,
+        music_gate,
+        musicness,
+        mod_energy,
+        energy_boost,
+        snr_boost,
+    )
 
 
-def _compute_awesome_losses(
+def _compute_awesome_teacher_signals(
     noisy_real: mx.array,
     noisy_imag: mx.array,
     clean_real: mx.array,
     clean_imag: mx.array,
-    out_real: mx.array,
-    out_imag: mx.array,
     snr: mx.array,
     band_mask: mx.array,
     band_bins: float,
@@ -515,6 +539,8 @@ def _compute_awesome_losses(
     eps: float = _EPS,
     debug: NumericDebugger | None = None,
     debug_ctx: dict[str, Any] | None = None,
+    _assume_float32: bool = False,
+    _precomputed_z: tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array] | None = None,
 ) -> tuple[
     mx.array,
     mx.array,
@@ -525,33 +551,30 @@ def _compute_awesome_losses(
     mx.array,
     mx.array,
     mx.array,
-    mx.array,
-    mx.array,
-    mx.array,
 ]:
-    """Compute awesome loss components and diagnostic gates."""
-    # Cast all inputs to FP32 once at function entry (avoids redundant casts downstream)
-    clean_real_f32 = clean_real.astype(mx.float32) if clean_real.dtype != mx.float32 else clean_real
-    clean_imag_f32 = clean_imag.astype(mx.float32) if clean_imag.dtype != mx.float32 else clean_imag
-    noisy_real_f32 = noisy_real.astype(mx.float32) if noisy_real.dtype != mx.float32 else noisy_real
-    noisy_imag_f32 = noisy_imag.astype(mx.float32) if noisy_imag.dtype != mx.float32 else noisy_imag
-    out_real_f32 = out_real.astype(mx.float32) if out_real.dtype != mx.float32 else out_real
-    out_imag_f32 = out_imag.astype(mx.float32) if out_imag.dtype != mx.float32 else out_imag
+    """Return the stop-gradient teacher signals used by awesome-family losses."""
+    if not _assume_float32:
+        clean_real_f32 = clean_real.astype(mx.float32) if clean_real.dtype != mx.float32 else clean_real
+        clean_imag_f32 = clean_imag.astype(mx.float32) if clean_imag.dtype != mx.float32 else clean_imag
+        noisy_real_f32 = noisy_real.astype(mx.float32) if noisy_real.dtype != mx.float32 else noisy_real
+        noisy_imag_f32 = noisy_imag.astype(mx.float32) if noisy_imag.dtype != mx.float32 else noisy_imag
+    else:
+        clean_real_f32 = clean_real
+        clean_imag_f32 = clean_imag
+        noisy_real_f32 = noisy_real
+        noisy_imag_f32 = noisy_imag
 
-    clean_log = _log1p_mag(clean_real_f32, clean_imag_f32, eps=eps, _assume_float32=True)
-    out_log = _log1p_mag(out_real_f32, out_imag_f32, eps=eps, _assume_float32=True)
-
+    clean_log = _log1p_mag(clean_real_f32, clean_imag_f32, eps=_MAG_EPS, _assume_float32=True)
     noise_real = noisy_real_f32 - clean_real_f32
     noise_imag = noisy_imag_f32 - clean_imag_f32
-    noise_log = _log1p_mag(noise_real, noise_imag, eps=eps, _assume_float32=True)
+    noise_log = _log1p_mag(noise_real, noise_imag, eps=_MAG_EPS, _assume_float32=True)
 
     mask_logits = mx.clip(
         mask_sharpness * (clean_log - noise_log),
         -_AWESOME_MASK_LOGIT_CLAMP,
         _AWESOME_MASK_LOGIT_CLAMP,
     )
-    mask = mx.sigmoid(mask_logits)
-    mask = mx.stop_gradient(mask)
+    mask = mx.stop_gradient(mx.sigmoid(mask_logits))
     if debug is not None:
         debug.check("awesome.clean_log", clean_log, debug_ctx)
         debug.check("awesome.noise_log", noise_log, debug_ctx)
@@ -585,6 +608,100 @@ def _compute_awesome_losses(
         noise_real=noise_real,
         noise_imag=noise_imag,
         _assume_float32=True,
+        _precomputed_z=_precomputed_z,
+    )
+
+    return (
+        clean_log,
+        noise_log,
+        mask,
+        proxy_frame,
+        speech_ratio,
+        music_gate,
+        musicness,
+        mod_energy,
+        energy_boost,
+        snr_boost,
+    )
+
+
+def _compute_awesome_losses(
+    noisy_real: mx.array,
+    noisy_imag: mx.array,
+    clean_real: mx.array,
+    clean_imag: mx.array,
+    out_real: mx.array,
+    out_imag: mx.array,
+    snr: mx.array,
+    band_mask: mx.array,
+    band_bins: float,
+    mask_sharpness: float,
+    vad_z_threshold: float,
+    vad_z_slope: float,
+    vad_snr_gate_db: float,
+    vad_snr_gate_width: float,
+    proxy_enabled: bool,
+    eps: float = _EPS,
+    debug: NumericDebugger | None = None,
+    debug_ctx: dict[str, Any] | None = None,
+    _assume_float32: bool = False,
+    _precomputed_z: tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array] | None = None,
+) -> tuple[
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+]:
+    """Compute awesome loss components and diagnostic gates.
+
+    Args:
+        _assume_float32: When True, skip dtype checks — caller guarantees FP32 inputs.
+        _precomputed_z: Optional tuple from ``_z_score_clean_energy`` to skip
+            redundant clean-signal z-scoring in teacher signal computation.
+    """
+    # Cast all inputs to FP32 once at function entry (avoids redundant casts downstream)
+    out_real_f32 = out_real.astype(mx.float32) if out_real.dtype != mx.float32 else out_real
+    out_imag_f32 = out_imag.astype(mx.float32) if out_imag.dtype != mx.float32 else out_imag
+
+    out_log = _log1p_mag(out_real_f32, out_imag_f32, eps=_MAG_EPS, _assume_float32=True)
+    (
+        clean_log,
+        _noise_log,
+        mask,
+        proxy_frame,
+        speech_ratio,
+        music_gate,
+        musicness,
+        mod_energy,
+        energy_boost,
+        snr_boost,
+    ) = _compute_awesome_teacher_signals(
+        noisy_real,
+        noisy_imag,
+        clean_real,
+        clean_imag,
+        snr,
+        band_mask,
+        band_bins,
+        mask_sharpness,
+        vad_z_threshold,
+        vad_z_slope,
+        vad_snr_gate_db,
+        vad_snr_gate_width,
+        proxy_enabled,
+        eps=eps,
+        debug=debug,
+        debug_ctx=debug_ctx,
+        _assume_float32=_assume_float32,
+        _precomputed_z=_precomputed_z,
     )
 
     proxy_frame = proxy_frame[:, :, None]
@@ -617,6 +734,558 @@ def _compute_awesome_losses(
         mod_energy,
         energy_boost,
         snr_boost,
+    )
+
+
+def _build_contrastive_frame_features(
+    real: mx.array,
+    imag: mx.array,
+    eps: float = _EPS,
+) -> mx.array:
+    """Build per-frame contrastive features from complex STFT components."""
+    real_f32 = real.astype(mx.float32) if real.dtype != mx.float32 else real
+    imag_f32 = imag.astype(mx.float32) if imag.dtype != mx.float32 else imag
+    log_mag = _log1p_mag(real_f32, imag_f32, eps=_MAG_EPS, _assume_float32=True)
+    return mx.concatenate([real_f32, imag_f32, log_mag], axis=-1)
+
+
+def _gather_time_frames(frames: mx.array, indices: mx.array) -> mx.array:
+    """Gather ``(B, K)`` time indices from a ``(B, T, C)`` frame tensor."""
+    feature_dim = frames.shape[-1]
+    gather_idx = mx.expand_dims(indices, axis=-1)
+    gather_idx = mx.broadcast_to(gather_idx, (*indices.shape, feature_dim))
+    return mx.take_along_axis(frames, gather_idx, axis=1)
+
+
+def _select_topk_frames(
+    scores: mx.array,
+    valid_mask: mx.array,
+    k: int,
+) -> tuple[mx.array, mx.array, mx.array]:
+    """Select deterministic top-k frames and return indices, weights, validity."""
+    batch, time = scores.shape
+    if k <= 0:
+        empty_idx = mx.zeros((batch, 0), dtype=mx.int32)
+        empty_val = mx.zeros((batch, 0), dtype=mx.float32)
+        return empty_idx, empty_val, empty_val
+
+    k = min(int(k), int(time))
+    neg_inf = mx.full(scores.shape, -1e9, dtype=mx.float32)
+    valid_scores = mx.where(valid_mask > 0.0, scores, neg_inf)
+    sorted_idx = mx.argsort(valid_scores, axis=1)
+    top_idx = sorted_idx[:, -k:]
+
+    gathered_scores = mx.take_along_axis(scores, top_idx, axis=1)
+    gathered_valid = mx.take_along_axis(valid_mask, top_idx, axis=1)
+    gathered_scores = gathered_scores * gathered_valid
+    return top_idx, gathered_scores, gathered_valid
+
+
+def _reduce_weighted_rows(values: mx.array, row_weights: mx.array, eps: float = _EPS) -> mx.array:
+    """Weighted mean over flattened query rows with a safe zero-valid fallback."""
+    denom = mx.sum(row_weights)
+    weighted = mx.sum(values * row_weights)
+    return mx.where(denom > eps, weighted / (denom + eps), mx.array(0.0, dtype=mx.float32))
+
+
+def _contrastive_info_nce(
+    query: mx.array,
+    positive: mx.array,
+    noisy_negative: mx.array,
+    interference_negative: mx.array,
+    row_weights: mx.array,
+    row_valid: mx.array,
+    temperature: float,
+    *,
+    in_batch_negatives: bool,
+) -> tuple[mx.array, mx.array, mx.array]:
+    """Compute weighted InfoNCE loss and similarity diagnostics for selected rows."""
+    if query.shape[1] == 0:
+        zero = mx.array(0.0, dtype=mx.float32)
+        return zero, zero, zero
+
+    tau = max(float(temperature), 1e-4)
+    q = query.reshape(-1, query.shape[-1])
+    p = positive.reshape(-1, positive.shape[-1])
+    n_mix = noisy_negative.reshape(-1, noisy_negative.shape[-1])
+    n_int = interference_negative.reshape(-1, interference_negative.shape[-1])
+    weights = (row_weights * row_valid).reshape(-1)
+
+    pos_sim = mx.sum(q * p, axis=-1)
+    noisy_sim = mx.sum(q * n_mix, axis=-1)
+    interference_sim = mx.sum(q * n_int, axis=-1)
+
+    pos_logits = pos_sim / tau
+    neg_logits = mx.stack([noisy_sim / tau, interference_sim / tau], axis=1)
+    all_logits = mx.concatenate([mx.expand_dims(pos_logits, axis=1), neg_logits], axis=1)
+
+    if in_batch_negatives and query.shape[0] > 1:
+        batch_size, k = query.shape[:2]
+        sample_ids = mx.repeat(mx.arange(batch_size, dtype=mx.int32), k)
+        other_clean_logits = (q @ mx.transpose(p)) / tau
+        other_sample = mx.expand_dims(sample_ids, axis=1) != mx.expand_dims(sample_ids, axis=0)
+        valid_cols = mx.expand_dims((weights > 0.0).astype(mx.float32), axis=0)
+        neg_inf = mx.full(other_clean_logits.shape, -1e9, dtype=mx.float32)
+        other_clean_logits = mx.where(other_sample & (valid_cols > 0.0), other_clean_logits, neg_inf)
+        all_logits = mx.concatenate([all_logits, other_clean_logits], axis=1)
+
+    per_row = -pos_logits + mx.logsumexp(all_logits, axis=1)
+    avg_neg_sim = 0.5 * (noisy_sim + interference_sim)
+    return (
+        _reduce_weighted_rows(per_row, weights, eps=_EPS),
+        _reduce_weighted_rows(pos_sim, weights, eps=_EPS),
+        _reduce_weighted_rows(avg_neg_sim, weights, eps=_EPS),
+    )
+
+
+def _compute_contrastive_awesome_losses(
+    noisy_real: mx.array,
+    noisy_imag: mx.array,
+    clean_real: mx.array,
+    clean_imag: mx.array,
+    interference_real: mx.array,
+    interference_imag: mx.array,
+    out_real: mx.array,
+    out_imag: mx.array,
+    snr: mx.array,
+    band_mask: mx.array,
+    band_bins: float,
+    mask_sharpness: float,
+    vad_z_threshold: float,
+    vad_z_slope: float,
+    vad_snr_gate_db: float,
+    vad_snr_gate_width: float,
+    proxy_enabled: bool,
+    projector: Any,
+    *,
+    temperature: float = 0.1,
+    speech_frames_per_sample: int = 32,
+    interference_frames_per_sample: int = 32,
+    speech_mask_min: float = 0.7,
+    interference_mask_max: float = 0.3,
+    quiet_weight: float = 0.5,
+    in_batch_negatives: bool = True,
+    eps: float = _EPS,
+    debug: NumericDebugger | None = None,
+    debug_ctx: dict[str, Any] | None = None,
+    _precomputed_z: tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array] | None = None,
+) -> tuple[
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+    mx.array,
+]:
+    """Compute local InfoNCE-style contrastive AWESOME loss."""
+    if projector is None:
+        raise ValueError("contrastive_awesome requires an attached ContrastiveFrameProjector")
+
+    clean_real_f32 = clean_real.astype(mx.float32) if clean_real.dtype != mx.float32 else clean_real
+    clean_imag_f32 = clean_imag.astype(mx.float32) if clean_imag.dtype != mx.float32 else clean_imag
+    noisy_real_f32 = noisy_real.astype(mx.float32) if noisy_real.dtype != mx.float32 else noisy_real
+    noisy_imag_f32 = noisy_imag.astype(mx.float32) if noisy_imag.dtype != mx.float32 else noisy_imag
+    interference_real_f32 = (
+        interference_real.astype(mx.float32) if interference_real.dtype != mx.float32 else interference_real
+    )
+    interference_imag_f32 = (
+        interference_imag.astype(mx.float32) if interference_imag.dtype != mx.float32 else interference_imag
+    )
+    out_real_f32 = out_real.astype(mx.float32) if out_real.dtype != mx.float32 else out_real
+    out_imag_f32 = out_imag.astype(mx.float32) if out_imag.dtype != mx.float32 else out_imag
+
+    clean_log = _log1p_mag(clean_real_f32, clean_imag_f32, eps=_MAG_EPS, _assume_float32=True)
+    noise_log = _log1p_mag(interference_real_f32, interference_imag_f32, eps=_MAG_EPS, _assume_float32=True)
+    mask_logits = mx.clip(
+        mask_sharpness * (clean_log - noise_log),
+        -_AWESOME_MASK_LOGIT_CLAMP,
+        _AWESOME_MASK_LOGIT_CLAMP,
+    )
+    mask = mx.stop_gradient(mx.sigmoid(mask_logits))
+
+    (
+        proxy_frame,
+        speech_ratio,
+        music_gate,
+        musicness,
+        mod_energy,
+        energy_boost,
+        snr_boost,
+    ) = _compute_proxy_gates(
+        clean_real_f32,
+        clean_imag_f32,
+        noisy_real_f32,
+        noisy_imag_f32,
+        snr,
+        band_mask,
+        band_bins,
+        vad_z_threshold,
+        vad_z_slope,
+        vad_snr_gate_db,
+        vad_snr_gate_width,
+        proxy_enabled,
+        eps=eps,
+        debug=debug,
+        debug_ctx=debug_ctx,
+        noise_real=interference_real_f32,
+        noise_imag=interference_imag_f32,
+        _assume_float32=True,
+    )
+
+    mask_mean = mx.mean(mask, axis=-1)
+    speech_valid = mx.stop_gradient((mask_mean >= float(speech_mask_min)).astype(mx.float32))
+    interference_valid = mx.stop_gradient((mask_mean <= float(interference_mask_max)).astype(mx.float32))
+    speech_scores = mx.stop_gradient(mask_mean * proxy_frame) * speech_valid
+    interference_scores = mx.stop_gradient(mx.mean(1.0 - mask, axis=-1)) * interference_valid
+
+    speech_idx, speech_weights, speech_valid_rows = _select_topk_frames(
+        speech_scores,
+        speech_valid,
+        speech_frames_per_sample,
+    )
+    quiet_idx, quiet_scores, quiet_valid_rows = _select_topk_frames(
+        interference_scores,
+        interference_valid,
+        interference_frames_per_sample,
+    )
+
+    out_frames = _build_contrastive_frame_features(out_real_f32, out_imag_f32, eps=eps)
+    clean_frames = _build_contrastive_frame_features(clean_real_f32, clean_imag_f32, eps=eps)
+    noisy_frames = _build_contrastive_frame_features(noisy_real_f32, noisy_imag_f32, eps=eps)
+    interference_frames = _build_contrastive_frame_features(interference_real_f32, interference_imag_f32, eps=eps)
+
+    speech_q = projector(_gather_time_frames(out_frames, speech_idx))
+    speech_p = projector(_gather_time_frames(clean_frames, speech_idx))
+    speech_n_mix = projector(_gather_time_frames(noisy_frames, speech_idx))
+    speech_n_int = projector(_gather_time_frames(interference_frames, speech_idx))
+
+    quiet_q = projector(_gather_time_frames(out_frames, quiet_idx))
+    quiet_p = projector(_gather_time_frames(clean_frames, quiet_idx))
+    quiet_n_mix = projector(_gather_time_frames(noisy_frames, quiet_idx))
+    quiet_n_int = projector(_gather_time_frames(interference_frames, quiet_idx))
+
+    speech_ctr_loss, speech_pos_sim, speech_neg_sim = _contrastive_info_nce(
+        speech_q,
+        speech_p,
+        speech_n_mix,
+        speech_n_int,
+        speech_weights,
+        speech_valid_rows,
+        temperature,
+        in_batch_negatives=in_batch_negatives,
+    )
+    quiet_ctr_loss, quiet_pos_sim, quiet_neg_sim = _contrastive_info_nce(
+        quiet_q,
+        quiet_p,
+        quiet_n_mix,
+        quiet_n_int,
+        quiet_scores,
+        quiet_valid_rows,
+        temperature,
+        in_batch_negatives=in_batch_negatives,
+    )
+
+    total_loss = speech_ctr_loss + max(float(quiet_weight), 0.0) * quiet_ctr_loss
+    speech_valid_count = mx.sum(speech_valid_rows)
+    interference_valid_count = mx.sum(quiet_valid_rows)
+    speech_weight_mass = mx.sum(speech_weights * speech_valid_rows)
+    quiet_weight_mass = mx.sum(quiet_scores * quiet_valid_rows)
+    contrastive_pos_sim = _reduce_weighted_rows(
+        mx.stack([speech_pos_sim, quiet_pos_sim]),
+        mx.stack([speech_weight_mass, quiet_weight_mass]),
+        eps=eps,
+    )
+    contrastive_neg_sim = _reduce_weighted_rows(
+        mx.stack([speech_neg_sim, quiet_neg_sim]),
+        mx.stack([speech_weight_mass, quiet_weight_mass]),
+        eps=eps,
+    )
+
+    if debug is not None:
+        debug.check("contrastive.mask", mask, debug_ctx)
+        debug.check("contrastive.proxy_frame", proxy_frame, debug_ctx)
+        debug.check("contrastive.speech_scores", speech_scores, debug_ctx)
+        debug.check("contrastive.interference_scores", interference_scores, debug_ctx)
+        debug.check("contrastive.total_loss", total_loss, debug_ctx)
+        debug.check("contrastive.speech_loss", speech_ctr_loss, debug_ctx)
+        debug.check("contrastive.quiet_loss", quiet_ctr_loss, debug_ctx)
+
+    return (
+        total_loss,
+        speech_ctr_loss,
+        quiet_ctr_loss,
+        contrastive_pos_sim,
+        contrastive_neg_sim,
+        mask,
+        proxy_frame,
+        speech_ratio,
+        music_gate,
+        musicness,
+        mod_energy,
+        energy_boost,
+        snr_boost,
+        speech_valid_count,
+        interference_valid_count,
+    )
+
+
+# =============================================================================
+# Contrastive-silence loss (hybrid speech contrastive + direct silence suppression)
+# =============================================================================
+
+
+def _build_silence_freq_weight(
+    n_freqs: int,
+    sr: int,
+    fft_size: int,
+    low_freq_boost: float,
+    high_freq_boost: float,
+) -> mx.array:
+    """Build a per-frequency weight vector for silence suppression.
+
+    Frequencies below 300 Hz are boosted by *low_freq_boost* to penalise
+    mic hum / room tone.  Frequencies above 7 kHz are boosted by
+    *high_freq_boost* to penalise hiss.  Mid-band uses weight 1.0.
+    """
+    bin_hz = sr / fft_size
+    low_bin = int(300.0 / bin_hz)
+    high_bin = int(7000.0 / bin_hz)
+    w = np.ones(n_freqs, dtype=np.float32)
+    w[:low_bin] = low_freq_boost
+    w[high_bin:] = high_freq_boost
+    return mx.array(w)
+
+
+def _compute_contrastive_silence_losses(
+    clean_real: mx.array,
+    clean_imag: mx.array,
+    noisy_real: mx.array,
+    noisy_imag: mx.array,
+    interference_real: mx.array,
+    interference_imag: mx.array,
+    out_real: mx.array,
+    out_imag: mx.array,
+    snr: mx.array,
+    band_mask: mx.array,
+    band_bins: float,
+    mask_sharpness: float,
+    vad_z_threshold: float,
+    vad_z_slope: float,
+    vad_snr_gate_db: float,
+    vad_snr_gate_width: float,
+    proxy_enabled: bool,
+    projector: Any,
+    *,
+    temperature: float = 0.1,
+    speech_frames_per_sample: int = 32,
+    speech_mask_min: float = 0.7,
+    in_batch_negatives: bool = True,
+    silence_frames_per_sample: int = 32,
+    silence_mask_max: float = 0.3,
+    silence_weight: float = 0.8,
+    asymmetric_penalty: float = 2.5,
+    transition_blend_low: float = 0.3,
+    transition_blend_high: float = 0.7,
+    low_freq_boost: float = 1.5,
+    high_freq_boost: float = 1.3,
+    sr: int = 48000,
+    fft_size: int = 960,
+    eps: float = _EPS,
+    debug: NumericDebugger | None = None,
+    debug_ctx: dict[str, Any] | None = None,
+    _precomputed_z: tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array] | None = None,
+) -> tuple[
+    mx.array,  # total_loss
+    mx.array,  # speech_contrastive_loss
+    mx.array,  # silence_suppression_loss
+    mx.array,  # contrastive_pos_sim
+    mx.array,  # contrastive_neg_sim
+    mx.array,  # mask  (B, T, F)
+    mx.array,  # proxy_frame
+    mx.array,  # speech_ratio
+    mx.array,  # music_gate
+    mx.array,  # musicness
+    mx.array,  # mod_energy
+    mx.array,  # energy_boost
+    mx.array,  # snr_boost
+    mx.array,  # speech_valid_count
+    mx.array,  # silence_valid_count
+]:
+    """Hybrid contrastive-silence loss: InfoNCE on speech + direct L1 on silence.
+
+    Speech frames (mask_mean >= speech_mask_min) are trained with the same
+    InfoNCE contrastive objective as *contrastive_awesome*.  Silence frames
+    (mask_mean <= silence_mask_max) are pushed toward the clean reference
+    with a direct L1(log1p_mag) loss plus an asymmetric penalty for any
+    residual energy that exceeds the clean signal.  Transition frames are
+    blended between the two objectives with a soft VAD interpolation.
+    """
+    if projector is None:
+        raise ValueError("contrastive_silence requires an attached ContrastiveFrameProjector")
+
+    clean_real_f32 = clean_real.astype(mx.float32) if clean_real.dtype != mx.float32 else clean_real
+    clean_imag_f32 = clean_imag.astype(mx.float32) if clean_imag.dtype != mx.float32 else clean_imag
+    noisy_real_f32 = noisy_real.astype(mx.float32) if noisy_real.dtype != mx.float32 else noisy_real
+    noisy_imag_f32 = noisy_imag.astype(mx.float32) if noisy_imag.dtype != mx.float32 else noisy_imag
+    interference_real_f32 = (
+        interference_real.astype(mx.float32) if interference_real.dtype != mx.float32 else interference_real
+    )
+    interference_imag_f32 = (
+        interference_imag.astype(mx.float32) if interference_imag.dtype != mx.float32 else interference_imag
+    )
+    out_real_f32 = out_real.astype(mx.float32) if out_real.dtype != mx.float32 else out_real
+    out_imag_f32 = out_imag.astype(mx.float32) if out_imag.dtype != mx.float32 else out_imag
+
+    clean_log = _log1p_mag(clean_real_f32, clean_imag_f32, eps=_MAG_EPS, _assume_float32=True)
+    noise_log = _log1p_mag(interference_real_f32, interference_imag_f32, eps=_MAG_EPS, _assume_float32=True)
+    out_log = _log1p_mag(out_real_f32, out_imag_f32, eps=_MAG_EPS, _assume_float32=True)
+    mask_logits = mx.clip(
+        mask_sharpness * (clean_log - noise_log),
+        -_AWESOME_MASK_LOGIT_CLAMP,
+        _AWESOME_MASK_LOGIT_CLAMP,
+    )
+    mask = mx.stop_gradient(mx.sigmoid(mask_logits))
+
+    (
+        proxy_frame,
+        speech_ratio,
+        music_gate,
+        musicness,
+        mod_energy,
+        energy_boost,
+        snr_boost,
+    ) = _compute_proxy_gates(
+        clean_real_f32,
+        clean_imag_f32,
+        noisy_real_f32,
+        noisy_imag_f32,
+        snr,
+        band_mask,
+        band_bins,
+        vad_z_threshold,
+        vad_z_slope,
+        vad_snr_gate_db,
+        vad_snr_gate_width,
+        proxy_enabled,
+        eps=eps,
+        debug=debug,
+        debug_ctx=debug_ctx,
+        noise_real=interference_real_f32,
+        noise_imag=interference_imag_f32,
+        _assume_float32=True,
+    )
+
+    mask_mean = mx.mean(mask, axis=-1)
+
+    # ---- Speech branch: InfoNCE contrastive (same as contrastive_awesome) ----
+    speech_valid = mx.stop_gradient((mask_mean >= float(speech_mask_min)).astype(mx.float32))
+    speech_scores = mx.stop_gradient(mask_mean * proxy_frame) * speech_valid
+
+    speech_idx, speech_weights, speech_valid_rows = _select_topk_frames(
+        speech_scores,
+        speech_valid,
+        speech_frames_per_sample,
+    )
+
+    out_frames = _build_contrastive_frame_features(out_real_f32, out_imag_f32, eps=eps)
+    clean_frames = _build_contrastive_frame_features(clean_real_f32, clean_imag_f32, eps=eps)
+    noisy_frames = _build_contrastive_frame_features(noisy_real_f32, noisy_imag_f32, eps=eps)
+    interference_frames = _build_contrastive_frame_features(interference_real_f32, interference_imag_f32, eps=eps)
+
+    speech_q = projector(_gather_time_frames(out_frames, speech_idx))
+    speech_p = projector(_gather_time_frames(clean_frames, speech_idx))
+    speech_n_mix = projector(_gather_time_frames(noisy_frames, speech_idx))
+    speech_n_int = projector(_gather_time_frames(interference_frames, speech_idx))
+
+    speech_ctr_loss, speech_pos_sim, speech_neg_sim = _contrastive_info_nce(
+        speech_q,
+        speech_p,
+        speech_n_mix,
+        speech_n_int,
+        speech_weights,
+        speech_valid_rows,
+        temperature,
+        in_batch_negatives=in_batch_negatives,
+    )
+
+    # ---- Silence branch: direct L1 suppression with asymmetric penalty ----
+    silence_valid = mx.stop_gradient((mask_mean <= float(silence_mask_max)).astype(mx.float32))
+    silence_scores = mx.stop_gradient(1.0 - mask_mean) * silence_valid
+
+    silence_idx, silence_weights, silence_valid_rows = _select_topk_frames(
+        silence_scores,
+        silence_valid,
+        silence_frames_per_sample,
+    )
+
+    n_freqs = clean_log.shape[-1]
+    freq_w = _build_silence_freq_weight(n_freqs, sr, fft_size, low_freq_boost, high_freq_boost)
+
+    out_silence = mx.take_along_axis(out_log, mx.expand_dims(silence_idx, -1).astype(mx.int32), axis=1)
+    clean_silence = mx.take_along_axis(clean_log, mx.expand_dims(silence_idx, -1).astype(mx.int32), axis=1)
+
+    diff = out_silence - clean_silence
+    abs_diff = mx.abs(diff)
+    residual_above = mx.where(diff > 0.0, abs_diff * float(asymmetric_penalty), abs_diff)
+    weighted_l1 = residual_above * freq_w
+    per_frame_l1 = mx.mean(weighted_l1, axis=-1)
+
+    silence_loss = _reduce_weighted_rows(
+        per_frame_l1.reshape(-1),
+        (silence_weights * silence_valid_rows).reshape(-1),
+        eps=eps,
+    )
+
+    # ---- Transition blending: soft interpolation in the ambiguous zone ----
+    blend_low = float(transition_blend_low)
+    blend_high = float(transition_blend_high)
+    blend_range = max(blend_high - blend_low, 1e-6)
+    speech_lambda = mx.clip((mask_mean - blend_low) / blend_range, 0.0, 1.0)
+    batch_speech_frac = mx.stop_gradient(mx.mean(speech_lambda))
+    batch_silence_frac = mx.stop_gradient(1.0 - batch_speech_frac)
+
+    total_loss = (
+        batch_speech_frac * speech_ctr_loss + max(float(silence_weight), 0.0) * batch_silence_frac * silence_loss
+    )
+
+    speech_valid_count = mx.sum(speech_valid_rows)
+    silence_valid_count = mx.sum(silence_valid_rows)
+
+    contrastive_pos_sim = speech_pos_sim
+    contrastive_neg_sim = speech_neg_sim
+
+    if debug is not None:
+        debug.check("contrastive_silence.mask", mask, debug_ctx)
+        debug.check("contrastive_silence.proxy_frame", proxy_frame, debug_ctx)
+        debug.check("contrastive_silence.speech_loss", speech_ctr_loss, debug_ctx)
+        debug.check("contrastive_silence.silence_loss", silence_loss, debug_ctx)
+        debug.check("contrastive_silence.total_loss", total_loss, debug_ctx)
+
+    return (
+        total_loss,
+        speech_ctr_loss,
+        silence_loss,
+        contrastive_pos_sim,
+        contrastive_neg_sim,
+        mask,
+        proxy_frame,
+        speech_ratio,
+        music_gate,
+        musicness,
+        mod_energy,
+        energy_boost,
+        snr_boost,
+        speech_valid_count,
+        silence_valid_count,
     )
 
 
@@ -701,7 +1370,7 @@ def _compute_improved_musicness(
         mag = mag.astype(mx.float32)
 
     # Original spectral flatness
-    log_mag = mx.log(mag + eps)
+    log_mag = mx.log(mag + _MAG_EPS)
     mean_log = mx.sum(log_mag * band_mask, axis=-1) / (band_bins + eps)
     geom_mean = mx.exp(mean_log)
     arith_mean = mx.sum(mag * band_mask, axis=-1) / (band_bins + eps)
@@ -771,6 +1440,7 @@ def _compute_pipeline_awesome_losses(
     eps: float = _EPS,
     debug: NumericDebugger | None = None,
     debug_ctx: dict[str, Any] | None = None,
+    _precomputed_z: tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array] | None = None,
 ) -> tuple[
     mx.array,  # total loss
     mx.array,  # speech loss
@@ -812,12 +1482,12 @@ def _compute_pipeline_awesome_losses(
     out_imag_f32 = out_imag.astype(mx.float32) if out_imag.dtype != mx.float32 else out_imag
 
     # Compute log magnitudes using pre-cast FP32 values (no redundant casts in _log1p_mag)
-    clean_log = _log1p_mag(clean_real_f32, clean_imag_f32, eps=eps, _assume_float32=True)
-    out_log = _log1p_mag(out_real_f32, out_imag_f32, eps=eps, _assume_float32=True)
+    clean_log = _log1p_mag(clean_real_f32, clean_imag_f32, eps=_MAG_EPS, _assume_float32=True)
+    out_log = _log1p_mag(out_real_f32, out_imag_f32, eps=_MAG_EPS, _assume_float32=True)
 
     noise_real = noisy_real_f32 - clean_real_f32
     noise_imag = noisy_imag_f32 - clean_imag_f32
-    noise_log = _log1p_mag(noise_real, noise_imag, eps=eps, _assume_float32=True)
+    noise_log = _log1p_mag(noise_real, noise_imag, eps=_MAG_EPS, _assume_float32=True)
 
     # Compute speech/noise dominance mask with floor
     mask_logits = mx.clip(
@@ -837,28 +1507,22 @@ def _compute_pipeline_awesome_losses(
         debug.check("pipeline.raw_mask", raw_mask, debug_ctx)
         debug.check("pipeline.mask", mask, debug_ctx)
 
-    # Reuse pre-cast FP32 values for proxy gates (no duplicate casts)
-    clean_power = clean_real_f32**2 + clean_imag_f32**2
-    # Reuse noise_real/noise_imag computed above (avoids duplicate subtraction)
-    noise_power = noise_real**2 + noise_imag**2
+    if _precomputed_z is not None:
+        _, clean_band, log_clean, z_ref_raw, z_ref, p_ref = _precomputed_z
+    else:
+        clean_band, log_clean = band_energy(clean_real_f32, clean_imag_f32, band_mask, band_bins, eps)
+        mu = mx.mean(log_clean, axis=1, keepdims=True)
+        variance = mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True)
+        sigma = mx.sqrt(mx.maximum(variance, _MIN_VARIANCE) + eps)
+        z_ref_raw = (log_clean - mu) / (sigma + eps)
+        z_ref = mx.clip(z_ref_raw, -_VAD_LOGIT_CLAMP, _VAD_LOGIT_CLAMP)
+        z_slope = max(vad_z_slope, 1e-3)
+        p_ref = mx.sigmoid((z_ref - vad_z_threshold) / z_slope)
 
-    clean_band = mx.sum(clean_power * band_mask, axis=-1) / (band_bins + eps)
+    # Noise still needs the standard path (different inputs, only used for ratio)
+    noise_power = noise_real**2 + noise_imag**2
     noise_band = mx.sum(noise_power * band_mask, axis=-1) / (band_bins + eps)
     speech_ratio = clean_band / (clean_band + noise_band + eps)
-
-    # Z-scored log energy for VAD proxy
-    # Edge case handling: if variance is near-zero (silence), use neutral z-scores
-    log_clean = mx.log10(clean_band + eps)
-    mu = mx.mean(log_clean, axis=1, keepdims=True)
-    variance = mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True)
-    # Use a minimum variance threshold to avoid division instability on silence
-    sigma = mx.sqrt(mx.maximum(variance, _MIN_VARIANCE) + eps)
-    # When variance is too low, z-scores become unreliable; clamp them
-    z_ref_raw = (log_clean - mu) / (sigma + eps)
-    z_ref = mx.clip(z_ref_raw, -_VAD_LOGIT_CLAMP, _VAD_LOGIT_CLAMP)
-
-    z_slope = max(vad_z_slope, 1e-3)
-    p_ref = mx.sigmoid((z_ref - vad_z_threshold) / z_slope)
 
     # Modulation proxy
     # Edge case: with single frame, no modulation can be computed
@@ -876,7 +1540,7 @@ def _compute_pipeline_awesome_losses(
     snr_boost = mx.sigmoid((vad_snr_gate_db - snr[:, None]) / snr_scale)
 
     # Improved musicness detection
-    noisy_mag = mx.sqrt(noisy_real_f32**2 + noisy_imag_f32**2 + eps)
+    noisy_mag = mx.sqrt(noisy_real_f32**2 + noisy_imag_f32**2 + _MAG_EPS)
     musicness, vocal_gate, instrument_gate = _compute_improved_musicness(
         noisy_mag,
         band_mask,

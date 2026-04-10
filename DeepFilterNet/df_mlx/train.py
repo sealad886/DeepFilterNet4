@@ -25,8 +25,10 @@ import mlx.nn as nn
 import mlx.optimizers as optim
 import numpy as np
 
+from .checkpoint import _filter_checkpoint_weights_for_model
 from .config import LossConfig, TrainConfig
 from .loss import SpectralLoss
+from .metal_kernels import _EPS_F, complex_mag
 from .model import DfNet4, count_parameters
 
 # ============================================================================
@@ -373,8 +375,8 @@ def spectral_loss(
         target_imag = target_imag.astype(mx.float32)
 
     # Magnitude loss
-    pred_mag = mx.sqrt(pred_real**2 + pred_imag**2 + 1e-8)
-    target_mag = mx.sqrt(target_real**2 + target_imag**2 + 1e-8)
+    pred_mag = complex_mag(pred_real, pred_imag, eps=_EPS_F)
+    target_mag = complex_mag(target_real, target_imag, eps=_EPS_F)
     mag_loss = mx.mean(mx.abs(pred_mag - target_mag))
 
     # Complex loss
@@ -610,7 +612,8 @@ def load_checkpoint(
 
     # Load model weights - mx.load returns Dict[str, mx.array] for safetensors
     weights: Dict[str, mx.array] = mx.load(str(path))  # type: ignore[assignment]
-    model.load_weights(list(weights.items()))
+    weights, _ = _filter_checkpoint_weights_for_model(model, weights)
+    model.load_weights(list(weights.items()), strict=strict)
 
     # Load training state
     state_path = path.with_suffix(".json")

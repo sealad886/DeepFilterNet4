@@ -7,12 +7,14 @@ from pathlib import Path
 
 import pytest
 
+from df_mlx.dynamic_dataset import create_dataset_from_lists
 from df_mlx.run_config import (
     RunConfig,
     apply_run_config_dict,
     generate_run_config_example,
     load_run_config,
     set_by_path,
+    validate_run_config,
 )
 from df_mlx.training_setup import setup_dataset
 
@@ -76,6 +78,67 @@ def test_run_config_accepts_pipeline_awesome_dynamic_loss():
     assert cfg.loss.dynamic_loss == "pipeline_awesome"
 
 
+def test_run_config_accepts_contrastive_awesome_dynamic_loss():
+    cfg = RunConfig()
+    apply_run_config_dict(cfg, {"loss": {"dynamic_loss": "contrastive_awesome"}})
+    assert cfg.loss.dynamic_loss == "contrastive_awesome"
+
+
+def test_run_config_accepts_contrastive_loss_block():
+    cfg = RunConfig()
+    apply_run_config_dict(
+        cfg,
+        {
+            "loss": {
+                "dynamic_loss": "contrastive_awesome",
+                "contrastive": {
+                    "loss_weight": 0.2,
+                    "warmup_steps": 1234,
+                    "temperature": 0.2,
+                    "embedding_dim": 96,
+                    "hidden_dim": 192,
+                    "speech_frames_per_sample": 12,
+                    "interference_frames_per_sample": 8,
+                    "speech_mask_min": 0.75,
+                    "interference_mask_max": 0.2,
+                    "quiet_weight": 0.4,
+                    "in_batch_negatives": False,
+                },
+            }
+        },
+    )
+
+    assert cfg.loss.dynamic_loss == "contrastive_awesome"
+    assert cfg.loss.contrastive.loss_weight == 0.2
+    assert cfg.loss.contrastive.warmup_steps == 1234
+    assert cfg.loss.contrastive.temperature == 0.2
+    assert cfg.loss.contrastive.embedding_dim == 96
+    assert cfg.loss.contrastive.hidden_dim == 192
+    assert cfg.loss.contrastive.speech_frames_per_sample == 12
+    assert cfg.loss.contrastive.interference_frames_per_sample == 8
+    assert cfg.loss.contrastive.speech_mask_min == 0.75
+    assert cfg.loss.contrastive.interference_mask_max == 0.2
+    assert cfg.loss.contrastive.quiet_weight == 0.4
+    assert cfg.loss.contrastive.in_batch_negatives is False
+
+
+def test_run_config_rejects_invalid_contrastive_mask_thresholds():
+    cfg = RunConfig()
+    apply_run_config_dict(
+        cfg,
+        {
+            "dataset": {"speech_list": "speech.txt"},
+            "loss": {
+                "dynamic_loss": "contrastive_awesome",
+                "contrastive": {"speech_mask_min": 0.3, "interference_mask_max": 0.4},
+            },
+        },
+    )
+
+    with pytest.raises(ValueError, match="interference_mask_max must be <= .*speech_mask_min"):
+        validate_run_config(cfg)
+
+
 def test_run_config_accepts_pipeline_stages_table_list():
     cfg = RunConfig()
     apply_run_config_dict(
@@ -133,10 +196,94 @@ def test_run_config_example_includes_speech_boost_descriptions():
     assert "speech_boost_threshold = 0.5" in text
 
 
+def test_run_config_example_includes_contrastive_section():
+    text = generate_run_config_example()
+    assert 'dynamic_loss = "baseline"' in text
+    assert "[loss.contrastive]" in text
+    assert "loss_weight = 0.15" in text
+    assert "temperature = 0.1" in text
+
+
 def test_run_profiles_do_not_reference_removed_cleaned_datastore() -> None:
     profiles_dir = Path(__file__).resolve().parents[1] / "df_mlx" / "configs" / "run_profiles"
     stale_profiles = [path.name for path in profiles_dir.glob("*.toml") if "mlx_datastore_cleaned" in path.read_text()]
     assert stale_profiles == []
+
+
+def test_contrastive_run_profile_loads() -> None:
+    profiles_dir = Path(__file__).resolve().parents[1] / "df_mlx" / "configs" / "run_profiles"
+    profile_path = profiles_dir / "contrastive_awesome_experimental.toml"
+    cfg = load_run_config(profile_path)
+    assert cfg.loss.dynamic_loss == "contrastive_awesome"
+    assert cfg.loss.contrastive.loss_weight == 0.15
+
+
+def test_contrastive_dfn3_full_vadlite_profile_loads() -> None:
+    profiles_dir = Path(__file__).resolve().parents[1] / "df_mlx" / "configs" / "run_profiles"
+    profile_path = profiles_dir / "contrastive_awesome_dfn3_gan_vad_speech_full_vadlite.toml"
+    cfg = load_run_config(profile_path)
+
+    assert cfg.loss.dynamic_loss == "contrastive_awesome"
+    assert cfg.training.batch_size == 28
+    assert cfg.vad.speech_loss_weight == 0.4
+    assert cfg.vad.train.prob == 1.0
+    assert cfg.gan.enabled is True
+    assert cfg.loss.mrstft.factor == 0.0
+
+
+def test_clear_speech_profile_loads() -> None:
+    profiles_dir = Path(__file__).resolve().parents[1] / "df_mlx" / "configs" / "run_profiles"
+    profile_path = profiles_dir / "pipeline_awesome_gan_curriculum_clear_speech.toml"
+    cfg = load_run_config(profile_path)
+
+    assert cfg.loss.dynamic_loss == "pipeline_awesome"
+    assert cfg.dataset.p_background_music == pytest.approx(0.30)
+    assert cfg.dataset.background_music_gain_range == (0.0, 16.0)
+    assert cfg.training.music_start_epoch == 24
+    assert cfg.training.music_ramp_epochs == 16
+    assert cfg.gan.start_epoch == 80
+    assert cfg.loss.awesome.proxy_enabled is True
+    assert cfg.loss.awesome.mask_sharpness == pytest.approx(5.5)
+    assert cfg.vad.speech_loss_weight == pytest.approx(0.35)
+    assert cfg.vad.snr_gate_db == pytest.approx(-14.0)
+    assert cfg.enhance.speech_boost_db == pytest.approx(4.5)
+    assert cfg.enhance.speech_boost_threshold == pytest.approx(0.35)
+
+
+def test_clear_speech_original_profile_loads() -> None:
+    profiles_dir = Path(__file__).resolve().parents[1] / "df_mlx" / "configs" / "run_profiles"
+    profile_path = profiles_dir / "pipeline_awesome_gan_curriculum_clear_speech_original.toml"
+    cfg = load_run_config(profile_path)
+
+    assert cfg.loss.dynamic_loss == "pipeline_awesome"
+    assert cfg.dataset.p_background_music == pytest.approx(0.30)
+    assert cfg.dataset.background_music_gain_range == (0.0, 16.0)
+    assert cfg.training.music_start_epoch == 30
+    assert cfg.training.music_ramp_epochs == 10
+    assert cfg.loss.awesome.proxy_enabled is False
+    assert cfg.loss.awesome.mask_sharpness == pytest.approx(5.0)
+    assert cfg.vad.speech_loss_weight == pytest.approx(0.30)
+    assert cfg.vad.snr_gate_db == pytest.approx(-12.0)
+    assert cfg.enhance.speech_boost_db == pytest.approx(4.0)
+    assert cfg.enhance.speech_boost_threshold == pytest.approx(0.4)
+
+
+def test_clear_speech_conservative_profile_loads() -> None:
+    profiles_dir = Path(__file__).resolve().parents[1] / "df_mlx" / "configs" / "run_profiles"
+    profile_path = profiles_dir / "pipeline_awesome_gan_curriculum_clear_speech_conservative.toml"
+    cfg = load_run_config(profile_path)
+
+    assert cfg.loss.dynamic_loss == "pipeline_awesome"
+    assert cfg.dataset.p_background_music == pytest.approx(0.30)
+    assert cfg.dataset.background_music_gain_range == (0.0, 16.0)
+    assert cfg.training.music_start_epoch == 28
+    assert cfg.training.music_ramp_epochs == 14
+    assert cfg.loss.awesome.proxy_enabled is True
+    assert cfg.loss.awesome.mask_sharpness == pytest.approx(5.25)
+    assert cfg.vad.speech_loss_weight == pytest.approx(0.32)
+    assert cfg.vad.snr_gate_db == pytest.approx(-13.0)
+    assert cfg.enhance.speech_boost_db == pytest.approx(4.25)
+    assert cfg.enhance.speech_boost_threshold == pytest.approx(0.38)
 
 
 def test_setup_dataset_falls_back_from_removed_cleaned_cache_dir(tmp_path: Path, capsys) -> None:
@@ -159,3 +306,58 @@ def test_setup_dataset_missing_cache_lists_checked_candidates(tmp_path: Path) ->
     message = str(exc_info.value)
     assert "mlx_datastore_cleaned/config.json" in message
     assert "mlx_datastore/config.json" in message
+
+
+def test_setup_dataset_auto_selects_prepared_or_curated_background_music_list(tmp_path: Path, capsys) -> None:
+    lists_dir = tmp_path / "lists"
+    lists_dir.mkdir()
+
+    speech_list = lists_dir / "clean_all.txt"
+    noise_list = lists_dir / "noise_all.txt"
+    legacy_music_list = lists_dir / "background_music.txt"
+    expanded_music_list = lists_dir / "background_music_expanded.txt"
+    prepared_music_list = lists_dir / "background_music.prepared_merged.txt"
+    rir_list = lists_dir / "rir_all.txt"
+
+    speech_list.write_text("/tmp/speech_a.wav\n", encoding="utf-8")
+    noise_list.write_text("/tmp/noise_a.wav\n", encoding="utf-8")
+    legacy_music_list.write_text("/tmp/music_legacy.wav\n", encoding="utf-8")
+    expanded_music_list.write_text("/tmp/music_expanded.wav\n", encoding="utf-8")
+    prepared_music_list.write_text("/tmp/music_prepared.wav\n", encoding="utf-8")
+    rir_list.write_text("/tmp/rir_a.wav\n", encoding="utf-8")
+
+    result = setup_dataset(
+        speech_list=str(speech_list),
+        noise_list=str(noise_list),
+        use_mlx_data=False,
+    )
+
+    assert result.config.noise_files == ["/tmp/noise_a.wav"]
+    assert result.config.music_files == ["/tmp/music_prepared.wav"]
+    assert result.config.rir_files == ["/tmp/rir_a.wav"]
+    output = capsys.readouterr().out
+    assert f"Auto-selected music list: {prepared_music_list}" in output
+    assert f"Auto-selected rir list: {rir_list}" in output
+
+
+def test_create_dataset_from_lists_prefers_curated_music_when_present(tmp_path: Path) -> None:
+    lists_dir = tmp_path / "lists"
+    lists_dir.mkdir()
+
+    speech_list = lists_dir / "clean_all.txt"
+    noise_list = lists_dir / "noise_all.txt"
+    legacy_music_list = lists_dir / "background_music.txt"
+    expanded_music_list = lists_dir / "background_music_expanded.txt"
+
+    speech_list.write_text("/tmp/speech_a.wav\n", encoding="utf-8")
+    noise_list.write_text("/tmp/noise_a.wav\n", encoding="utf-8")
+    legacy_music_list.write_text("/tmp/music_legacy.wav\n", encoding="utf-8")
+    expanded_music_list.write_text("/tmp/music_expanded.wav\n", encoding="utf-8")
+
+    dataset = create_dataset_from_lists(
+        speech_list=str(speech_list),
+        noise_list=str(noise_list),
+    )
+
+    assert dataset.config.noise_files == ["/tmp/noise_a.wav"]
+    assert dataset.config.music_files == ["/tmp/music_legacy.wav"]

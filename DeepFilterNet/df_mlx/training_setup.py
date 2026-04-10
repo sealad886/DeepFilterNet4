@@ -27,6 +27,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from df_mlx.file_lists import resolve_dataset_file_lists
+
 
 def _sync_model_config_with_dataset(model_cfg: Any, dataset_cfg: Any) -> None:
     """Align MLX model config with dataset audio parameters."""
@@ -80,6 +82,7 @@ def setup_dataset(
     config_path: str | None = None,
     speech_list: str | None = None,
     noise_list: str | None = None,
+    music_list: str | None = None,
     rir_list: str | None = None,
     p_reverb: float = 0.0,
     p_clipping: float = 0.0,
@@ -92,8 +95,10 @@ def setup_dataset(
     p_extreme_snr: float | None = None,
     p_very_low_snr: float | None = None,
     p_interfer_speech: float | None = None,
+    p_background_music: float | None = None,
     speech_gain_range: tuple[float, float] | None = None,
     noise_gain_range: tuple[float, float] | None = None,
+    background_music_gain_range: tuple[float, float] | None = None,
     # Debug mode params
     debug_numerics: bool = False,
     max_train_batches: int | None = None,
@@ -118,7 +123,10 @@ def setup_dataset(
 
             from huggingface_hub import HfFileSystem
 
-            from df_mlx.hf_paths import hf_dataset_fsspec_path, normalize_hf_dataset_cache_dir
+            from df_mlx.hf_paths import (
+                hf_dataset_fsspec_path,
+                normalize_hf_dataset_cache_dir,
+            )
 
             fs = HfFileSystem()
             normalized_cache_dir = normalize_hf_dataset_cache_dir(str(cache_dir))
@@ -129,9 +137,8 @@ def setup_dataset(
                     data = json.load(f)
                 if "cache_dir" in data:
                     data["cache_dir"] = data["cache_dir"]
-                config = DatasetConfig(
-                    **{k: v for k, v in data.items() if hasattr(DatasetConfig, k) or k == "cache_dir"}
-                )
+                dataset_field_names = set(DatasetConfig.__dataclass_fields__.keys()) | {"cache_dir"}
+                config = DatasetConfig(**{k: v for k, v in data.items() if k in dataset_field_names})
                 config.cache_dir = normalized_cache_dir
                 print(f"Loaded config from HF cache: {normalized_cache_dir}")
             else:
@@ -155,13 +162,29 @@ def setup_dataset(
         if not speech_list:
             raise ValueError("Either --cache-dir, --config, or --speech-list required")
 
+        resolved_lists = resolve_dataset_file_lists(
+            speech_list=speech_list,
+            noise_list=noise_list,
+            music_list=music_list,
+            rir_list=rir_list,
+        )
+        speech_list = resolved_lists.speech_list
+        noise_list = resolved_lists.noise_list
+        music_list = resolved_lists.music_list
+        rir_list = resolved_lists.rir_list
+        for key, path in resolved_lists.auto_selected.items():
+            label = key.removesuffix("_list").replace("_", " ")
+            print(f"Auto-selected {label} list: {path}")
+
         speech_files = read_file_list(speech_list)
         noise_files = read_file_list(noise_list) if noise_list else []
+        music_files = read_file_list(music_list) if music_list else []
         rir_files = read_file_list(rir_list) if rir_list else []
 
         config = DatasetConfig(
             speech_files=speech_files,
             noise_files=noise_files,
+            music_files=music_files,
             rir_files=rir_files,
             p_reverb=p_reverb,
             p_clipping=p_clipping,
@@ -188,10 +211,14 @@ def setup_dataset(
         config.p_very_low_snr = p_very_low_snr
     if p_interfer_speech is not None:
         config.p_interfer_speech = p_interfer_speech
+    if p_background_music is not None:
+        config.p_background_music = p_background_music
     if speech_gain_range is not None:
         config.speech_gain_range = speech_gain_range
     if noise_gain_range is not None:
         config.noise_gain_range = noise_gain_range
+    if background_music_gain_range is not None:
+        config.background_music_gain_range = background_music_gain_range
 
     # Numeric debug mode overrides (deterministic, short runs)
     if debug_numerics:
@@ -254,6 +281,8 @@ def print_training_config(
     awesome_loss_weight: float = 0.0,
     awesome_mask_sharpness: float = 1.0,
     awesome_warmup_steps: int = 0,
+    contrastive_cfg: Any | None = None,
+    contrastive_silence_cfg: Any | None = None,
     vad_proxy_enabled: bool = False,
     gan_enabled: bool = False,
     gan_adv_weight: float = 0.0,
@@ -295,11 +324,14 @@ def print_training_config(
     use_mrstft_loss = mrstft_cfg is not None and mrstft_cfg.factor > 0
     use_awesome_loss = dynamic_loss == "awesome"
     use_pipeline_awesome_loss = dynamic_loss == "pipeline_awesome"
+    use_contrastive_awesome_loss = dynamic_loss == "contrastive_awesome"
+    use_contrastive_silence_loss = dynamic_loss == "contrastive_silence"
     vad_eval_enabled = vad_eval_mode != "off"
 
     # Print file counts after dataset init (so cache files are included)
     print(f"Speech files:   {len(config.speech_files):,}")
     print(f"Noise files:    {len(config.noise_files):,}")
+    print(f"Music files:    {len(getattr(config, 'music_files', [])):,}")
     print(f"RIR files:      {len(config.rir_files):,}")
     if config.p_reverb > 0 and not config.rir_files:
         print("  WARNING: p_reverb > 0 but no RIR files loaded. Reverb will not be applied.")
@@ -315,6 +347,8 @@ def print_training_config(
     print(f"SNR extreme:    {config.snr_range_extreme} dB (p={config.p_extreme_snr})")
     print(f"Speech gain:    {config.speech_gain_range} dB")
     print(f"Noise gain:     {config.noise_gain_range} dB")
+    print(f"Music gain:     {getattr(config, 'background_music_gain_range', None)} dB")
+    print(f"P(bg music):    {getattr(config, 'p_background_music', 0.0)}")
     print(f"Dynamic loss:   {dynamic_loss}")
     if use_mrstft_loss and mrstft_cfg is not None:
         hop_sizes_display = mrstft_cfg.hop_sizes if mrstft_cfg.hop_sizes is not None else "auto"
@@ -328,6 +362,29 @@ def print_training_config(
         print(
             f"  Awesome loss: weight={awesome_loss_weight}, mask_sharpness={awesome_mask_sharpness}, "
             f"warmup_steps={awesome_warmup_steps}, proxy={'on' if vad_proxy_enabled else 'off'}"
+        )
+    if use_contrastive_awesome_loss and contrastive_cfg is not None:
+        print(
+            "  Contrastive: "
+            f"weight={contrastive_cfg.loss_weight}, warmup_steps={contrastive_cfg.warmup_steps}, "
+            f"tau={contrastive_cfg.temperature}, embed={contrastive_cfg.embedding_dim}, "
+            f"hidden={contrastive_cfg.hidden_dim}, "
+            f"speech_k={contrastive_cfg.speech_frames_per_sample}, "
+            f"interference_k={contrastive_cfg.interference_frames_per_sample}, "
+            f"quiet_w={contrastive_cfg.quiet_weight}, "
+            f"in_batch_neg={'on' if contrastive_cfg.in_batch_negatives else 'off'}"
+        )
+    if use_contrastive_silence_loss and contrastive_silence_cfg is not None:
+        print(
+            "  Contrastive silence: "
+            f"silence_k={contrastive_silence_cfg.silence_frames_per_sample}, "
+            f"silence_mask_max={contrastive_silence_cfg.silence_mask_max}, "
+            f"silence_w={contrastive_silence_cfg.silence_weight}, "
+            f"asym={contrastive_silence_cfg.asymmetric_penalty}, "
+            f"blend=[{contrastive_silence_cfg.transition_blend_low}, "
+            f"{contrastive_silence_cfg.transition_blend_high}], "
+            f"lo_freq={contrastive_silence_cfg.low_freq_boost}, "
+            f"hi_freq={contrastive_silence_cfg.high_freq_boost}"
         )
     if gan_enabled:
         print(
@@ -425,6 +482,8 @@ def print_epoch_summary(
     use_vad_loss: bool,
     use_awesome_loss: bool,
     use_pipeline_awesome_loss: bool,
+    use_contrastive_awesome_loss: bool,
+    use_contrastive_silence_loss: bool = False,
     use_mrstft_loss: bool,
     use_vad_train_reg: bool,
     gan_enabled: bool,
@@ -449,6 +508,7 @@ def print_epoch_summary(
     printed when *debug_numerics* is ``True`` and the relevant counters
     are positive.
     """
+    _any_contrastive = use_contrastive_awesome_loss or use_contrastive_silence_loss
     epoch_throughput = samples_processed / epoch_time if epoch_time > 0 else 0
 
     improvement_marker = "★" if avg_valid_loss <= best_valid_loss else ""
@@ -457,6 +517,8 @@ def print_epoch_summary(
         use_vad_loss
         or use_awesome_loss
         or use_pipeline_awesome_loss
+        or use_contrastive_awesome_loss
+        or use_contrastive_silence_loss
         or use_vad_train_reg
         or use_mrstft_loss
         or gan_enabled
@@ -485,6 +547,16 @@ def print_epoch_summary(
                     f"AwSm: {epoch_avgs['awesome_smooth']:.4f}",
                 ]
             )
+        if _any_contrastive:
+            loss_parts.extend(
+                [
+                    f"Ctr: {epoch_avgs['contrastive_loss']:.4f}",
+                    f"CtrS: {epoch_avgs['contrastive_speech']:.4f}",
+                    f"CtrQ: {epoch_avgs['contrastive_quiet']:.4f}",
+                    f"PosSim: {epoch_avgs['contrastive_pos_sim']:.3f}",
+                    f"NegSim: {epoch_avgs['contrastive_neg_sim']:.3f}",
+                ]
+            )
         if use_pipeline_awesome_loss:
             loss_parts.extend(
                 [
@@ -510,7 +582,7 @@ def print_epoch_summary(
             f"  VAD stats: p_ref={epoch_avgs['p_ref']:.2f} | "
             f"p_out={epoch_avgs['p_out']:.2f} | gate={epoch_avgs['gate']:.0f}%"
         )
-    if (use_awesome_loss or use_pipeline_awesome_loss) and verbose:
+    if (use_awesome_loss or use_pipeline_awesome_loss or _any_contrastive) and verbose:
         print(
             "  Awesome stats: "
             f"mask={epoch_avgs['mask_mean']:.2f} "
@@ -524,7 +596,7 @@ def print_epoch_summary(
         )
     if debug_numerics:
         parts: list[str] = []
-        if (use_awesome_loss or use_pipeline_awesome_loss) and num_debug_logs > 0:
+        if (use_awesome_loss or use_pipeline_awesome_loss or _any_contrastive) and num_debug_logs > 0:
             avg_mask_clip = train_mask_clip_rate / num_debug_logs
             avg_eps_clean = train_eps_clean_rate / num_debug_logs
             avg_eps_noise = train_eps_noise_rate / num_debug_logs
@@ -603,11 +675,14 @@ class AuxLossSetupResult:
 
     use_awesome_loss: bool
     use_pipeline_awesome_loss: bool
+    use_contrastive_awesome_loss: bool
+    use_contrastive_silence_loss: bool
     use_vad_loss: bool
     use_vad_train_reg: bool
     use_mrstft_loss: bool
     pipeline_stage_defs: list[dict[str, Any]]
     base_awesome_loss_weight: float
+    base_contrastive_loss_weight: float
     base_vad_loss_weight: float
     base_vad_speech_loss_weight: float
     stage_max_vad_weight: float
@@ -639,6 +714,7 @@ def setup_auxiliary_losses(
     dynamic_loss: str,
     pipeline_stages: list[dict[str, Any]] | None,
     awesome_loss_weight: float,
+    contrastive_loss_weight: float,
     vad_loss_weight: float,
     vad_speech_loss_weight: float,
     mrstft_config: Any | None,
@@ -676,9 +752,12 @@ def setup_auxiliary_losses(
 
     use_awesome_loss = dynamic_loss == "awesome"
     use_pipeline_awesome_loss = dynamic_loss == "pipeline_awesome"
+    use_contrastive_awesome_loss = dynamic_loss == "contrastive_awesome"
+    use_contrastive_silence_loss = dynamic_loss == "contrastive_silence"
     pipeline_stage_defs = sorted((pipeline_stages or []), key=lambda s: int(s.get("start_epoch", 0)))
 
     base_awesome_loss_weight = awesome_loss_weight
+    base_contrastive_loss_weight = contrastive_loss_weight
     base_vad_loss_weight = vad_loss_weight
     base_vad_speech_loss_weight = vad_speech_loss_weight
     stage_max_vad_weight = max(
@@ -757,7 +836,16 @@ def setup_auxiliary_losses(
         gan_istft = partial(istft)
 
     if vad_eval_mode == "auto":
-        vad_eval_mode = "proxy" if (use_awesome_loss or use_pipeline_awesome_loss) else "off"
+        vad_eval_mode = (
+            "proxy"
+            if (
+                use_awesome_loss
+                or use_pipeline_awesome_loss
+                or use_contrastive_awesome_loss
+                or use_contrastive_silence_loss
+            )
+            else "off"
+        )
     vad_eval_enabled = vad_eval_mode != "off"
     silero_vad = None
     if vad_eval_mode == "silero":
@@ -781,7 +869,13 @@ def setup_auxiliary_losses(
 
     scalar_zero = mx.array(0.0)
     need_band_mask = (
-        use_vad_loss or use_awesome_loss or use_pipeline_awesome_loss or vad_eval_enabled or use_vad_train_reg
+        use_vad_loss
+        or use_awesome_loss
+        or use_pipeline_awesome_loss
+        or use_contrastive_awesome_loss
+        or use_contrastive_silence_loss
+        or vad_eval_enabled
+        or use_vad_train_reg
     )
     if need_band_mask:
         n_freqs = config.fft_size // 2 + 1
@@ -798,11 +892,14 @@ def setup_auxiliary_losses(
     return AuxLossSetupResult(
         use_awesome_loss=use_awesome_loss,
         use_pipeline_awesome_loss=use_pipeline_awesome_loss,
+        use_contrastive_awesome_loss=use_contrastive_awesome_loss,
+        use_contrastive_silence_loss=use_contrastive_silence_loss,
         use_vad_loss=use_vad_loss,
         use_vad_train_reg=use_vad_train_reg,
         use_mrstft_loss=use_mrstft_loss,
         pipeline_stage_defs=pipeline_stage_defs,
         base_awesome_loss_weight=base_awesome_loss_weight,
+        base_contrastive_loss_weight=base_contrastive_loss_weight,
         base_vad_loss_weight=base_vad_loss_weight,
         base_vad_speech_loss_weight=base_vad_speech_loss_weight,
         stage_max_vad_weight=stage_max_vad_weight,
@@ -848,6 +945,7 @@ def finalize_training(
     active_stage_index: int,
     active_stage_name: str,
     tqdm_setup_panel: Any | None,
+    epoch_pbar: Any | None,
     run_validation_fn: Any,  # Callable[[], float]
 ) -> None:
     """Run final validation, save final/best checkpoints, and print summary."""
@@ -929,6 +1027,8 @@ def finalize_training(
 
     if tqdm_setup_panel is not None:
         tqdm_setup_panel.close()
+    if epoch_pbar is not None:
+        epoch_pbar.close()
 
 
 @dataclass

@@ -48,6 +48,78 @@ class TestTrainingSessionSetup:
         assert session._ready
 
 
+class TestTrainingSessionSetupInit:
+    """TrainingSession.setup() creates model, optimizer, and hw_config."""
+
+    def test_setup_creates_model(self):
+        from df_mlx.training_session import TrainingSession
+
+        session = TrainingSession(backbone_type="mamba", model_variant="full")
+        session.setup()
+        assert session.model is not None
+        assert hasattr(session.model, "parameters")
+
+    def test_setup_creates_optimizer(self):
+        from df_mlx.training_session import TrainingSession
+
+        session = TrainingSession(learning_rate=3e-4, weight_decay=0.01)
+        session.setup()
+        assert session.optimizer is not None
+
+    def test_setup_detects_hardware(self):
+        from df_mlx.training_session import TrainingSession
+
+        session = TrainingSession()
+        session.setup()
+        assert session.hw_config is not None
+
+    def test_setup_counts_parameters(self):
+        from df_mlx.training_session import TrainingSession
+
+        session = TrainingSession(backbone_type="mamba", model_variant="full")
+        session.setup()
+        assert session.param_count > 0
+
+    def test_setup_stores_model_config(self):
+        from df_mlx.training_session import TrainingSession
+
+        session = TrainingSession(backbone_type="gru")
+        session.setup()
+        assert session.model_config is not None
+        assert session.model_config.backbone.backbone_type == "gru"
+
+    def test_setup_lite_variant(self):
+        from df_mlx.training_session import TrainingSession
+
+        full_session = TrainingSession(model_variant="full")
+        full_session.setup()
+
+        lite_session = TrainingSession(model_variant="lite")
+        lite_session.setup()
+
+        assert lite_session.param_count < full_session.param_count
+
+    def test_setup_contrastive_awesome_adds_projector(self):
+        from df_mlx.training_session import TrainingSession
+
+        base_session = TrainingSession(dynamic_loss="baseline")
+        base_session.setup()
+
+        contrastive_session = TrainingSession(dynamic_loss="contrastive_awesome")
+        contrastive_session.setup()
+
+        assert contrastive_session.param_count > base_session.param_count
+
+    def test_setup_idempotent(self):
+        from df_mlx.training_session import TrainingSession
+
+        session = TrainingSession()
+        session.setup()
+        model_id = id(session.model)
+        session.setup()
+        assert id(session.model) != model_id  # re-creates each time
+
+
 class TestTrainingSessionFromRunConfig:
     """TrainingSession.from_run_config extracts kwargs from RunConfig."""
 
