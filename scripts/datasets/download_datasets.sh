@@ -914,10 +914,11 @@ cache_lookup() {
   if [[ ! -f "${VERIFY_CACHE_FILE}" ]]; then
     return 1
   fi
-  # Match on path and size only; mtime is stored but not used for lookup
-  # so that touching a file doesn't invalidate the cache
-  awk -F'\t' -v p="${path}" -v s="${size}" \
-    '$1==p && $2==s {found=1} END {exit(found?0:1)}' \
+  # Match on path, size, AND mtime to detect re-downloads with different content
+  local mtime
+  mtime="$(stat_mtime "${path}")"
+  awk -F'\t' -v p="${path}" -v s="${size}" -v m="${mtime}" \
+    '$1==p && $2==s && $3==m {found=1} END {exit(found?0:1)}' \
     "${VERIFY_CACHE_FILE}" >/dev/null 2>&1
 }
 
@@ -946,15 +947,10 @@ should_download() {
   if [[ "${flag}" == "0" ]]; then
     return 1
   fi
-  # Default by profile
-  case "${PROFILE}" in
-    production)
-      return 0
-      ;;
-    apple|prototype|*)
-      return 0
-      ;;
-  esac
+  # Default by profile (unreachable — profile defaults set all flags at
+  # lines 1591-1620 — but return 1 as safe catch-all in case new datasets
+  # are added without a profile default)
+  return 1
 }
 
 init_parallel_downloads() {
@@ -969,7 +965,8 @@ init_parallel_downloads() {
     return 0
   fi
   mkdir -p "${DOWNLOAD_DIR}"
-  : > "${ARIA2_INPUT_FILE}"
+  rm -f "${ARIA2_INPUT_FILE}"
+  (umask 077 && : > "${ARIA2_INPUT_FILE}")
   : > "${EXTRACT_QUEUE_FILE}"
   : > "${FSD50K_MERGE_QUEUE_FILE}"
   ARIA2_PARALLEL_ACTIVE=1
@@ -1195,10 +1192,13 @@ extract_archive() {
       python3 -c "
 import zipfile, sys, os
 z = zipfile.ZipFile(sys.argv[1])
-dest = sys.argv[2]
+dest = os.path.realpath(sys.argv[2])
 for info in z.infolist():
-    out = os.path.join(dest, info.filename)
-    if not os.path.exists(out):
+    target = os.path.realpath(os.path.join(dest, info.filename))
+    if not target.startswith(dest + os.sep) and target != dest:
+        print(f'SECURITY: zip path traversal blocked: {info.filename}', file=sys.stderr)
+        sys.exit(1)
+    if not os.path.exists(target):
         z.extract(info, dest)
 " "${archive}" "${stage_dir}"
       ;;
@@ -1441,7 +1441,10 @@ process_extract_queue() {
       echo "[warn] archive failed verification, retrying: ${archive}" >&2
       rm -f "${archive}"
       download_file "${url}" "${archive}"
-      verify_archive "${archive}"
+      if ! verify_archive "${archive}"; then
+        echo "[error] archive still fails verification after re-download, skipping: ${archive}" >&2
+        continue
+      fi
     fi
     extract_archive "${archive}" "${dest}"
     if [[ "${KEEP_ARCHIVES}" == "0" ]]; then
@@ -1481,7 +1484,10 @@ download_and_extract() {
         echo "[warn] archive failed verification, retrying: ${filename}" >&2
         rm -f "${DOWNLOAD_DIR:?}/${filename}"
         download_file "${url}" "${DOWNLOAD_DIR}/${filename}" "${force_curl}"
-        verify_archive "${DOWNLOAD_DIR}/${filename}"
+        if ! verify_archive "${DOWNLOAD_DIR}/${filename}"; then
+          echo "[error] archive still fails verification after re-download: ${filename}" >&2
+          return 1
+        fi
       fi
       extract_archive "${DOWNLOAD_DIR}/${filename}" "${dest}"
       if [[ "${KEEP_ARCHIVES}" == "0" ]]; then
@@ -1499,7 +1505,10 @@ download_and_extract() {
     echo "[warn] archive failed verification, retrying: ${filename}" >&2
     rm -f "${DOWNLOAD_DIR:?}/${filename}"
     download_file "${url}" "${DOWNLOAD_DIR}/${filename}" "${force_curl}"
-    verify_archive "${DOWNLOAD_DIR}/${filename}"
+    if ! verify_archive "${DOWNLOAD_DIR}/${filename}"; then
+      echo "[error] archive still fails verification after re-download: ${filename}" >&2
+      return 1
+    fi
   fi
   extract_archive "${DOWNLOAD_DIR}/${filename}" "${dest}"
   if [[ "${KEEP_ARCHIVES}" == "0" ]]; then

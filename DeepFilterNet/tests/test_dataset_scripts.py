@@ -1917,6 +1917,7 @@ def test_download_datasets_zenodo_range_download_bypasses_aria2_and_extracts_vct
                 "--no-download-air",
                 "--no-download-openair",
                 "--no-download-acousticrooms",
+                "--no-download-mtg-jamendo",
                 "--background-music-min-count",
                 "1",
                 "--no-keep-archives",

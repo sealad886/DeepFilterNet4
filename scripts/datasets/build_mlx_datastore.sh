@@ -335,9 +335,10 @@ Audio/cache options:
   --num-workers N             Parallel workers for cache building
   --shard-size N              Files per shard
   --min-duration SEC          Minimum clean-speech duration before skip/merge
+                              (default: same as --segment-length)
   --merge-short               Merge short speech files instead of skipping them
   --no-merge-short            Force skipping short speech files
-  --max-pending-gb N          Max in-flight async shard writer budget in GB
+  --max-pending-gb N          Max in-flight async shard writer budget in GB (default: 8)
 
 Optional clean-speech preprocessing:
   --preprocess-clean-speech   Enhance clean speech with DeepFilterNet3 before caching
@@ -551,7 +552,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --max-pending-gb)
-      CLI_MAX_PENDING_BYTES="$2"
+      CLI_MAX_PENDING_GB="$2"
       shift 2
       ;;
     --preprocess-clean-speech)
@@ -742,7 +743,7 @@ fi
 
 NUM_WORKERS="${CLI_NUM_WORKERS:-${NUM_WORKERS:-${NUM_WORKERS_DEFAULT}}}"
 SHARD_SIZE="${CLI_SHARD_SIZE:-${SHARD_SIZE:-${SHARD_SIZE_DEFAULT}}}"
-MAX_PENDING_BYTES="${CLI_MAX_PENDING_BYTES:-${MAX_PENDING_BYTES:-8}}"
+MAX_PENDING_GB="${CLI_MAX_PENDING_GB:-${MAX_PENDING_GB:-8}}"
 MIN_DURATION="${CLI_MIN_DURATION:-${MIN_DURATION:-${SEGMENT_LENGTH}}}"
 MERGE_SHORT="${CLI_MERGE_SHORT:-${MERGE_SHORT:-false}}"
 PREPROCESS_WORKERS="${CLI_PREPROCESS_WORKERS:-${PREPROCESS_WORKERS:-${PREPROCESS_WORKERS_DEFAULT}}}"
@@ -827,7 +828,7 @@ echo "SNR range:          [${SNR_MIN}, ${SNR_MAX}] dB"
 echo "RIR prob:           ${RIR_PROB}"
 echo "Workers:            ${NUM_WORKERS}"
 echo "Shard size:         ${SHARD_SIZE}"
-echo "Max pending budget: ${MAX_PENDING_BYTES} GB"
+echo "Max pending budget: ${MAX_PENDING_GB} GB"
 if [[ ${PREPROCESS_CLEAN_SPEECH} -eq 1 ]]; then
   echo "Preprocess speech:  enabled"
   echo "Preprocess model:   ${PREPROCESS_MODEL}"
@@ -863,6 +864,11 @@ fi
 if [[ ${FORCE_ALL} -eq 1 ]]; then
   echo "Force mode:         enabled (all phase completion checks disabled)"
 fi
+# Show available disk space for the output directory as a pre-flight check
+if df_output="$(df -h "${OUTPUT_DIR}" 2>/dev/null | tail -1)"; then
+  avail="$(echo "${df_output}" | awk '{print $4}')"
+  echo "Disk available:     ${avail} (on $(echo "${df_output}" | awk '{print $NF}'))"
+fi
 echo "=============================================="
 
 if [[ "${MERGE_SHORT}" != "true" && "${MIN_DURATION}" != "0" && "${MIN_DURATION}" != "0.0" ]]; then
@@ -897,11 +903,15 @@ if [[ ${INCLUDE_CHAINS} -eq 1 ]]; then
 
   CHAINS_SKIPPED=0
   if [[ ${FORCE_ALL} -eq 0 ]]; then
-    if verify_result="$(verify_file_list "${CHAINS_LIST}" 2>/dev/null)"; then
+    _verify_err="$(mktemp)"
+    temp_cleanup_paths+=("${_verify_err}")
+    if verify_result="$(verify_file_list "${CHAINS_LIST}" 2>"${_verify_err}")"; then
       read -r vfl_valid vfl_total vfl_time <<< "${verify_result}"
       printf '[skip] CHAINS preparation: %s files verified on disk (%ss)\n' \
         "$(printf '%d' "${vfl_valid}")" "${vfl_time}"
       CHAINS_SKIPPED=1
+    else
+      [[ -s "${_verify_err}" ]] && echo "[debug] CHAINS verify stderr:" >&2 && cat "${_verify_err}" >&2
     fi
   elif [[ ${FORCE_ALL} -eq 1 ]]; then
     echo "[force] CHAINS preparation: --force set, running phase"
@@ -932,6 +942,10 @@ echo "[timing] CHAINS preparation: $(phase_elapsed)"
 SECONDS=0
 if [[ ${PREPROCESS_CLEAN_SPEECH} -eq 1 ]]; then
   PREPROCESS_BASE_DIR_TO_USE="${PREPROCESS_BASE_DIR}"
+  # NOTE: compute_common_base_dir reads CLEAN_LIST_TO_USE, which is the merged
+  # list generated in Phase 1. Phase 1's skip path always regenerates the
+  # merged list, so this is safe — but don't move merged-list generation
+  # inside Phase 1's skip conditional without updating this dependency.
   if [[ ${INCLUDE_CHAINS} -eq 1 && ${PREPROCESS_BASE_DIR_WAS_SET} -eq 0 ]]; then
     PREPROCESS_BASE_DIR_TO_USE="$(compute_common_base_dir "${CLEAN_LIST_TO_USE}")"
   fi
@@ -941,7 +955,9 @@ if [[ ${PREPROCESS_CLEAN_SPEECH} -eq 1 ]]; then
     # Two-part check: (1) every input has a valid output file on disk,
     # AND (2) the output list itself is valid (all referenced files exist).
     # Both must pass — a crash can leave outputs on disk without a valid list.
-    if pp_result="$(check_preprocess_complete "${CLEAN_LIST_TO_USE}" "${PREPROCESS_OUTPUT_ROOT}" "${PREPROCESS_BASE_DIR_TO_USE}" 2>/dev/null)"; then
+    _pp_verify_err="$(mktemp)"
+    temp_cleanup_paths+=("${_pp_verify_err}")
+    if pp_result="$(check_preprocess_complete "${CLEAN_LIST_TO_USE}" "${PREPROCESS_OUTPUT_ROOT}" "${PREPROCESS_BASE_DIR_TO_USE}" 2>"${_pp_verify_err}")"; then
       if verify_file_list "${PREPROCESS_OUTPUT_LIST}" >/dev/null 2>&1; then
         read -r pp_covered pp_total pp_time <<< "${pp_result}"
         printf '[skip] Clean-speech preprocessing: %s/%s inputs have valid outputs (%ss)\n' \
@@ -952,6 +968,7 @@ if [[ ${PREPROCESS_CLEAN_SPEECH} -eq 1 ]]; then
         printf '[check] Clean-speech preprocessing: outputs exist but list is stale → running phase to regenerate list\n'
       fi
     else
+      [[ -s "${_pp_verify_err}" ]] && echo "[debug] preprocess verify stderr:" >&2 && cat "${_pp_verify_err}" >&2
       if [[ -n "${pp_result:-}" ]]; then
         read -r pp_covered pp_total pp_time <<< "${pp_result}"
         printf '[check] Clean-speech preprocessing: %s/%s inputs covered, %d pending → running phase\n' \
@@ -1031,7 +1048,9 @@ if [[ ${PREPARE_BACKGROUND_MUSIC} -eq 1 ]]; then
     if [[ ${FORCE_ALL} -eq 0 && ${MUSIC_PREPARE_OVERWRITE} -eq 0 ]]; then
       # Two-part check: (1) every input source has variant_0 on disk,
       # AND (2) the output list itself is valid.
-      if mp_result="$(check_music_prep_complete "${MUSIC_LIST_INPUT}" "${MUSIC_PREPARE_OUTPUT_ROOT}" "${MUSIC_PREPARE_BASE_DIR}" "${MUSIC_PREPARE_STYLE}" 2>/dev/null)"; then
+      _mp_verify_err="$(mktemp)"
+      temp_cleanup_paths+=("${_mp_verify_err}")
+      if mp_result="$(check_music_prep_complete "${MUSIC_LIST_INPUT}" "${MUSIC_PREPARE_OUTPUT_ROOT}" "${MUSIC_PREPARE_BASE_DIR}" "${MUSIC_PREPARE_STYLE}" 2>"${_mp_verify_err}")"; then
         if verify_file_list "${MUSIC_PREPARE_OUTPUT_LIST}" >/dev/null 2>&1; then
           read -r mp_covered mp_total mp_time <<< "${mp_result}"
           printf '[skip] Background-music preparation: %s sources fully prepared (%ss)\n' \
@@ -1041,6 +1060,7 @@ if [[ ${PREPARE_BACKGROUND_MUSIC} -eq 1 ]]; then
           printf '[check] Background-music preparation: outputs exist but list is stale → running phase to regenerate list\n'
         fi
       else
+        [[ -s "${_mp_verify_err}" ]] && echo "[debug] music-prep verify stderr:" >&2 && cat "${_mp_verify_err}" >&2
         if [[ -n "${mp_result:-}" ]]; then
           read -r mp_covered mp_total mp_time <<< "${mp_result}"
           printf '[check] Background-music preparation: %s/%s sources covered, %d pending → running phase\n' \
@@ -1110,7 +1130,7 @@ build_cmd=(
   --snr-max "${SNR_MAX}"
   --p-reverb "${RIR_PROB}"
   --resume
-  --max-pending-bytes "${MAX_PENDING_BYTES}"
+  --max-pending-bytes "${MAX_PENDING_GB}"
 )
 
 if [[ -f "${MUSIC_LIST_TO_USE}" ]]; then
