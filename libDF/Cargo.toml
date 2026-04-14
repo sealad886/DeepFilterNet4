@@ -99,7 +99,7 @@ realfft = "^3.1.0"
 itertools = "0.12"
 num-complex = { version = "^0.4", features = ["serde"] }
 log = { version = "0.4", features = ["std"], optional = true }
-rand = { version = "0.8", optional = true }
+rand = { version = "0.9", optional = true }
 rubato = { version = "0.14", optional = true }
 roots = { version = "0.0.7", optional = true }
 rand_xoshiro = { version = "0.6", optional = true }
@@ -125,7 +125,7 @@ tract-onnx = { version = "^0.21.4", optional = true }
 tract-pulse = { version = "^0.21.4", optional = true }
 tract-hir = { version = "^0.21.4", optional = true }
 flate2 = { version = "1.0.24", optional = true }
-tar = { version = "0.4.38", optional = true }
+tar = { version = "0.4.45", optional = true }
 wasm-bindgen = { version = "0.2.87", optional = true }
 getrandom = { version = "0.2", features = ["js"], optional = true }
 console_error_panic_hook = { version = "0.1.1", optional = true }
@@ -136,7 +136,7 @@ js-sys = { version = "0.3", optional = true }
 jemallocator = { version = "0.5.0", optional = true }
 
 [dev-dependencies]
-rand = "0.8"
+rand = "0.9"
 rstest = "0.19"
 env_logger = "0.11"
 log = { version = "0.4", features = ["std"] }
